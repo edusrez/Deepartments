@@ -1,6 +1,14 @@
 {
   "schemaVersion": 1,
   "note": "P2-HYGIENE (fb-91 class, 2026-09-06): the per-zone md5 MANIFEST the suite-integrity guard (scripts/r6-suite-guard.mjs) asserts against. It is a SNAPSHOT of the frozen file zones for change detection: each zone entry pins the file + its md5 span markers + the FROZEN zone md5. The guard compares the CURRENT source's zone md5 against this frozen value at START and END, closing the commit-drift observability gap documented in docs/VERIFICATION-LADDER.md §2 (a zone changed by a NEW HEAD leaves the worktree==HEAD mutation phases green — this manifest makes the drift fail loudly instead). The frozen value MUST stay byte-synced with the freeze lock literal asserted in test/tools-factory.test.js (the SAME CUT-4 zone; a re-freeze updates BOTH the test literal and this manifest in the SAME commit). CITATION RULE (2026-09-14, IPD builder-339): this header and the cut4 note below used to cite the freeze lock as `test/tools-factory.test.js:348`/`:458`/`:475`/`:488` — ALL FOUR were comments, never literals, and the asserted literal is the `assert.equal(md5, ...)` call. Cite the ASSERTION by its form (or by the zone/marker pair), never by line number: line numbers rotted twice here (the literal is the ONLY pinned site, and a bare number is not re-runnable).",
+  "snapshot": {
+    "class": "fb-1053 (this face) / fb-1063 (the sibling face in test/r6-ladder-flat.test.js): a guard that PHOTOGRAPHS a set and then compares it with a world that keeps MOVING. Such a guard can only honestly report drift AGAINST A PHOTO, so it must name WHAT the set is, WHICH side a zone lives on and WHEN the photo was taken.",
+    "set": "14 frozen file zones. 13 of the 14 live OUTSIDE the repo (the INSTALLED harness, /usr/lib/node_modules/@deepseek-ai/dsh) and exactly ONE is in-repo (cut4-tools-zone). The guard DERIVES each zone's side from its RESOLVED path instead of trusting a field written here, so the 13x spread cannot rot into a stale claim.",
+    "frozenAt": "Per zone: the date that zone's CURRENT frozen md5 FIRST ENTERED this manifest — the age of that photo. Substantiating command, from the repo root: git log --format=%cs --reverse -S '\"md5\": \"<value>\"' -- scripts/zone-md5-manifest.json | head -1. A zone WITHOUT frozenAt is a photo whose date is NOT declared, and the guard then SAYS SO instead of inventing a date.",
+    "driftSemantics": "IN-REPO zone drifting = a COMMIT drift: the freeze lock (the assert.equal(md5, …) literal of test/tools-factory.test.js, cited by FORM and never by line number) AND this manifest must move in the SAME commit. INSTALLED-HARNESS zone drifting = NOT a repo-source drift: it moves when the host APPLIES a patch or upgrades dsh, and its re-freeze discipline is the A-HARNESS PORT rule of patches/README.md (re-freeze the zone in the SAME change that applies the patch). ONE host event can therefore drift up to 13 zones at once — the radius the guard now prints.",
+    "notAttributed": "WHY 13 of the 14 zones pin files outside the repo is NOT declared here and must not be invented: the spread may be DELIBERATE pinning (noticing that the installed harness moved under a repo is a legitimate guard function). What IS declared is the EFFECT the guard must state: a red on the installed-harness side is not a red of the repo source, and the two must never read alike.",
+    "rowKinds": "The guard renders THREE row kinds, each naming WHAT the set is, WHICH side it lives on and WHEN the photo was taken: (1) PIN UNRESOLVABLE — the pinned file is not readable from THIS checkout (the out-of-repo zones are pinned by a checkout-root-relative escape, so they resolve only where the photo was taken); (2) drift on the INSTALLED-HARNESS side; (3) drift on the REPO side."
+  },
   "zones": [
     {
       "id": "cut4-tools-zone",
@@ -8,6 +16,7 @@
       "banner": "  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the",
       "close": "  }, 'deepartments: host-plane tools')",
       "md5": "c61523c4fa5a71b772441da05b2bcf58",
+      "frozenAt": "2026-09-11",
       "note": "The frozen CUT-4 factory zone (tools-factory.test.js — LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait + R11/R12 + BATCH-DRAIN + VALLE 09-07 HEAD-TOOLING: fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + VALLE 09-07 FB-198 T1: the send_message failedGround observer + 'prepared (wake-failed)' / failed:<ground> per-recipient envelope + the id-truth assertion; R-tooling/persistence + the delivery-result observability enrichment, never an engine behavior change). LOOP FASE 1 re-freeze (2026-09-08, fb-loop mission builder-197): the dshd-feedback tool span — feedbackRecordSchema + 5 LOOP fields (duplicate_of/related/triage_owner/resolution/frozen) + the feedbackDedupeCandidateSchema/feedbackCreateSchema + the create tool (search-before-create dedupe candidates + duplicate_of param + candidates in output) + the update tool (duplicado terminal/resolution/triage_owner/related/frozen params + QH authority extension) + the feedbackCreateRender/feedbackUpdateRender — md5 f919606a… → 9f233795da55d3e28c74b4629c9b2144. RE-FREEZE (2026-09-11, Lote 2 head-rotate lane): the in-span dept_head_rotate body moved INTENTIONALLY on two counts — (1) fb-737, the OLD retry doctrine replaced across the THREE surfaces (the tool description + the RUNNING refusal error path + the FINALIZATION-TAIL comment block, now the WHY-it-is-gone / one-observable-action rationale); (2) fb-735, the bounded deferral surface (`wait` / `waitMaxMs` / `waitedMs` parameters + the waitedMs-bearing refusal message). The rotation/archive/journal semantics are UNCHANGED and the fb-735 poll helper block lives OUTSIDE this span; md5 9f233795da55d3e28c74b4629c9b2144 → 63aeb795f694c8cad29b94dd1605402c, byte-synced with the test literal asserted in test/tools-factory.test.js (the `assert.equal(md5, ...)` call — cited by form, never by line number) in the SAME change (the header rule). RE-FREEZE fb-775 (2026-09-11, `dept_feedback_update` UNKNOWN-KEY REJECTION, IPD builder-314): ONE INTENTIONAL in-span change — the CLOSED-SET ORG validator of dept_feedback_update, reusing the canonical dept_memo_write pattern of the SAME package (boot.ts:612 MEMO_WRITE_EXPECTED_FIELDS + :623 memoWriteArgsViolations + :648 the expected-fields trailer, wired at :680): the FEEDBACK_UPDATE_EXPECTED_FIELDS const + the PURE feedbackUpdateArgsViolations (the `\"<key>\" is not a declared property (additionalProperties: false)` phrasing) + the expected-fields trailer + the FIRST-statement wiring in `execute` (BEFORE any authority check or transition computation) + the tool-description sentence. The defect it closes: an UNDECLARED key (`notes_qh` for `notas_qh`) travelled untouched into the WHITELIST reads and the TERMINAL transition to `duplicado` applied anyway, silently dropping the note — a FALSE SUCCESS over an IRREVERSIBLE close. The feedback transition semantics are otherwise UNCHANGED; md5 63aeb795f694c8cad29b94dd1605402c → ba3da7b71dc8d71a6db42361b015ccc6, byte-synced with the test literal asserted in test/tools-factory.test.js (by form, not by line number) in the SAME change (the header rule). RE-FREEZE (2026-09-11, LANE DEL SELLO / `reasonProvenance` LANE, IPD builder-322): the in-span `dept_head_rotate` tool body gained the PROVENANCE-OF-THE-CITED-FIGURE contract — the `reasonProvenance` parameter schema (the declared origin session of the figure the free-text `reason` cites) + the call-site threading of that declaration into the verifier + the ADDITIVE output fields (`reasonReferenceScope` / `reasonVerifiedToken` / `declaredReferenceSessionId`) and their render suffix + the `execute` result type. The reason-verification SEMANTICS for a caller that declares NOTHING are UNCHANGED (a legacy verdict is byte-identical); md5 ba3da7b71dc8d71a6db42361b015ccc6 → 8c82d814bd9bbad309688174564fc5d1, byte-synced with the test literal asserted in test/tools-factory.test.js (by form, not by line number) in the SAME change (the header rule). RE-FREEZE fb-831 (2026-09-11, LANE fb-831 OBSERVABILITY RENDERS, IPD builder-325 run token c5ee5274): ONE INTENTIONAL in-span change — the `dept_who` render published NONE of the schema-declared identity fields (`sessionId` is REQUIRED by the schema; `departmentId`/`role`/`jobId` are declared), so the render LIED about its own declared shape and the head could not classify the roster nor attribute a worker to its manager. The fix is an ADDITIVE per-row `{...}` tail (a present value VERBATIM; an ABSENT optional field DECLARED as `-`, never hidden); every pre-existing token (the m-64 state token, the R8 `handle:` suffix, `retired`, `YOU`), the C1 header prefix and the JSON result shape are byte-identical. The other two fb-831 loci (dept_monitor_list render + dept_job_list render, incl. the missing AUTO-FIRE `schedule`) live OUTSIDE this span and did NOT move this hash; md5 8c82d814bd9bbad309688174564fc5d1 → c61523c4fa5a71b772441da05b2bcf58, byte-synced with the test literal asserted in test/tools-factory.test.js (the `assert.equal(md5, ...)` call — by form, not by line number; this is the FIRST re-freeze after which the quoted `:488` had already gone stale) in the SAME change (the header rule)."
     },
     {
@@ -16,6 +25,7 @@
       "banner": "import { constants } from \"node:buffer\";",
       "close": "export { LocalFileSystem, LocalFileSystem as default };",
       "md5": "28f0034382fe7fe280c75a6a842e6c67",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT (VALLE 09-07, builder-173 cfc0afac): live fingerprint of the patchable runtime file (0.1.1-rc.2 pristine; the whole-file slice equals the whole-file md5). Applied state = 28f0034382fe7fe280c75a6a842e6c67 (patch dsh-fs-local-edit-dx-hints.patch). RE-FREEZE discipline: the host's apply changes this file — re-freeze this zone's md5 to the applied value in the SAME change that applies the patch (guard semantics: a drifted frozen value fails the next suite loudly, per design)."
     },
     {
@@ -24,6 +34,7 @@
       "banner": "import { FsError } from \"@deepseek-ai/dsh-fs\";",
       "close": "export { apply, name };",
       "md5": "aeec8df679864aaee3408b2cb8229f03",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = aeec8df679864aaee3408b2cb8229f03 (dsh-fs-observation-policy-not-observed-message.patch). Re-freeze on apply."
     },
     {
@@ -32,6 +43,7 @@
       "banner": "import z from \"@deepseek-ai/schemastery\";",
       "close": "export { Config, apply, inject, name };",
       "md5": "103b0b86d98f7429fd74d5b39109d50e",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = 103b0b86d98f7429fd74d5b39109d50e (dsh-tool-fs-edit-dx-remedies.patch). Re-freeze on apply."
     },
     {
@@ -40,6 +52,7 @@
       "banner": "import z from \"@deepseek-ai/schemastery\";",
       "close": "export { Config, DEFAULT_FETCH_MAX_OUTPUT_CHARS, DEFAULT_FETCH_MAX_TIMEOUT_MS, DEFAULT_WEB_TOOL_TIMEOUT_MS, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, apply, applyWebFetchTool, applyWebSearchTool, fetchMetaFromResult, fetchMetaFromValue, formatFetchOutput, formatSearchOutput, inject, name, parseFetchArgs, presentFetchCall, presentFetchResult, presentSearchCall, presentSearchResult, searchMetaFromResult, searchMetaFromValue };",
       "md5": "6ce6bc31cd19d78e87c405bc5defe89f",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = 6ce6bc31cd19d78e87c405bc5defe89f (dsh-tool-web-fetch-timeout-override.patch). Re-freeze on apply."
     },
     {
@@ -48,6 +61,7 @@
       "banner": "/**",
       "close": "//# sourceMappingURL=fetch.d.ts.map",
       "md5": "9b99076329c938fcf430e065dfd3663a",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live fingerprint (whole-file slice = file + final newline; no trailing newline in rc.2 emits). Whole-file md5 = 4359745b89cf3d3c59bd6b7cc0986dba; applied whole-file = cd99169769dcdb0c1db12a127fd5c055 (same patch). Re-freeze on apply."
     },
     {
@@ -56,6 +70,7 @@
       "banner": "/**",
       "close": "//# sourceMappingURL=index.d.ts.map",
       "md5": "669b20ee28c5bfd99266c2f16ddb1e7c",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live fingerprint. Whole-file md5 = fa96302d924d32de9df5298538f13093; applied whole-file = 7116efa682ce8b1978190af135fa8aa6. Re-freeze on apply."
     },
     {
@@ -64,6 +79,7 @@
       "banner": "/**",
       "close": "//# sourceMappingURL=types.d.ts.map",
       "md5": "f6e9edcad62205140f3c0ee176e5b6cb",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live fingerprint (WebFetchRequest.type seam). Whole-file md5 = 622e5d50256c200cc289dbfa35f0b43c; applied whole-file = f74e2a0b1f4356cfca6fbc157d684020 (dsh-web-fetch-request-timeout.patch). Re-freeze on apply."
     },
     {
@@ -72,6 +88,7 @@
       "banner": "import z from \"@deepseek-ai/schemastery\";",
       "close": "export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, anchorGlobPattern, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };",
       "md5": "18648e034d6449930c3f3efff561bf7b",
+      "frozenAt": "2026-09-11",
       "note": "A-HARNESS PORT: LIVE base is the path-not-found-applied state 576e8e66 (NOT pristine, NOT the 2026-09-02 fb-51 direct edit). Durable chain fingerprints: pristine (reconstructed rc.2) 9d92d79d19288c8c3d6f353ff4516923 -> c1ecd7ac43eaf7923af050eee8249673 (dsh-tool-fs-search-anchor-literal-glob.patch); live direct-edit -> applied via dsh-tool-fs-search-fb51-direct-edit-normalize.patch; VALLE 09-08 lane (path-not-found class): c1ecd7ac... -> 576e8e66b7a33e15fff58663c672272f (dsh-tool-fs-search-path-not-found.patch). VALLE 09-11 lane (fb-765 / D-765-R1, GREP SCOPE DECLARATION): 576e8e66 -> d8d4dd6860a6cd5102f5ba9a517a06ac (dsh-tool-fs-search-grep-scope-declaration.patch — the grep argv is UNCHANGED; every grep result, including a zero-match one, now declares its scope: how many files were searched and how many ripgrep's ignore rules / the dotfile rule excluded, measured by three bounded rg --files listing passes that never fail the search and report an unmeasurable count by error code instead of a silent 0). VALLE 09-11 lane (fb-444 + fb-458, NO-COLLAPSE class): d8d4dd68 -> 18648e034d6449930c3f3efff561bf7b (dsh-tool-fs-search-no-collapse.patch — classifyRunFailure's path-cause branch no longer discards the diagnosis it already held: the message NAMES the object whenever a name is available (byte-identical, measured delta +0 B) and, only when it cannot, rides with the stderr excerpt in the same shape the unrecognised branch already emitted; CODE channel UNCHANGED — SEARCH_PATH_NOT_FOUND stays correct, the fix is of MESSAGE, text-only, additive suffix). RE-FREEZED to the APPLIED value in the same change that delivers the patch: the live runtime matches it only after the host applies patches/dsh-tool-fs-search-no-collapse.patch; the suite guard flags this zone until then (documented re-freeze discipline)."
     },
     {
@@ -80,6 +97,7 @@
       "banner": "/**",
       "close": "//# sourceMappingURL=glob.d.ts.map",
       "md5": "bc168080198027e97eb1457baeaa544a",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live fb-51 direct-edit fingerprint. Whole-file md5 = 5d10ebee03e200ad16929e0291206efa; applied whole-file = ac12dc59628e934777f224164c5459fd (both patches). Re-freeze on apply."
     },
     {
@@ -88,6 +106,7 @@
       "banner": "import { createRequire } from \"node:module\";",
       "close": "export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, PROFILES_DIR, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot, composeEntries, healProfilesModuleFallback, initProfile, installFailLoud, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, mountRootInclude, readProfileManifest, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, watchUserPatchLayers, watchUserPatches, writeProfileManifest };",
       "md5": "a4f6123a217ac6f4e4cc7280a0d547dc",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = a4f6123a217ac6f4e4cc7280a0d547dc (dsh-app-boot-watch-patch-layers.patch). Re-freeze on apply."
     },
     {
@@ -96,6 +115,7 @@
       "banner": "/**",
       "close": "//# sourceMappingURL=index.d.ts.map",
       "md5": "f57d838970949e4e5807ee3d4a37111b",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live fingerprint. Whole-file md5 = 5ed502c91a525f05367730f28b10e160; applied whole-file = 027fdc1cc3b47982027997f7902e2150. Re-freeze on apply."
     },
     {
@@ -104,6 +124,7 @@
       "banner": "window.__ModuleLoader__.load({",
       "close": "//# sourceMappingURL=client.js.map",
       "md5": "af64a82c4ac1266677a1147e5618f38e",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT (VALLE 09-08 GUI history-load lane): live pristine fingerprint a4431e524948cd35a18ea56e3c9ede18 -> APPLIED af64a82c4ac1266677a1147e5618f38e (zone slice = whole file + final newline — the bundle emits NO trailing newline, so the zone md5 differs from the whole-file md5 4c5c610391116c6361a437db02cd2ad0; MD5 used by reapply-dsh-patches-a-harness.sh table). Patch dsh-client-ui-conversation-input-message-identity.patch (messageDefinition identity: fallback to event.seq when data.id is undefined — the batch-drain undefined-id collision class, explore-deep-58/9620de90). RE-FREEZED to the APPLIED value in the same change that delivers the patch: the live runtime matches it only after the host applies the patch; the suite guard flags this zone until then (documented re-freeze discipline)."
     },
     {
@@ -112,6 +133,7 @@
       "banner": "import { writeFileSync } from \"node:fs\";",
       "close": "export { resolveTelemetryPatch as a, prepareProfile as i, PROFILE_ROOT_FILENAME as n, runProfile as o, homePatchPath as r, INSTALL_ANCHOR as t };",
       "md5": "c359a2f3cb7d912b38bc1c2eb14b40a1",
+      "frozenAt": "2026-09-08",
       "note": "A-HARNESS PORT: live pristine fingerprint of the dsh CLI profile-boot chunk (hash-named; re-locate by content after upgrades). Applied = c359a2f3cb7d912b38bc1c2eb14b40a1 (dsh-cli-profile-boot-watch-patch-layers.patch). Re-freeze on apply."
     }
   ]

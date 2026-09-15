@@ -51,7 +51,19 @@ export const ZONE_CLOSE = "  }, 'deepartments: host-plane tools')"
  * changed by a NEW HEAD passes the worktree==HEAD mutation phases) and at END
  * (no drift may survive the run). `zoneMd5WithMarkers` is the generic slicer;
  * `zoneMd5(text)` stays the CUT-4 single-zone special case (back-compat with
- * the hermetic freeze test). */
+ * the hermetic freeze test).
+ *
+ * ⚠️ WHAT IT IS, SAID PLAINLY (fb-1053 / fb-1063 class, 2026-09-15, builder-352):
+ * this helper PHOTOGRAPHS a set (14 zones) and then compares it with a world
+ * that keeps MOVING — and 13 of the 14 zones pin files OUTSIDE the repo (the
+ * INSTALLED harness), so the honest verdict is never «there is drift», it is
+ * «there is drift AGAINST A PHOTO of <date>, ON <side>». The row therefore
+ * declares WHAT the set is, WHICH side a zone lives on (DERIVED from its
+ * resolved path) and WHEN the photo was taken (the manifest's per-zone
+ * `frozenAt`), and it names the radius (how many frozen zones ONE host event
+ * can move at once). The fix is of the MESSAGE, never of the threshold: every
+ * row stays a violation, because the spread may be DELIBERATE pinning and
+ * demoting it to `informative` would be an unasked-for behavior change. */
 export function zoneMd5WithMarkers(text, banner, close) {
   const first = text.indexOf(banner)
   const last = text.indexOf(close)
@@ -94,23 +106,74 @@ export function loadZoneManifest() {
   }
 }
 
+/** The pinned zone's TARGET and SIDE — DERIVED from the resolved path, never
+ * from a field the manifest declares (a hand-written side rots with the set).
+ * `repo` = the pinned file lives INSIDE this checkout; `installed-harness` =
+ * it lives OUTSIDE it (the installed @deepseek-ai/dsh runtime, pinned by a
+ * checkout-root-relative escape, so it resolves only from the location the
+ * photo was taken at). */
+export function zoneTarget(zone) {
+  const abs = path.resolve(REPO_ROOT, zone.file)
+  const inRepo = abs === REPO_ROOT || abs.startsWith(REPO_ROOT + path.sep)
+  return { abs, side: inRepo ? 'repo' : 'installed-harness' }
+}
+
+/** The RADIUS of the frozen set: how many of its zones live OUTSIDE the repo,
+ * i.e. how many ONE host event (a patch apply / a dsh upgrade) can drift at
+ * once. Derived from the manifest's own paths. */
+export function manifestRadius(manifest) {
+  const total = manifest.zones.length
+  const outside = manifest.zones.filter((z) => zoneTarget(z).side === 'installed-harness').length
+  return { total, outside, inside: total - outside }
+}
+
+/** The DECLARED age of a zone's photo — the manifest's per-zone `frozenAt`
+ * (the date that zone's frozen md5 first entered the manifest). Never
+ * invented: an undeclared date is REPORTED AS UNDECLARED in the row. */
+function photoOf(zone) {
+  return typeof zone.frozenAt === 'string' && zone.frozenAt.length > 0
+    ? `photo frozen ${zone.frozenAt}`
+    : 'photo date NOT DECLARED (add `frozenAt` to this manifest entry)'
+}
+
 /** Zone-vs-manifest drift rows for the CURRENT on-disk files ([] = every
  * manifest zone matches its frozen md5). Reads each zone's file fresh; a
  * missing/unreadable file or a missing marker span is reported as a drift row
- * (the snapshot cannot be verified). PURE-ish (file reads, no writes). */
+ * (the snapshot cannot be verified). PURE-ish (file reads, no writes).
+ *
+ * Every row DECLARES THE CONTRACT (fb-1053 class): `[<side>]` and the photo
+ * date, plus the radius. THREE row kinds, never conflated: (1) PIN
+ * UNRESOLVABLE (the frozen set is a photo of an INSTALL as it was — the file
+ * simply is not there from this checkout, which is not a drift of any file);
+ * (2) INSTALLED-HARNESS DRIFT (moves on patch-apply/upgrade, re-freeze rule in
+ * patches/README.md, NOT a repo-source drift); (3) REPO-SIDE DRIFT (a COMMIT
+ * drift: the freeze lock and this manifest must move together). */
 export function diffManifestZones(manifest) {
   const out = []
+  const radius = manifestRadius(manifest)
+  const radiusText = `${radius.outside} of ${radius.total} frozen zones live OUTSIDE the repo (the INSTALLED harness) — ONE host patch-apply/upgrade event can drift up to ${radius.outside} of them at once`
   for (const zone of manifest.zones) {
+    const { abs, side } = zoneTarget(zone)
+    const head = `zone "${zone.id}" [${side}] ${photoOf(zone)}`
     let text
     try {
-      text = readFileSync(path.join(REPO_ROOT, zone.file), 'utf8')
-    } catch {
-      out.push(`zone "${zone.id}" file unreadable (${zone.file}) — the frozen snapshot cannot be verified`)
+      text = readFileSync(abs, 'utf8')
+    } catch (err) {
+      out.push(`${head} — PIN UNRESOLVABLE: the pinned file is not readable from THIS checkout (${abs}; the manifest path "${zone.file}" resolves against the checkout root) [${err?.code ?? 'unknown read failure'}] — this row is NOT a drift of any file: ${side === 'repo' ? 'a REPO-side pin that cannot be read means the file was MOVED or DELETED in this checkout (or the manifest path is wrong) — align the path/markers first, then re-freeze.' : 'the frozen SET is a photo of the INSTALL as it was when the photo was taken, and the out-of-repo zones are pinned by a checkout-root-relative escape that resolves only FROM that location (a git worktree is a DIFFERENT root) — check the checkout location first, then re-freeze.'} Radius: ${radiusText}.`)
       continue
     }
     const cur = zoneMd5WithMarkers(text, zone.banner, zone.close)
-    if (cur === null) out.push(`zone "${zone.id}" markers not found in ${zone.file} (banner/close drifted?)`)
-    else if (cur !== zone.md5) out.push(`zone "${zone.id}" md5 ${cur.slice(0, 8)}… != frozen ${zone.md5.slice(0, 8)}… — the zone drifted by COMMIT (the freeze test tools-factory.test.js AND this manifest must move in the SAME commit)`)
+    if (cur === null) {
+      out.push(`${head} — MARKERS GONE: the banner/close span this photo slices is no longer present in ${abs} (banner/close drifted?) — the comparison is impossible, which is NOT the same as a drift of the frozen value. Fix the span markers of this manifest entry, then re-freeze. Radius: ${radiusText}.`)
+      continue
+    }
+    if (cur !== zone.md5) {
+      out.push(
+        side === 'repo'
+          ? `${head} — REPO-SIDE DRIFT: the zone's md5 is now ${cur.slice(0, 8)}… against the frozen ${zone.md5.slice(0, 8)}… — this zone's file lives INSIDE this checkout, so the drift IS a COMMIT drift: the freeze lock (the assert.equal(md5, …) literal of test/tools-factory.test.js, cited by FORM and never by line number) AND this manifest must move in the SAME commit as the source change.`
+          : `${head} — INSTALLED-HARNESS DRIFT: the zone's md5 is now ${cur.slice(0, 8)}… against the frozen ${zone.md5.slice(0, 8)}… — this zone's file lives OUTSIDE the repo (${abs}), so this is NOT a drift of the repo source: the value moves when the host APPLIES a patch or upgrades dsh, and its re-freeze discipline is the A-HARNESS PORT rule of patches/README.md (re-freeze the zone in the SAME change that applies the patch). Radius: ${radiusText}.`,
+      )
+    }
   }
   return out
 }
@@ -213,7 +276,11 @@ export async function runGuard(argv) {
     manifest: manifest !== undefined
       ? {
           file: ZONE_MANIFEST_REL,
-          zones: manifest.zones.map((z) => ({ id: z.id, file: z.file, md5: z.md5 }))
+          // The manifest is a PHOTO of a set (fb-1053 class): report its
+          // RADIUS explicitly, so a reader of the report knows that ONE host
+          // event can drift up to `outside` of the frozen zones at once.
+          radius: manifestRadius(manifest),
+          zones: manifest.zones.map((z) => ({ id: z.id, file: z.file, md5: z.md5, frozenAt: z.frozenAt ?? null, side: zoneTarget(z).side }))
         }
       : 'unavailable',
     mutationEvents: events.length,
