@@ -8227,7 +8227,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // (deepartments.pacing) when composed; the pure fallback stays R6.
     const pacingWindowTick = pacingWindowFromConfig(deps.config?.org?.pacing)
     const valley = deps.pacingService !== undefined
-      ? !deps.pacingService.isPeakAt(new Date(nowMs))
+      ? !deps.pacingService.isPeakAt(new Date(nowMs), pacingWindowTick)
       : !isPeakAt(new Date(nowMs), pacingWindowTick)
     let workRegisterIdleFindings: HealthFinding[] = []
     if (workRegisterIdleEnabled && deps.workRegisterPath !== undefined && deps.hostRunning !== undefined) {
@@ -8509,7 +8509,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         // through the substitutable pacing policy when composed (the pure
         // fallback stays R6).
         const franja: 'peak' | 'valle' = deps.pacingService !== undefined
-          ? (deps.pacingService.isPeakAt(new Date(nowMs)) ? 'peak' : 'valle')
+          ? (deps.pacingService.isPeakAt(new Date(nowMs), pacingWindow) ? 'peak' : 'valle')
           : (isPeakAt(new Date(nowMs), pacingWindow) ? 'peak' : 'valle')
         const prev = readPacingState(deps.stateDir)
         if (prev === undefined) {
@@ -8529,7 +8529,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
               deps.logger?.warn('[deepartments] system-health: pacing transition detected but no live host to notify — skip (retries on the next tick)')
             } else {
               const pacingState = deps.pacingService !== undefined
-                ? deps.pacingService.pacingStateAt(new Date(nowMs)) as unknown as { peak: boolean; untilMs: number; untilHhMm: string; span: string }
+                ? deps.pacingService.pacingStateAt(new Date(nowMs), pacingWindow) as unknown as { peak: boolean; untilMs: number; untilHhMm: string; span: string }
                 : pacingStateAt(new Date(nowMs), pacingWindow)
               // The VALLE notice's N: the WORK-REGISTER pending queue when
               // legible (best-effort; unreadable → the count is omitted).

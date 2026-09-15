@@ -939,7 +939,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     // policy when composed (service-first); absent → the pure module fallback
     // (R6, byte-identical).
     const state = deps.pacingService !== undefined
-      ? deps.pacingService.pacingStateAt(new Date(pacingNow()))
+      ? deps.pacingService.pacingStateAt(new Date(pacingNow()), pacingWindowFromConfig(deps.pacing))
       : pacingStateAt(new Date(pacingNow()), pacingWindowFromConfig(deps.pacing))
     return formatFranjaLine(state)
   }

@@ -35,7 +35,11 @@
           # is notified ONCE per transition (durable bus + interrupt). The PURE
           # UTC formula MIRRORS dsh-key-pooler (SEPARATE repo, crossed by
           # comment): PEAK ⇔ weekday(UTC) Mon-Fri ∧ UTC hour ∈ {1,2,3,6,7,8,9},
-          # edge buffer 30 min on both boundaries (request start/finish bias).
+          # edge buffer CONFIGURED per composition — see `peakBufferMs` BELOW:
+          # the CODE default is 30 min on both boundaries (request start/finish
+          # bias), but THIS row sets it to 0 (owner 2026-09-11), so the edge is
+          # the NOMINAL hour here (01:00/04:00/06:00/10:00 UTC), NOT ±30 min.
+          # The buffer is a CONFIG value, never a fixed property of this window.
           # Explicit defaults below (CODE-DEFAULT-CAPABLE): ABSENT keys → the
           # same code defaults; `enabled: false` restores the pre-pacing
           # behavior (no franja section in the wake pack, no notices).
