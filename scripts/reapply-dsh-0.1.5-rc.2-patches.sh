@@ -647,7 +647,7 @@ row_pi_ai_parse() {
 }
 
 # ===========================================================================
-# ROW 17 — dsh-session-persistence-jsonl: parallel listArtifacts
+# ROW 17 — dsh-session-persistence-jsonl: parallel listArtifacts (0.1.1 form)
 #   fichero: node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
 #   measured 0.1.5 pre: 9f672813da6eafbd8f9f7625c0548b3d
 #   NOTE: the patch header path is NESTED
@@ -655,6 +655,8 @@ row_pi_ai_parse() {
 #   was written for the 0.1.1 GLOBAL tree; the 0.1.5 tree is FLAT, so it must be
 #   applied with `-p1` FROM the tree root (measured: hunk#1 fuzz-applies,
 #   hunk#2 REJECTS -> partial). NOT ported.
+#   => This row is KEPT at CONTEXT-ABSENT, UNFORCED (mission condition 2). The
+#      SAME effect is delivered by ROW 17B below, re-anchored to the 0.1.5 form.
 # ===========================================================================
 row_session_persist() {
   local rel="node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js"
@@ -672,6 +674,76 @@ row_session_persist() {
     report_applied dsh-session-persistence-list-parallel
   else
     echo "CONTEXT-ABSENT dsh-session-persistence-list-parallel — hunk#2 rejects in the flat 0.1.5 tree; NOTHING WRITTEN" >&2
+    ABSENT=$((ABSENT+1)); return 1
+  fi
+}
+
+# ===========================================================================
+# ROW 17B — dsh-session-persistence-jsonl: bounded-concurrency listArtifacts,
+#           RE-ANCHORED to the 0.1.5 FLAT form (the re-port of ROW 17's effect)
+#   fichero: node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
+#   md5: pre 9f672813da6eafbd8f9f7625c0548b3d -> post 6fc06bfb4fb64ce664331a80af5f9c0f
+#   SOURCE OF THE PRE (in-scope, byte-exact): published npm tarball
+#     @deepseek-ai/dsh-session-persistence-jsonl/-/dsh-session-persistence-jsonl-0.1.5-rc.2.tgz
+#     (tarball md5 ff2a41ae9258335592aad6ade2fd4ba4); its package/lib/index.js is
+#     9f672813… — measured, and corroborated by ROW 17's own header above.
+#   WHICH ROWS TOUCH THIS FILE: ROW 17 (17B's own predecessor) and 17B only.
+#     ROW 17 is CONTEXT-ABSENT on 0.1.5 and returns 1 at its context grep (:664)
+#     without ever reaching guarded_patch, so it cannot invalidate this PRE.
+#     NO other row resolves to this package. MEASURED, not assumed.
+#   ENGINE: the proven guarded_patch pattern (--dry-run FIRST, apply ONLY if
+#     EVERY hunk lands) + a PRESENCE GATE for idempotency + an EXACT PRE md5 check.
+#   -p1 FROM THE PACKAGE DIRECTORY, header paths `a/lib/index.js`/`b/lib/index.js`
+#     (the ROW 3B shape): the 0.1.5 tree is FLAT and the 0.1.1 nested header is
+#     NOT used here — that nested-path row stays CONTEXT-ABSENT above.
+#   IDEMPOTENCY GATE: `LOCAL PATCH (deepartments): bounded-concurrency session
+#     probe` is this patch's own signature and its ABSENCE is what makes the patch
+#     applicable, so its PRESENCE short-circuits to NOOP. Never re-apply this file
+#     blindly (raw `patch` is NOT idempotent on these files — MEASURED elsewhere
+#     in this script; MEASURED for THIS file too: run 2 would ADD A SECOND patch
+#     body on top of the first and leave a .rej).
+#   EFFECT (measured by EXECUTION, not by exit code): the resulting listArtifacts
+#     probes the session directories with up to 64 in flight (observed
+#     max-in-flight 64) against the pristine's serial 1 — the 2 870 ms -> 794 ms
+#     (3,6x) face on 2 420 sessions. Re-measured on a 200-dir/5 ms fixture:
+#     1 092 ms serial -> 23,9 ms patched, with the directory ORDER and the
+#     duplicate-id message BYTE-IDENTICAL to the pristine.
+# ===========================================================================
+row_session_persist_reanchor() {
+  local dir="${N}/@deepseek-ai/dsh-session-persistence-jsonl" rel="lib/index.js"
+  local F="${dir}/${rel}"
+  local PRE=9f672813da6eafbd8f9f7625c0548b3d
+  local POST=6fc06bfb4fb64ce664331a80af5f9c0f
+  # -- presence gate FIRST (idempotency): already-applied -> NOOP, no write ----
+  if grep -q 'LOCAL PATCH (deepartments): bounded-concurrency session probe' "${F}"; then
+    # POST fingerprint too: a file carrying the marker but not the declared bytes
+    # is a silent drift, not a NOOP.
+    if [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      echo "NOOP         dsh-session-persistence-list-parallel-0.1.5-reanchor (already applied)"
+      NOOP=$((NOOP+1))
+    else
+      echo "WARN         dsh-session-persistence-list-parallel-0.1.5-reanchor — the bounded-concurrency marker is present but md5 $(md5_of "${F}") != ${POST}; inspect" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+    return 0
+  fi
+  # -- exact base check: the patch declares an EXACT PRE md5. Any other file is
+  #    not this patch's base -> declare, do NOT force (the anti-drag rule).
+  if [[ "$(md5_of "${F}")" != "${PRE}" ]]; then
+    echo "CONTEXT-ABSENT dsh-session-persistence-list-parallel-0.1.5-reanchor — md5 $(md5_of "${F}") is not the declared PRE ${PRE}; NOT forcing" >&2
+    ABSENT=$((ABSENT+1)); return 1
+  fi
+  if guarded_patch "${dir}" "${PATCH_DIR}/dsh-session-persistence-list-parallel-0.1.5-reanchor.patch"; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      report_applied dsh-session-persistence-list-parallel-0.1.5-reanchor
+    elif [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      report_applied dsh-session-persistence-list-parallel-0.1.5-reanchor
+    else
+      echo "FAIL dsh-session-persistence-list-parallel-0.1.5-reanchor post-md5 $(md5_of "${F}") != ${POST}" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+  else
+    echo "CONTEXT-ABSENT dsh-session-persistence-list-parallel-0.1.5-reanchor — a hunk rejects against the 0.1.5 form; NOTHING WRITTEN" >&2
     ABSENT=$((ABSENT+1)); return 1
   fi
 }
@@ -694,6 +766,7 @@ run_row row_app_boot;        run_row row_client_ui
 run_row row_llm_deepseek;    run_row row_compaction
 run_row row_pi_ai_overflow;  run_row row_pi_ai_parse
 run_row row_session_persist
+run_row row_session_persist_reanchor
 
 echo
 echo "### summary: applied=${APPLIED} would-apply=${WOULD} noop=${NOOP} context-absent/skipped=${ABSENT} failed=${BAD}"
