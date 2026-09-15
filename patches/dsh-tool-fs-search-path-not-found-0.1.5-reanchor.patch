@@ -1,0 +1,200 @@
+# === dsh-departments patch: dsh-tool-fs-search PATH-NOT-FOUND — RE-ANCHORED to
+#     the 0.1.5 closure form (lane 3, run token 27255028) ===
+#
+# fichero
+#   node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js
+#
+# FINGERPRINTS (md5)
+#   antes   a182162dd5ef7d2cc299a7d23015c1db
+#   después f3b4e74d8ec46d6b4971d0dc151dc4dc
+#
+# SOURCE OF THE MEASURED PRE (the whole chain, each step md5-verified in-scope)
+#   The PRE is NOT a pristine upstream artifact and NOT the anchor state: it is
+#   the state the tree is ACTUALLY in after lanes 1/2 of this same order have
+#   moved it. It was REPRODUCED byte-exactly from public/scoped inputs:
+#     1. the published npm tarball, downloaded in-scope and byte-exact:
+#        https://registry.npmjs.org/@deepseek-ai/dsh-tool-fs-search/-/dsh-tool-fs-search-0.1.5-rc.2.tgz
+#        -> pristine lib/index.js md5 a143a3d7a0f8533f3f13e40bfe2040c2
+#     2. patches/dsh-tool-fs-search-anchor-literal-glob.patch   (3/3 hunks clean)
+#        -> md5 36bb46d4112901c20bd213d38c088303
+#     3. patches/dsh-tool-fs-search-grep-scope-reclosure.patch   (8/8 hunks clean)
+#        -> md5 a182162dd5ef7d2cc299a7d23015c1db   == the declared PRE above
+#   Every hop was verified by md5, and the a182162d… value coincides with the
+#   one the HOST measured on the real tree — the chain is confirmed, not assumed.
+#
+# DIRECT PORT OR RE-PORT WITH ADAPTATION?
+#   RE-PORT WITH ADAPTATION. The sibling patch
+#   patches/dsh-tool-fs-search-path-not-found.patch was written against the
+#   0.1.1-era file; MEASURED against this PRE it is 3-out-of-6 hunks REJECTED
+#   (`patch -p1 -f --dry-run`: Hunk #1 FAILED at 1, #5 FAILED at 819,
+#   #6 FAILED at 1128). The three survivors (#2/#3/#4) are the EFFECT CORE and
+#   are ported VERBATIM. The three rejects are adapted as follows, each for a
+#   reason that is measured, not guessed:
+#     - hunk #1 (the `node:path` import) is DROPPED, not adapted: it added
+#       `join` to the import list, but the anchor patch has ALREADY put `join`
+#       in the import list (PRE :3 reads
+#       `import { isAbsolute, join, parse, relative, sep } from "node:path";`).
+#       The hunk is therefore already SATISFIED in the PRE — re-adding join
+#       would be a no-op that patch correctly refuses. This is the one place a
+#       naive re-port would have produced a duplicate binding.
+#     - hunk #5 (the `tool:glob` systemPrompt) is RE-ANCHORED: 0.1.5 converted
+#       the section from a statically-built string to a scope-dependent CLOSURE
+#       (`text: ({ scope }) => …`). The SENTENCE is conserved verbatim; only the
+#       anchor moved. NB the grep-scope RE-CLOSURE patch re-anchored the
+#       `tool:grep` leg of the same trio but did NOT touch this `tool:glob` leg,
+#       so without this hunk the trio would be declared on one tool and not the
+#       other.
+#     - hunk #6 (the `tool:grep` systemPrompt) is DROPPED as already satisfied:
+#       the reclosure patch has ALREADY installed the trio sentence on the grep
+#       closure (PRE :1261). Re-applying it would be a duplicate.
+#   Net: 4 hunks, all of them the effect plus the one documentation leg that was
+#   still missing. Nothing is invented; the two code hunks are byte-for-byte the
+#   siblings of the parent patch's #2/#3/#4.
+#
+# WHAT THIS FIXES (the reason this lane exists)
+#   A path that does not exist produces an AMBIGUOUS ZERO: ripgrep exits 2 and
+#   the tool collapsed that into a generic SEARCH_FAILED carrying ripgrep's own
+#   raw stderr — MEASURED on the PRE by EXECUTION (not by exit code), see below.
+#   This patch gives that zero a CODE, so "it does not exist" stops being
+#   indistinguishable from "the search broke":
+#     (a) a path-cause PRE-CHECK in runRipgrep — a stat over the `-- <path>`
+#         target resolved against the session cwd, thrown BEFORE rg spawns.
+#         Targets carrying glob metacharacters are skipped (they are patterns,
+#         not literal paths, and the caller may legitimately name a path that
+#         does not exist yet).
+#     (b) a FALLBACK classification of rg's own IO stderr
+#         (`no such file or directory`) into the SAME SEARCH_PATH_NOT_FOUND
+#         branch, for the cases the pre-check deliberately skipped.
+#     (c) the SEARCH_INVALID_PATTERN wording is tightened to
+#         `pattern rejected: <one line>` — the raw multi-line rg stderr body is
+#         no longer embedded (q-i-107). The CODE is unchanged; only the message.
+#   The exit-1 empty result ('No matches found') is UNTOUCHED, and that is a
+#   deliberate line: a missing path and a no-match search are now separable BY
+#   CODE (SEARCH_PATH_NOT_FOUND vs noMatches), which is the fb-51
+#   «un 0 no concluye no-existe» principle expressed at the type level.
+#
+# EFFECT MEASURED BY EXECUTION (run token 27255028)
+#   The REAL lib/index.js of each tree was imported and the REAL exported
+#   runRipgrep() was called against the REAL packaged ripgrep
+#   (@vscode/ripgrep) through the REAL cordis subprocess service
+#   (@deepseek-ai/dsh-subprocess-local), reading the thrown SearchError `.code`.
+#   Harness: <dept-workspace>/scratch/b381-pnf-27255028/harness/effect-probe-27255028.mjs
+#     PRE  a182162d : nonexistent path -> SEARCH_FAILED
+#                     ("grep search failed (exit 2): rg: <path>: IO error for
+#                      operation on <path>: No such file or directory (os error 2)")
+#     POST f3b4e74d : nonexistent path -> SEARCH_PATH_NOT_FOUND
+#                     ("grep: path not found: <path>")
+#   CONTROLS (same run, same harness):
+#     - a NON-path error keeps its OWN code: invalid regex `(` ->
+#       SEARCH_INVALID_PATTERN on BOTH trees (the pre-check does not swallow it).
+#     - a path that EXISTS is not caught by the pre-check: exit 0 with matches.
+#     - the ambiguous zero is preserved: an existing path with no match is still
+#       exit-1 -> noMatches (NOT an error) on both trees.
+#   The `glob` tool is covered too (its argv also carries `-- <path>`; MEASURED
+#   against the real buildGlobCommand, not assumed):
+#     PRE -> SEARCH_FAILED ; POST -> SEARCH_PATH_NOT_FOUND
+#   METACHARACTER SKIP (MEASURED, it is the one deliberate blind spot): a target
+#   carrying `* ? [ ] { }` is NOT pre-checked, so a glob-looking target still
+#   reaches ripgrep and keeps its normal empty-result behaviour on both trees
+#   (`--files --glob=*nonexistent*` -> exit 1 -> noMatches, NOT an error). The
+#   skip exists because such a target is a PATTERN, not a literal path, and
+#   pre-checking it would turn a legitimate "no match" into a path error.
+#   NOTE ON METHOD: the effect is read from the thrown error's `.code`, never
+#   from output byte counts — ripgrep's `--json` carries an `elapsed_total`
+#   timing field that varies run-to-run (MEASURED: 812/812/812 bytes for the
+#   same tree while the embedded human duration moved 0.005210s -> 0.008490s),
+#   so a byte-count comparison would have invented a difference that is not
+#   semantic.
+#
+# SIDE EFFECT ON THE grep-scope TRIO (verified, not assumed)
+#   The reclosure patch conserves the trio's path-not-found sentence but declares
+#   it FORWARD-DECLARING, because 0.1.5 did not yet produce that code. THIS patch
+#   is the effect that sentence was waiting for: after it, the grep leg's
+#   `an error "path not found: <path>" means the search path does not exist` is
+#   SATISFIED BY THE RUNTIME (MEASURED above). The other two legs were already
+#   true. The pre-existing forward-declaration is therefore DISCHARGED, not
+#   rewritten: this patch does not touch that sentence.
+#
+# WHAT THIS PATCH DOES NOT COVER (declared)
+#   - It does NOT port `no-collapse` and does not make it reachable. `no-collapse`
+#     edits the COLLAPSED literal of the parent patch's own fallback
+#     (`${searchTarget ?? (... ?? "the search target")}`); the parent patch could
+#     not land in 0.1.5, so that base still does not exist and the tree row stays
+#     "unreachable in 0.1.5". This patch is INDEPENDENT of it and does not
+#     unblock it.
+#   - It does NOT replace or repair the OLD row
+#     patches/dsh-tool-fs-search-path-not-found.patch. That row KEEPS reporting
+#     CONTEXT-ABSENT in the tree script and is NOT forced (anti-drag rule).
+#   - It does NOT touch buildGrepCommand / buildGlobCommand ARGV: no `--` is
+#     added or removed. It only READS the existing `-- <path>` element.
+#   - It does NOT touch lib/types/*.d.ts, the export list, or the zone md5
+#     manifest (the HOST owns the latter).
+#   - It does NOT change the exit-1 zero-result path, nor add a code for a
+#     nonexistent path on the `glob` tool's argv beyond what buildGlobCommand
+#     already emits (glob DOES carry `-- <path>`, so the pre-check covers it too;
+#     this was observed in the argv-shape probe, not asserted).
+#
+# IDEMPOTENCY: NOT a property of this file. Idempotency is enforced by the
+#   SCRIPT ROW's presence gate (a `grep -q` for this patch's own signature
+#   `searchTarget` + `SEARCH_PATH_NOT_FOUND`), which short-circuits on the POST
+#   state. Never re-apply this file blindly.
+#
+# LINE NUMBERS are those of the PRE state (a182162d…), i.e. the anchor +
+#   grep-scope-reclosure state — NOT the pristine tarball's and NOT 0.1.1's.
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -83,12 +83,22 @@
+ * no shell layer, so an exit 127 or shell "command not found" text cannot
+ * occur — a launch failure rejects at spawn (see {@link runRipgrep}).
+ */
+-function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated) {
++function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated, searchTarget) {
+ 	const stderr = stderrExcerpt(stderrText, stderrTruncated);
+-	if (/regex parse error|error parsing glob/i.test(stderr)) return new SearchError(`${toolName} pattern rejected by ripgrep: ${stderr}`, "SEARCH_INVALID_PATTERN");
++	if (/regex parse error|error parsing glob/i.test(stderr)) return new SearchError(`${toolName} pattern rejected: ${patternRejectionLine(stderr)}`, "SEARCH_INVALID_PATTERN");
++	if (/no such file or directory|IO error for operation on .*no such file/i.test(stderr)) return new SearchError(`${toolName}: path not found: ${searchTarget ?? (/rg: ([^:]+): IO error/i.exec(stderr)?.[1] ?? "the search target")}`, "SEARCH_PATH_NOT_FOUND");
+ 	return new SearchError(`${toolName} search failed (exit ${exitCode})${stderr.length > 0 ? `: ${stderr}` : ""}`, "SEARCH_FAILED");
+ }
+ /**
++* The one-line cause of a ripgrep pattern rejection, WITHOUT the raw stderr
++* body: the offending regex, its caret line and the multi-line frame are
++* dropped so the model sees a single cause sentence (q-i-107).
++*/
++function patternRejectionLine(stderr) {
++	const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
++	return lines.find((line) => /^error:/i.test(line)) ?? lines[0] ?? "invalid pattern";
++}
++/**
+ * Acquire the COMPLETE raw stdout of a finished run, enforcing
+ * `rawOutputMaxBytes` on the in-memory transport. A truncated result means the
+ * subprocess seam could not retain complete stdout within the requested
+@@ -165,6 +175,11 @@
+ async function runRipgrep(ctx, exec, toolName, argv, rawOutputMaxBytes, graceMs, stderrMaxBytes) {
+ 	if (exec.signal.aborted) throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, "SEARCH_ABORTED");
+ 	const workdir = exec.agent?.session.header.cwd ?? process.cwd();
++	const dashDash = argv.indexOf("--");
++	const searchTarget = dashDash === -1 ? void 0 : argv[dashDash + 1];
++	if (searchTarget !== void 0 && !/[*?[\]{}]/.test(searchTarget) && !existsSync(isAbsolute(searchTarget) ? searchTarget : join(workdir, searchTarget))) {
++		throw new SearchError(`${toolName}: path not found: ${searchTarget}`, "SEARCH_PATH_NOT_FOUND");
++	}
+ 	let handle;
+ 	try {
+ 		handle = ctx.subprocess.spawn({
+@@ -197,7 +212,7 @@
+ 	if (stdout === void 0 || stderr === void 0) throw new SearchError(`${toolName} search command produced no collected output streams`, "SEARCH_FAILED");
+ 	if (exec.signal.aborted) throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, "SEARCH_ABORTED");
+ 	if (outcome.signal !== null || outcome.exitCode === null) throw new SearchError(`${toolName} search command was killed by signal ${outcome.signal ?? "(unknown)"}`, "SEARCH_FAILED");
+-	if (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy);
++	if (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy, searchTarget);
+ 	return {
+ 		stdout: completeStdout(toolName, stdout, rawOutputMaxBytes),
+ 		noMatches: outcome.exitCode === 1,
+@@ -812,7 +827,7 @@
+ 	ctx.systemPrompt.section({
+ 		name: "tool:glob",
+ 		order: ctx.systemPrompt.getSectionOrder("TOOL_GLOB"),
+-		text: ({ scope }) => ctx.tools.get("glob", scope) === void 0 ? "" : `Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance}`
++		text: ({ scope }) => ctx.tools.get("glob", scope) === void 0 ? "" : `Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance} An empty result means the pattern matched nothing under an existing path; an error "path not found: <path>" means the search path does not exist; "pattern rejected" means the pattern is invalid.`
+ 	});
+ 	const overCapDescription = caps.sampleOverCapGlobResults ? `a larger result instead returns ${caps.maxResults} paths sampled across top-level entries` : `a larger result returns the first ${caps.maxResults} paths in modification-time order`;
+ 	const tool = defineTool({

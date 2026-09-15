@@ -357,7 +357,16 @@ row_web() {
 #      row 3 cannot land in 0.1.5, and 3b carries the SAME effect re-anchored to
 #      the closure. Row 3 stays declared-as-CONTEXT-ABSENT (never forced) and 3b
 #      is what actually restores the scope declaration on 0.1.5.
+#   3c path-not-found RE-ANCHOR (lane 3, NEW): its own PRE is the state rows
+#      1 + 3b produce — a182162d -> f3b4e74d  CLEAN (4/4 hunks). Row 2 (the 0.1.1
+#      form) stays CONTEXT-ABSENT and is never forced; 3c is what actually
+#      restores the SEARCH_PATH_NOT_FOUND effect on 0.1.5. It does NOT unblock
+#      row 4 (see the note there: no-collapse lands BY FUZZ to a non-declared md5).
 #   4 no-collapse  5bdb6761 -> c18b8c32  CLEAN (unreachable in 0.1.5; see below)
+#
+#   ⇒ the seven-effect map closes on 0.1.5 as 4 PLACED (1, 3b, 3c, and the
+#     fb51-direct-edit-normalize row elsewhere) + 3 DECLARED LOST (2, 3, 4),
+#     each lost one declared with its own coordinate — never by drag.
 # ===========================================================================
 row_fs_search() {
   local dir="${N}/@deepseek-ai/dsh-tool-fs-search" rel="lib/index.js"
@@ -366,6 +375,7 @@ row_fs_search() {
   local P2="${PATCH_DIR}/dsh-tool-fs-search-path-not-found.patch"
   local P3="${PATCH_DIR}/dsh-tool-fs-search-grep-scope-declaration.patch"
   local P3B="${PATCH_DIR}/dsh-tool-fs-search-grep-scope-reclosure.patch"
+  local P3C="${PATCH_DIR}/dsh-tool-fs-search-path-not-found-0.1.5-reanchor.patch"
   local P4="${PATCH_DIR}/dsh-tool-fs-search-no-collapse.patch"
   local rc=0
   # -- 1 anchor: context = the pristine buildGrepCommand shape
@@ -454,10 +464,83 @@ row_fs_search() {
     echo "CONTEXT-ABSENT dsh-tool-fs-search-grep-scope-reclosure — a hunk rejects against the closure-shaped base; NOTHING WRITTEN" >&2
     ABSENT=$((ABSENT+1)); rc=1
   fi
+  # -- 3c path-not-found RE-PORT to 0.1.5 (lane 3, run token 27255028) ---------
+  # The path-not-found EFFECT was never ported to 0.1.5: ROW 2 above stays
+  # CONTEXT-ABSENT (3/6 hunks reject). Row 3c is the SAME effect RE-ANCHORED to
+  # the state rows 1 + 3b actually produce, so the tree finally gets a CODE for
+  # a nonexistent path instead of an ambiguous SEARCH_FAILED.
+  #
+  #   PRE  a182162dd5ef7d2cc299a7d23015c1db  ->  POST f3b4e74d8ec46d6b4971d0dc151dc4dc
+  # (MEASURED in-scope: published 0.1.5-rc.2 tarball a143a3d7 + P1 (anchor,
+  #  36bb46d4) + P3B (grep-scope reclosure) reproduces that PRE byte-exactly,
+  #  and this patch takes it to that POST with 4/4 hunks and 0 .rej.)
+  #
+  # ORDERING IS LOAD-BEARING, and it is a DISJOINTNESS argument, not a hope:
+  # 3c reads the file state LEFT BY 1+3B, so 3B must run first. It is also
+  # ORTHOGONAL to 3B: MEASURED, its 4/4 hunks also land on the PURE anchor state
+  # (36bb46d4…) — so it does not silently depend on 3B having edited the same
+  # region. Its one doc hunk (#4, the `tool:glob` prompt) is a leg 3B does NOT
+  # touch: 3B re-anchored the `tool:grep` leg of the trio and left the glob leg
+  # as the closure with no trio sentence at all.
+  #
+  # AND IT DISCHARGES 3B's OWN FORWARD-DECLARATION: 3B conserves the trio's
+  # `an error "path not found: <path>" means the search path does not exist` but
+  # DECLARES it forward-declaring, because 0.1.5 did not yet produce that code.
+  # 3c is the effect that sentence was waiting for (MEASURED BY EXECUTION below).
+  #
+  # EFFECT (measured by EXECUTION, not by exit code): the real lib/index.js of
+  #   each state was imported and the real exported runRipgrep() called against
+  #   the real packaged ripgrep through the real cordis subprocess service:
+  #     PRE  a182162d : nonexistent path -> SEARCH_FAILED (raw rg stderr
+  #                     "No such file or directory (os error 2)")
+  #     POST f3b4e74d : nonexistent path -> SEARCH_PATH_NOT_FOUND
+  #                     ("grep: path not found: <path>")
+  #   CONTROLS in the same run: an invalid regex still gives its OWN code
+  #   SEARCH_INVALID_PATTERN (the pre-check does not swallow non-path errors); an
+  #   existing path with no match is still exit-1 -> noMatches, NOT an error (the
+  #   ambiguous zero is preserved, not collapsed into an error).
+  #
+  # IDEMPOTENCY GATE: `SEARCH_PATH_NOT_FOUND` is this patch's own signature and
+  #   its ABSENCE is what makes the patch applicable, so its PRESENCE
+  #   short-circuits to NOOP. NEVER re-apply blindly: MEASURED, a raw second run
+  #   FAILS all 4 hunks and writes a lib/index.js.rej (the file is unchanged, but
+  #   the .rej landing is the mess the gate exists to prevent).
+  if grep -q 'SEARCH_PATH_NOT_FOUND' "${F}"; then
+    if [[ "$(md5_of "${F}")" == "f3b4e74d8ec46d6b4971d0dc151dc4dc" ]]; then
+      echo "NOOP         dsh-tool-fs-search-path-not-found-0.1.5-reanchor (already applied)"
+      NOOP=$((NOOP+1))
+    else
+      echo "WARN         dsh-tool-fs-search-path-not-found-0.1.5-reanchor — the SEARCH_PATH_NOT_FOUND marker is present but md5 $(md5_of "${F}") != f3b4e74d8ec46d6b4971d0dc151dc4dc; inspect" >&2
+      BAD=$((BAD+1)); rc=1
+    fi
+  elif [[ "$(md5_of "${F}")" != "a182162dd5ef7d2cc299a7d23015c1db" ]]; then
+    # The patch declares an EXACT PRE (the anchor + grep-scope-reclosure state).
+    # Any other file is not its base: declare and do NOT force (anti-drag rule).
+    echo "CONTEXT-ABSENT dsh-tool-fs-search-path-not-found-0.1.5-reanchor — md5 $(md5_of "${F}") is not the declared PRE a182162d…; NOT forcing" >&2
+    ABSENT=$((ABSENT+1)); rc=1
+  elif guarded_patch "${dir}" "${P3C}"; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      report_applied dsh-tool-fs-search-path-not-found-0.1.5-reanchor
+    elif [[ "$(md5_of "${F}")" == "f3b4e74d8ec46d6b4971d0dc151dc4dc" ]]; then
+      report_applied dsh-tool-fs-search-path-not-found-0.1.5-reanchor
+    else
+      echo "FAIL dsh-tool-fs-search-path-not-found-0.1.5-reanchor post-md5 $(md5_of "${F}") != f3b4e74d8ec46d6b4971d0dc151dc4dc" >&2
+      BAD=$((BAD+1)); rc=1
+    fi
+  else
+    echo "CONTEXT-ABSENT dsh-tool-fs-search-path-not-found-0.1.5-reanchor — a hunk rejects against the reclosure-shaped base; NOTHING WRITTEN" >&2
+    ABSENT=$((ABSENT+1)); rc=1
+  fi
   # -- 4 no-collapse: context = the collapsed 'the search target' literal.
   # Its PRISTINE is the path-not-found-APPLIED state; when path-not-found did
   # not land, no-collapse is NOT applied (it would edit a file that is not its
   # base) — SKIP, never force.
+  # NOTE (lane 3, MEASURED): row 3c does NOT unblock this row. no-collapse's
+  # declared PRISTINE is the OLD parent patch's applied state (168d0afd…), a
+  # DIFFERENT file from 3c's POST, and forcing it there LANDS BY FUZZ (fuzz 1)
+  # and produces md5 66bc0a33… — NOT its declared POST c18b8c32…, i.e. a
+  # Frankenstein that matches no declared fingerprint. So this row stays exactly
+  # as it was: SKIP, never forced. The tree map stays 4 placed + 3 declared lost.
   if grep -q 'const named = searchTarget' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-no-collapse (already applied)"
     NOOP=$((NOOP+1))
