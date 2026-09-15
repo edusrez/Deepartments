@@ -481,7 +481,16 @@ function buildWakePackLazy(ctx: Context, wakepackDeps: DepsHolder<Partial<WakePa
     // the default wrapper over the pure pacing module; a policy plugin may
     // compose its own) flows into the wake-pack service: the franja resolves
     // service-first, the pure fallback stays R6.
-    pacing: org.org.pacing,
+    // F1/F2 (VALLE ABIERTO — la ventana configurada debe LLEGAR al consumidor):
+    // `org.pacing` es un knob ONE-SIDED de la fila del BUNDLE — el contrato
+    // org-config-parity PROHÍBE declararlo en la fila core, así que
+    // `org.org.pacing` (la superficie compartida = la fila CORE) es `undefined`
+    // en el layout VIVO y el pack corría el buffer CODE-DEFAULT de 30 min
+    // («PEAK … hasta 04:30 UTC»). La fila core conserva la autoridad cuando SÍ
+    // lo declara, y el bucket `deepartments.wakepackDeps` (que el bundle llena
+    // con su org ya FUSIONADO — boot.ts) cubre el caso one-sided: el mismo
+    // patrón que el resto de deps closure-bound de este builder.
+    pacing: org.org.pacing ?? bound.pacing,
     pacingService: ctx.get('deepartments.pacing') as
       | { isPeakAt(date: Date, options?: PacingWindowOptions): boolean; pacingStateAt(date: Date, options?: PacingWindowOptions): PacingState }
       | undefined,

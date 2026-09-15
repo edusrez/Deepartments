@@ -8831,6 +8831,35 @@ export function createDepsHolder<T>(): DepsHolder<T> {
   }
 }
 
+/** F2 (VALLE ABIERTO) — the PER-KEY `org` resolution, the counterpart of the
+ * `boot.ts` F1 key merge and NEVER `??` over the WHOLE object. Takes the
+ * DECLARED org rows LEFT TO RIGHT (highest precedence first) and returns one
+ * merged object in which every key is taken from the FIRST row that DECLARES
+ * it (`!== undefined`); a key no row declares stays ABSENT. `undefined` rows
+ * are skipped, and NOTHING declared ⇒ `undefined` (the caller then leaves the
+ * `org` key un-materialized — the legacy behavior, byte-identical).
+ *
+ * WHY IT IS A LOCAL HELPER (not F1's): the F1 merge is an inline, NON-EXPORTED
+ * closure inside `createBootOrchestration` (packages/dshd-orchestration), and
+ * this package depends on `dshd-core`/`dshd-quality` only — the decoupling
+ * direction forbids importing it (and the frozen export surface forbids
+ * adding one). The SEMANTICS are the same: earlier row wins PER KEY when it
+ * declares the key, a declared `undefined` never erases a real value. */
+function resolveOrgByKey(...rows: (Record<string, unknown> | null | undefined)[]): Record<string, unknown> | undefined {
+  const merged: Record<string, unknown> = {}
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]
+    // `null` is skipped EXACTLY like `undefined`: the previous `??` chain
+    // treated `org: null` as ABSENT, and this helper must not turn a malformed
+    // row into a throw (`Object.entries(null)` would).
+    if (row === undefined || row === null) continue
+    for (const [key, value] of Object.entries(row)) {
+      if (value !== undefined) merged[key] = value
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
 export function apply(ctx: Context, config: HealthConfig = {}) {
   // LANE 0.2.1 (1B/1C — binder → Service, P6): the per-process STATIC deps
   // arrive via the PER-PACKAGE deps holder (`deepartments.healthDeps` —
@@ -8917,6 +8946,36 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       // bundle passes EXPLICITLY) are added here as an OPTIONAL static seam
       // only — the frozen contract stays untouched.
       const healthDatumHolder = depsHolder.get() as HealthBinderDeps & { sessionSurface?: string; nRestarts?: number; crashStreak?: number; sweep?: SweepHealthState }
+      // F1/F2 (VALLE ABIERTO — la ventana configurada debe LLEGAR al consumidor):
+      // este camino COMPUESTO construía `config: { health }` y DESCARTABA `org`,
+      // así que las TRES patas de la franja que leen `deps.config?.org?.pacing`
+      // (:8228 el gate del work-register-idle, :8505/:8507 el monitor de
+      // transición y su aviso) caían al buffer CODE-DEFAULT de 30 min — y el
+      // aviso nombraba aristas por defecto («hasta 00:30 UTC» cuando la ventana
+      // nominal abre a 01:00). `org.pacing` es un knob ONE-SIDED de la fila del
+      // bundle (el contrato org-config-parity lo mantiene fuera de la fila core)
+      // y este paquete nunca lo declara en su propia fila: viaja en el bucket de
+      // deps que el bundle llena — el MISMO seam que `messagesStoreReady` de
+      // abajo (la fusion por clave de boot.ts deja ahi el valor del bundle).
+      // Prioridad: config explícita del caller → fila propia → bucket.
+      // F2 (VALLE ABIERTO) — THE RESOLUTION IS PER KEY, NEVER `??` OVER THE
+      // WHOLE OBJECT: `X.org ?? cfg.org` is a SUPERFICIAL fallback, and here it
+      // WAS the defect — a caller whose `org` EXISTS but does NOT carry `pacing`
+      // (the LIVE shape of the shared row: `org.departments`,
+      // `org.poolerBaseURL`, … — and `org.pacing` is a bundle-side ONE-SIDED key
+      // by the org-config-parity contract) SHADOWED the whole bucket ⇒
+      // `deps.config.org.pacing` = undefined ⇒ the CODE-DEFAULT 30-min buffer
+      // came back IN SILENCE. Now the object is merged BY KEY (the same
+      // semantics as the F1 merge in boot.ts) and `pacing` is the ONE key with
+      // an EXTRA source: the bucket, consulted ONLY when no row declares it.
+      const bucketPacing = (ctx.get('deepartments.wakepackDeps') as { get(): { pacing?: PacingConfigLike } } | undefined)?.get()?.pacing
+      const rowsOrg = resolveOrgByKey(
+        (config as HealthConfigLike).org as Record<string, unknown> | undefined,
+        explicit.config?.org as Record<string, unknown> | undefined
+      )
+      const orgConfig = rowsOrg?.pacing !== undefined
+        ? rowsOrg
+        : (bucketPacing !== undefined ? { ...(rowsOrg ?? {}), pacing: bucketPacing } : rowsOrg)
       await runHealthDaemonTick({
         now: explicit.now ?? (() => Date.now()),
         stateDir: org.stateDir,
@@ -8925,7 +8984,13 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         nRestarts: explicit.nRestarts ?? healthDatumHolder.nRestarts,
         crashStreak: explicit.crashStreak ?? healthDatumHolder.crashStreak,
         sweep: explicit.sweep ?? healthDatumHolder.sweep,
-        config: { health: config.health ?? explicit.config?.health ?? {} } as HealthConfigLike,
+        config: {
+          health: config.health ?? explicit.config?.health ?? {},
+          // El `org` resuelto arriba (caller → fila propia → bucket) — ausente ⇒
+          // la clave NO se materializa (comportamiento byte-idéntico al anterior
+          // para toda composición sin el knob, incluidos los tests del tick inline).
+          ...(orgConfig !== undefined ? { org: orgConfig } : {})
+        } as HealthConfigLike,
         hosts: explicit.hosts ?? [...catalog.hosts.values()],
         posts: explicit.posts,
         hostWaits: explicit.hostWaits,

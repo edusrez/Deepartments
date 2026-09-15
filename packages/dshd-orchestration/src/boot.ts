@@ -1123,12 +1123,39 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
     ...(agents !== undefined ? { agents: agents as unknown as { get(id: string): { followup(message: unknown): void } | undefined } } : {})
   })
 
+  // F1 (VALLE ABIERTO — la ventana configurada debe LLEGAR al consumidor):
+  // FUSIÓN POR CLAVE de las dos filas del org, NUNCA `??` sobre el objeto
+  // entero. `??` es un fallback SUPERFICIAL, no una fusión: con `coreOrg.org`
+  // PRESENTE pero SIN la clave `pacing` (el layout VIVO — el contrato
+  // org-config-parity PROHÍBE `org.pacing` en la fila core y lo deja one-sided
+  // en la fila del bundle) el `??` NO caía a `cfg.org`, y la clave ausente se
+  // perdía POR CLAVE: el consumidor leía `org.pacing === undefined` y aplicaba
+  // el buffer CODE-DEFAULT de 30 min (franja «PEAK … hasta 04:30 UTC») en vez
+  // de la ventana CONFIGURADA (bufferMs 0 → «VALLE … hasta 01:00 UTC»).
+  // Aquí `coreOrg.org` gana CLAVE A CLAVE solo cuando la declara
+  // (≠ undefined) — la fuente compartida conserva su autoridad single-source —
+  // y toda clave que NO declare cae a la fila del bundle (los knobs one-sided
+  // `org.pacing` / `org.quality`).
+  // UBICACIÓN (deliberada): la fusión vive AQUÍ, fuera de la zona de arranque
+  // congelada byte a byte (boot.ts:343-1094, pin LOC+md5 en
+  // test/boot-factory.test.js), porque NINGÚN consumidor DENTRO de la zona lee
+  // el binding local `org`: todos lo reciben por ESTA superficie (el
+  // destructure del apply-fiber en invoke.ts) — presets/tools/spawn lo toman de
+  // aquí. Editar la línea 371 en su sitio movería un lock de test (prohibido);
+  // el resultado es el MISMO valor para todo consumidor observable.
+  const orgWithBundleKnobs = (coreOrg?.org === undefined
+    ? cfg.org
+    : {
+        ...(cfg.org ?? {}),
+        ...Object.fromEntries(Object.entries(coreOrg.org).filter(([, value]) => value !== undefined))
+      }) as Config['org']
+
   return {
     subagents,
     agents,
     agentPresets,
     stateDir,
-    org,
+    org: orgWithBundleKnobs,
     registry,
     byPost,
     qualityWorkerInspectProbability,

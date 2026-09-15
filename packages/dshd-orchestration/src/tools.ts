@@ -7443,7 +7443,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     assembleHeartbeat,
     readPresenceStateFile,
     messagesStoreReady: () => messagesStoreReady,
-    repoRoot
+    repoRoot,
+    // F1/F2 (VALLE ABIERTO): el knob ONE-SIDED `org.pacing` NO está en la
+    // superficie compartida (`deepartments.org` = la fila core, que por el
+    // contrato org-config-parity nunca lo declara), así que el servicio
+    // `deepartments.wakepack` de dshd-core — que el bundle CONSUME cuando está
+    // compuesto — resolvía su franja con el buffer CODE-DEFAULT. Este bucket es
+    // la vía por la que fluye el valor del bundle: `org` es la fusión POR CLAVE
+    // de boot.ts (fila compartida + knobs one-sided del bundle).
+    pacing: org.pacing
   })
   depsLifecycle?.register({
     ensureHost,
