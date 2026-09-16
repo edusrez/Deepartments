@@ -51,6 +51,24 @@ passes, the entry must be re-verified and its `date`/`verified` bumped.
   decisions for the Research Head; the organizer may list candidates but never
   deletes on its own judgment.
 
+## Archival scope by job (head standing policy, 2026-09-16)
+
+**Not every job archives.** The researcher persona's archive step is the
+GENERIC protocol; a job's body is the CONCRETE assignment and wins where they
+differ:
+
+- **`monitor-dsh-updates` — does NOT archive to `sources/`.** A daily round that
+  most days finds delta ZERO must not add a KB entry per round, or the archive
+  fills with near-duplicate topic files, which the "never duplicate" rule
+  forbids. Keep every citation in the REPORT; raise a genuinely NEW durable
+  topic to the head, who decides.
+- **`daily-ai-news` — DOES archive** (this job carries explicit archive steps):
+  extend an existing topic file, or create one for a genuinely new topic.
+
+This clause resolves a job-vs-persona conflict that had been re-asked for three
+rounds; it is delivered through the head's memo, which both jobs read at the
+start of every round.
+
 ## web_fetch domain reliability (press releases / news mirrors)
 
 The knowledge-base class **domain → status → fallback** (fb-24): wire and
@@ -68,7 +86,10 @@ presupuesto para dominios 403). **Updated 2026-09-10** (fb-329 + fb-330 + fb-333
 `www.googblogs.com` + la **taxonomía de clase 403-vs-401/captcha**).
 **Updated 2026-09-16** (fb-334 + fb-843, edición documental RD: 6 filas nuevas —
 `mp.weixin.qq.com`, `huxiu.com`, `techtarget.com`, `4sysops.com`,
-`anadolu.agency`/`www.aa.com.tr`, `servicenow.github.io/eva`).
+`anadolu.agency`/`www.aa.com.tr`, `servicenow.github.io/eva`). **Updated
+2026-09-16 (2ª edición)** (fb-1527 → PLEGADA al canónico **fb-177** por dictamen
+QH: cuarta clase de fallo + `36kr.com` + el negativo del feed de modelos de HF
++ la regla de «mismo dominio registrable» en la propuesta de arreglo).
 
 **Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
 per domain per round — a single HTTP 403 confirms the state and exhausts the
@@ -85,7 +106,18 @@ de contenido, y un reintento puede consumir presupuesto sin cambiar el
 resultado; **fetch failed / host no resoluble** (status.opencode.ai) → no es
 anti-bot, es inalcanzable desde este entorno; **403 en el propio endpoint
 `.json`** (reddit.com) → el hint de la tool induce un bucle de sugerencia (clase
-documentada también en `sources/v4-1-flash-official.md:300`).
+documentada también en `sources/v4-1-flash-official.md:300`);
+**cross-origin redirect NO seguido** (`deepmind.google/blog/*` → `blog.google`,
+fb-1527 → canónico fb-177) → CUARTA clase: el fetch ABORTA con
+`Error: cross-origin redirect to https://blog.google is not followed
+automatically`. **No es un «gap» a corregir por defecto** (dictamen QH
+2026-09-16, corrigiendo la propuesta inicial): `deepmind.google` y `blog.google`
+son **dominios REGISTRABLES DISTINTOS** bajo el gTLD `.google` ⇒ **es un cambio
+real de HOST, y NO seguir automáticamente a otro host es la superficie de
+seguridad que el tool protege A PROPÓSITO.** ⇒ **REGLA: «mismo PUBLICADOR» NO
+es criterio de seguridad; «mismo DOMINIO REGISTRABLE» sí.** El escalón correcto
+**no** es seguir el redirect por defecto, sino **exponer el `Location` completo
+en el error** (y acotar la URL de destino).
 
 | Domain | Status | Observed behavior | Fallback |
 |---|---|---|---|
@@ -110,6 +142,10 @@ documentada también en `sources/v4-1-flash-official.md:300`).
 | `4sysops.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP | one attempt max; capturar por snippet del search-provider o secundaria fechada |
 | `anadolu.agency` (+ fallback punycode `xn--anadoluajans-d5b.com.tr`) | **UNREACHABLE** | **fetch failed**, y el fallback **punycode falla igualmente** (host no resoluble, clase `status.opencode.ai`) | do not attempt; la fila ÚTIL es **`www.aa.com.tr` = `200-TRUNCATED`** (clase fb-843) ⇒ ir directo a ella o a secundaria fechada |
 | `servicenow.github.io/eva` | **READABLE via proxy** | la página NO es «fuente inaccesible»: en directo es 200-inservible (shell JS), pero **con `r.jina.ai` da HTTP 200 y cuerpo COMPLETO** — es el WORKAROUND que funciona (mismo patrón que `docs.hetzner.com`) | fetch proxiado **`https://r.jina.ai/https://servicenow.github.io/eva/`** |
+| `deepmind.google/blog/<slug>` | **REDIRECT-NOT-FOLLOWED** | **CUARTA clase** (fb-1527 → canónico fb-177): `Error: cross-origin redirect to https://blog.google is not followed automatically` ⇒ el fetch ABORTA. **NO es anti-bot** (el destino responde 200) **y NO es un fallo a «arreglar» siguiendo el redirect**: `deepmind.google` y `blog.google` son **dominios registrables DISTINTOS** ⇒ no seguirlos es la superficie de seguridad DELIBERADA del tool | ⚠️ **el workaround NO es gratis: cuesta 2 llamadas, no 1** — (1) el redirect abortado + (2) el destino `blog.google`, que devuelve **200 TRUNCADO** ⇒ **acotar a una sección concreta**. Mejor aún: ir directo a la **superficie técnica** (`ai.google.dev` model page, model card) + secundaria fechada |
+| `blog.google` | **200-TRUNCATED** | HTTP 200 con **cuerpo truncado** (fb-1527 → fb-177) — 200-inservible; el mensaje pide «more specific URL or section» **sin decir qué sección** | acotar a la **sección concreta**, o mejor ir a la **superficie técnica** (`ai.google.dev` model page / model card) + secundaria fechada |
+| `36kr.com` | **BLOCKED (interstitial)** | **interstitial anti-bot** («正在进行安全检测...») — 1 intento, abandonado (fb-1527 → fb-177) | do not attempt; **no se sorteó a propósito**: usar secundaria fechada o el anuncio del vendor |
+| `huggingface.co/api/models?sort=createdAt` | **NOT A DETECTOR** | feed dominado por repos de prueba personales ⇒ **no sirve como detector de lanzamientos de modelos** (negativo medido, ronda 09-16) | no gastar un fetch en él para detección; sí sirve como **gate** puntual; para lanzamientos, `huggingface.co/api/daily_papers?date=<fecha>` (machine-readable) + superficie del vendor |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
@@ -136,6 +172,7 @@ expresarla** (el dominio "funciona"). Datapoints y workarounds verificados:
 | `suno.com/blog/v6` | 404 por **URL drift** | ruta correcta `/blog/introducing-v6` |
 | `status.commandcode.ai` | 200 en HTML pero **sin lista de incidentes por fetch**; `/api/incidents` → 404 | vía machine-readable = el **repo del status page** (Upptime) |
 | `cve.org`, `nvd.nist.gov` (detalle) | cve.org JS-only; **NVD detail = shell 200 vacío** | **endpoint primario CVE = `https://cveawg.mitre.org/api/cve/<CVE-ID>`** (JSON, fb-377) |
+| `blog.google` (destino del redirect de `deepmind.google`) | 200 con **cuerpo truncado**; pide «a more specific URL or section» **sin decir cuál** | **acotar a una sección concreta**; la segunda mitad del patrón: **el workaround del redirect NO saca del defecto, cae en ESTA clase** ⇒ contad **2 llamadas**, no 1 |
 
 **Regla:** ante un 200 con contenido inservible, **no reintentar el mismo
 fetch** — saltar directamente al workaround de la fila (render proxiado,
@@ -148,6 +185,17 @@ arreglo por tabla ≈2-3 % de ahorro frente al 52 % de esta clase.
 documentation only, 0 code changes. A per-call configurable timeout /
 automatic retry would be an upstream harness change (open, fb-102/104); the
 table is the plugin-side mitigation (save the fetch budget).
+
+**Nota sobre `fb-1527` → canónico `fb-177` (dictamen QH, 2026-09-16 — corrige
+la propuesta inicial del emisor):** el escalón correcto para la cuarta clase
+**NO es «seguir los redirects cross-origin por defecto»** — eso fusionaría dos
+casos que la casa separa y debilitaría una protección deliberada. **Es exponer
+el `Location` completo en el error.** `deepmind.google` → `blog.google` es un
+**cambio real de host** (dominios registrables distintos bajo el gTLD
+`.google`), no un redirect interno: **seguir automáticamente a OTRO host es
+exactamente la superficie que el tool no debe cruzar sola.**
+**Y la medición es del EMISOR (`daily-ai-news-18`), no reproducida por el QH ni
+por el head:** se registra como tal.
 
 ## Index
 
