@@ -997,9 +997,51 @@ export const RE_DELIVERY_DEFAULT_MAX_DELAY_MS = 10 * 60_000
 export const RE_DELIVERY_DEFAULT_MAX_ATTEMPTS = 12
 
 /** LANE ② — the attempt-count window (1 h): only the pair's rows inside the
- * last hour count toward the backoff/exhaustion math (an OLD failure history
- * never keeps a pair permanently exhausted). */
+ * last hour count toward the STORM metric (an OLD failure history never keeps
+ * a pair permanently exhausted). UNCHANGED by builder-409: this window is the
+ * STORM metric's window and it STAYS at 1 h. */
 export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
+
+/** builder-409 (2026-09-16) — PURE: the CUMULATIVE attempt count of one pair —
+ * EVERY `prepared`/`failed` transition of the pair in the ledger, at ANY age,
+ * with NO window. This is the count the MAX-ATTEMPTS CAP reads.
+ *
+ * WHY THE CAP CANNOT USE A WINDOWED COUNT (the incident). The cap's own cadence
+ * is `~maxDelayMs` (the backoff saturates at 10 min) PLUS the sweep's 60 s tick
+ * PLUS the delivery latency, i.e. a MEASURED ~660-665 s. Each attempt appends
+ * TWO countable rows, so a failing pair accrues `2 * 3_600_000 / 665_000 ≈ 10.8`
+ * rows PER HOUR — against a cap of 12. A 1 h window therefore NEVER holds the 12
+ * rows the cap demands, and the count is only ever READ at a sweep decision
+ * instant (phase-locked ~660 s after the last `failed`, never at the window's
+ * most favourable alignment): MEASURED, the count peaked at **10** across 6 793
+ * real decision instants over the 6 stuck pairs of the incident. `attempts >=
+ * 12` was therefore FALSE forever and the stop was DEAD CODE — the re-drive
+ * looped a 5xx-failing notification to a DEAD session ~260 times over ~4 h.
+ * The structural statement: `cap reachable ⟺ windowMs >= maxAttempts *
+ * maxDelayMs` (12 * 600 000 = 2 h), so ANY windowed count shorter than that
+ * product makes the stop unreachable.
+ *
+ * WHY CUMULATIVE RATHER THAN A WIDER WINDOW (the host's criterion, endorsed):
+ * widening the window to 2 h would have made the cap reachable by CHANGING THE
+ * REGIME of the backoff and the storm threshold for EVERY pair — paying someone
+ * else's debt with someone else's money. The cumulative count is INDEPENDENT of
+ * the cadence by construction (same number of attempts ⇒ same count, whatever
+ * the spacing), so the cap becomes reachable at the REAL measured cadence while
+ * `RE_DELIVERY_STORM_WINDOW_MS` (the storm metric) and the backoff stay exactly
+ * where they were. This function is the SEPARATION of the two computations: the
+ * cap counts cumulatively, the storm metric stays windowed.
+ *
+ * Monotone by construction: a pair's cumulative count only ever GROWS as the
+ * ledger grows, so the stop can no longer be evaded by a sliding window. */
+export function pairCumulativeAttemptCount(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
+  let count = 0
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (row.status !== 'prepared' && row.status !== 'failed') continue
+    count++
+  }
+  return count
+}
 
 /** LANE ② (fb-58) — the prepared-stuck criterion (10 min): 0 prepared rows
  * stuck > 10 min to a live non-dormant recipient (the crash-recovery class the
@@ -1472,7 +1514,19 @@ export class DeliveryRedeliverer {
     this.baseDelayMs = opts.baseDelayMs ?? RE_DELIVERY_DEFAULT_BASE_DELAY_MS
     this.maxDelayMs = opts.maxDelayMs ?? RE_DELIVERY_DEFAULT_MAX_DELAY_MS
     this.maxAttempts = opts.maxAttempts ?? RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
-    this.stormWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
+    // The attempt-count window is FENCED BY THE CAP (see
+    // `redeliveryWindowFloorMs`): a window shorter than `maxAttempts *
+    // maxDelayMs` can never count enough rows to reach `maxAttempts` at the
+    // backoff's own capped cadence, which silently turns the max-attempts stop
+    // into DEAD CODE and re-opens the infinite re-delivery loop. A caller may
+    // WIDEN the window (a longer history is strictly more conservative); a
+    // caller may NEVER narrow it below the floor — the narrow value is raised,
+    // so no configuration can disable the stop by accident (R6: the default
+    // path is unchanged in KIND — the window is still a single instance value
+    // read by `pairAttempts`).
+    const requestedWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
+    const windowFloorMs = redeliveryWindowFloorMs(this.maxAttempts, this.maxDelayMs)
+    this.stormWindowMs = Math.max(requestedWindowMs, windowFloorMs)
     this.preparedStuckMs = opts.preparedStuckMs ?? RE_DELIVERY_PREPARED_STUCK_MS
     this.g2DrainSeedLimit = opts.g2DrainSeedLimit ?? G2_DRAIN_SEED_DEFAULT_LIMIT
     this.legacyAgeMs = opts.legacyAgeMs ?? RE_DELIVERY_PREPARED_STUCK_MS
