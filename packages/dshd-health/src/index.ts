@@ -5525,6 +5525,385 @@ export function scanContextThreshold(input: ContextThresholdScanInput): ContextT
 }
 
 // ---------------------------------------------------------------------------
+// ACTUADOR DEL CONTEXTO (2026-09-16) — EL CONSUMIDOR DE `contextAction`.
+//
+// LA BRECHA MEDIDA, EN SU CLASE EXACTA (fb-967: «el instrumento mide X y el
+// texto nombra Y»): `scanContextThreshold` YA nombra la acción — al último rung
+// publica `beyondUsableWindow = true` + `contextAction = 'compact-or-rotate'`
+// (arriba, `:5501-5519`) — y el finding YA se alerta al host por el path
+// findings→dedupe→notifyHost. Lo que NO existía era QUIEN LA EJECUTARA: el
+// token viajaba en la fila de audit y moría ahí. Este bloque es ese consumidor.
+//
+// ⚠️ EL ANCLAJE (TRAMPA MEDIDA — fb-1091, y POR ESO ESTE DISEÑO ES ASÍ):
+// la serie `bN` de la clave `contextThresholdKey(agentId, band)` NO identifica
+// un evento GLOBAL: REINICIA por encarnación (una fila `b6` puede llevar el
+// `sessionId` de la sesión VIVA), y el ledger pierde franjas enteras (0 filas
+// en un reinicio con filas antes y después) ⇒ una serie `bN` reconstruida por
+// lectura posterior NO ES FIABLE (la corroboración heredada que citaba
+// `quality-head:b8 = 00:15:08.733Z` era FALSA: esa fila era de las
+// 23:35:08.733Z, ANTERIOR a b7). Y `contextThresholdKey` es una clave de
+// DEDUPE por (miembro, banda) con histéresis — útil para NO repetir alertas,
+// NUNCA como identidad de evento.
+// ⇒ LA IDENTIDAD DE LA ACCIÓN ES `(agentId, sessionId)` — el HECHO MEDIDO DE
+// LA SESIÓN VIVA, jamás el nombre del finding. Consecuencias, por construcción:
+//   * un finding SIN `sessionId` (wiring viejo) NO produce acción: sin la
+//     sesión no se puede anclar, y una acción mal anclada es peor que ninguna
+//     (la clase fb-1091). Es la regla conservadora del resto del tick;
+//   * una RE-CRUZADA dentro de la MISMA sesión NO re-actúa (mismo ancla);
+//   * una encarnación NUEVA (sessionId distinto) SÍ re-actúa — el muro es
+//     nuevo y el marcador viejo no puede eclipsarlo (por eso la identidad
+//     incluye la sesión: rotar Y volver a chocar es DOS HECHOS, no uno).
+//
+// QUÉ ES (y qué NO es): es un MARCADOR DURABLE + una ESCALADA anclada a la
+// sesión viva — NO es el corte de admisión de nuevos turnos hacia ese post.
+// El corte real vive en el path de entrega/materialización
+// (`packages/dshd-core/src/delivery.ts` — `deliverOrQueue`/`materializePost`),
+// FUERA de esta lane; se declara en el informe como la pieza exacta a añadir.
+// Lo que SÍ cabe aquí, y es lo que se entrega: el hecho deja de morir en el
+// audit — queda escrito en un fichero que un rotador/dispatcher puede LEER, con
+// la sesión que produjo la cifra, y el actor que puede intervenir es avisado.
+// ---------------------------------------------------------------------------
+
+/** ACTUADOR — the durable actuation-marker file (the ACT's observable home).
+ * SEPARATE from the shared health-alerts ledger (whose 2h defensive prune would
+ * drop an episode marker mid-flight) — the context-threshold-state pattern. */
+export const CONTEXT_ACTION_STATE_FILE = 'context-action.json'
+
+/** ACTUADOR — the marker retention (24 h): an entry older than this is pruned
+ * on the next write (the file never grows unbounded). The identity is the
+ * SESSION, so a pruned entry can never shadow a fresh incarnation — a new
+ * sessionId is a new anchor regardless of what the ledger held. */
+export const CONTEXT_ACTION_RETENTION_MS = 24 * 60 * 60 * 1000
+
+/** ACTUADOR — ONE actuation marker: the ACT that ran, ANCHORED to the live
+ * session that produced the figure (never to the finding's band name). */
+export interface ContextActionMark {
+  /** THE ANCHOR — the live session whose projection crossed the window. This is
+   * the identity of the event (with the agentId as its ledger key). */
+  sessionId: string
+  /** The ms epoch the action ran. */
+  at: number
+  /** The action token. TWO sources, and the difference MATTERS:
+   *   - `phase === 'beyond-usable-window'` → the token is CONSUMED VERBATIM from
+   *     the scan's own `contextAction` field ('compact-or-rotate'). The
+   *     instrument named it; this consumer only executes it.
+   *   - `phase === 'advisory'` → the scan published NO action at this rung (it
+   *     publishes `contextAction` ONLY beyond the window), so the token is THIS
+   *     consumer's own (`rotate-before-death`) and is declared as such. Naming
+   *     an action the instrument did not is exactly the fb-967 class — so the
+   *     two tiers are DISTINGUISHED STRUCTURALLY by `phase`, never blended. */
+  action: string
+  /** WHICH TIER produced the act — the declared band decision:
+   *   - `'advisory'`: the next request STILL FITS but the runway is thin (the
+   *     last rung before death: band b9, effective ≥ 90% of the window while
+   *     NOT beyond it). MEASURED runway at the host's active rate (9 183 tk/min):
+   *     ~11 min. This is the ONLY tier whose act can still save the session.
+   *   - `'beyond-usable-window'`: `effective > contextWindow` (band b10) — the
+   *     next request is ALREADY REJECTED. The session cannot be asked to compact
+   *     itself (it accepts no new turn), which is exactly why the act is
+   *     SESSION-INDEPENDENT (the marker is written by the DAEMON process and the
+   *     escalation goes to the post's MANAGER — never to the dying session). */
+  phase: 'advisory' | 'beyond-usable-window'
+  /** `(contextProjectedTokens + contextReserveTokens) / contextWindow` — the
+   * fraction the action was taken on (re-derived from the finding's published
+   * frame so the marker is comparable across rows). This fraction IS the
+   * distance-to-death metric (the reservation is inside the numerator). */
+  pct: number
+  /** The numerator the fraction was computed on (projected + reserve). */
+  effectiveTokens: number
+  /** The denominator (the row's own contextWindow — the frame travels with the
+   * figure, the LANE HEALTH invariant). */
+  contextWindow: number
+  /** The post that was escalated to, when one resolved AND differed from the
+   * flagged agent (see the self-feed note below). ABSENT → no escalation
+   * delivery: the marker alone is the act, and the host ALERT path owns it. */
+  escalatedTo?: string
+  /** ACTUADOR (fb-14717 — the delivery seam is MEASURED as failing: 25
+   * `delivery-failed` keys over 7 distinct messages, 51 of 60 alerts in that
+   * class) — THE ESCALATION OUTCOME, a TRI-STATE so a lost delivery can never
+   * be silent again:
+   *   - `'delivered'`: the manager accepted the frame (`escalatedTo` is set).
+   *   - `'no-actor'`: NO manager resolves for this agent (a HEAD — MEASURED:
+   *     `quality-head`/`research-head`/`internal-programming-head` carry no
+   *     `managerId`; only workers do) OR the manager IS the flagged post. This
+   *     is TERMINAL and is recorded HONESTLY: the marker + the host ALERT carry
+   *     the fact, and the ledger now SAYS the actor was missing instead of
+   *     leaving a silent gap. Never retried.
+   *   - `'pending'`: the delivery was ATTEMPTED and FAILED ⇒ RETRIED on the
+   *     following ticks (bounded by `escalationAttempts` and the retry window).
+   * Before this field, a throwing `notifyPost` was logged and the anchor was
+   * persisted anyway, so the next tick's same-session gate skipped the act
+   * forever — the escalation died in silence for that incarnation. */
+  escalation?: 'delivered' | 'no-actor' | 'pending'
+  /** ACTUADOR — how many delivery ATTEMPTS have failed for this mark (capped at
+   * `CONTEXT_ACTION_ESCALATION_MAX_ATTEMPTS`). ABSENT → 0 (a first attempt or a
+   * legacy row). The cap is the honest bound: a permanently broken seam is
+   * retried a bounded number of times, never forever. */
+  escalationAttempts?: number
+  /** ACTUADOR — when the LAST delivery attempt happened (ms epoch). Kept
+   * SEPARATE from `at` so `at` keeps meaning «when the act first ran» (the
+   * anchor fact) while the retry cadence has its own clock. ABSENT → no attempt
+   * yet (or a legacy row): the retry window is measured from `at`. */
+  lastAttemptAt?: number
+}
+
+/** ACTUADOR — the per-agent escalation dedupe key (the `sourceKey` the delivery
+ * seam records). It embeds the SESSION so the key can never collide across
+ * incarnations (the fb-1091 anchoring rule applied to the delivery metadata). */
+export function contextActionKey(agentId: string, sessionId: string): string {
+  return `context-action:${agentId}:${sessionId}`
+}
+
+/** ACTUADOR — read `<stateDir>/context-action.json` → `{ [agentId]: mark }`.
+ * Absent / unreadable / malformed → {} (never throws); a malformed entry is
+ * dropped rather than repaired. */
+export function readContextActionLedger(stateDir: string): Record<string, ContextActionMark> {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, CONTEXT_ACTION_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: Record<string, ContextActionMark> = {}
+    for (const [agentId, raw] of Object.entries(parsed)) {
+      if (raw === null || typeof raw !== 'object') continue
+      const m = raw as Record<string, unknown>
+      if (typeof m.sessionId !== 'string' || m.sessionId === '') continue
+      if (typeof m.at !== 'number' || !Number.isFinite(m.at)) continue
+      out[agentId] = {
+        sessionId: m.sessionId,
+        at: m.at,
+        action: typeof m.action === 'string' ? m.action : 'compact-or-rotate',
+        // A legacy/absent phase reads as the beyond-window tier (the ONLY tier
+        // that existed before this field), never as the advisory one.
+        phase: m.phase === 'advisory' ? 'advisory' : 'beyond-usable-window',
+        pct: typeof m.pct === 'number' && Number.isFinite(m.pct) ? m.pct : 0,
+        effectiveTokens: typeof m.effectiveTokens === 'number' && Number.isFinite(m.effectiveTokens) ? m.effectiveTokens : 0,
+        contextWindow: typeof m.contextWindow === 'number' && Number.isFinite(m.contextWindow) ? m.contextWindow : 0,
+        ...(typeof m.escalatedTo === 'string' && m.escalatedTo !== '' ? { escalatedTo: m.escalatedTo } : {}),
+        // ACTUADOR (fb-14717) — the escalation tri-state survives the round-trip
+        // (an unknown/absent value stays ABSENT: a legacy row is neither claimed
+        // as delivered nor silently retried — the caller decides).
+        ...(m.escalation === 'delivered' || m.escalation === 'no-actor' || m.escalation === 'pending' ? { escalation: m.escalation } : {}),
+        ...(typeof m.escalationAttempts === 'number' && Number.isInteger(m.escalationAttempts) && m.escalationAttempts >= 0 ? { escalationAttempts: m.escalationAttempts } : {}),
+        ...(typeof m.lastAttemptAt === 'number' && Number.isFinite(m.lastAttemptAt) ? { lastAttemptAt: m.lastAttemptAt } : {})
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** ACTUADOR — write `<stateDir>/context-action.json` (mkdir -p the dir, then the
+ * file — the context-threshold-state write pattern). */
+export async function writeContextActionLedger(stateDir: string, ledger: Record<string, ContextActionMark>): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, CONTEXT_ACTION_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, CONTEXT_ACTION_STATE_FILE), JSON.stringify(ledger, null, 2), 'utf8')
+}
+
+/** ACTUADOR — the escalation frame delivered to the acting post. PURE. It names
+ * the SESSION (the anchor, so the recipient can declare where the figure was
+ * read — the seal's `sessionId` provenance), the FRAME the fraction was
+ * computed in, and — loudly — that this is NOT an admission cut (the honest
+ * scope declaration travels WITH the action, never only in the report). */
+export function buildContextActionFrame(agentId: string, mark: ContextActionMark): string {
+  const pct = Math.round(mark.pct * 100)
+  const beyond = mark.phase === 'beyond-usable-window'
+  // The CONSEQUENCE sentence is the honest one FOR THIS TIER: at b9 the request
+  // still fits (say so — it is the whole reason to act NOW); at b10 it does not.
+  const consequence = beyond
+    ? 'El próximo request de ESA sesión YA no cabe (input+completion > window): la sesión no puede compactarse a sí misma.'
+    : `El próximo request TODAVÍA cabe — pero a la tasa activa medida esto son ~${Math.round(CONTEXT_ACTION_ADVISORY_HEADROOM_TOKENS / CONTEXT_ACTION_MEASURED_ACTIVE_RATE)} min de margen.`
+  return (
+    `[From deepartments] context-action (${mark.phase}): "${agentId}" (sesión viva ${mark.sessionId}) — ` +
+    `${mark.effectiveTokens}/${mark.contextWindow} = ${pct}% ⇒ ${mark.action}. ` +
+    `${consequence} ` +
+    `Marcador durable escrito en ${CONTEXT_ACTION_STATE_FILE} (clave ${agentId}, ancla ${mark.sessionId}); ` +
+    `NOTA: NO es un corte de admisión — la admisión de nuevos turnos no se toca desde aquí.`
+  )
+}
+
+/** ACTUADOR — the token headroom between the START of the advisory rung (b9) and
+ * the start of b10, at the real calibration (`window − 90%` = 104 858 tk). The
+ * frame quotes the runway from THIS constant, never from a magic number. */
+export const CONTEXT_ACTION_ADVISORY_HEADROOM_TOKENS = 104_858
+/** ACTUADOR — the host's MEASURED active consumption rate (tk/min) used to turn
+ * that headroom into the runway the frame quotes (5 703 / 9 732 / mean 9 183 /
+ * tail 10 237 measured; the MEAN is used so the quoted runway is not the
+ * optimistic tail). A RATE IS A MEASUREMENT, NOT A KNOB: it is declared here,
+ * named in the frame, and never silently used as a threshold. */
+export const CONTEXT_ACTION_MEASURED_ACTIVE_RATE = 9_183
+
+/** ACTUADOR — the plan input. PURE (no I/O, never throws). */
+export interface ContextActionPlanInput {
+  /** The context-threshold findings the scan produced THIS tick. */
+  findings: readonly HealthFinding[]
+  nowMs: number
+  /** The durable ledger read by the tick (the system-idle pattern: passed in,
+   * returned advanced, persisted ONLY on change). */
+  ledger: Readonly<Record<string, ContextActionMark>>
+}
+
+/** ACTUADOR — the plan: the NEW actions to execute + the next ledger. */
+export interface ContextActionPlan {
+  actions: Array<{ agentId: string; mark: ContextActionMark }>
+  ledger: Record<string, ContextActionMark>
+  changed: boolean
+}
+
+/** ACTUADOR — the ADVISORY rung: the fraction at or above which the consumer
+ * acts EVEN THOUGH the request still fits. This is the declared band decision
+ * and it is the whole point of the tier: `contextAction` is published by the
+ * scan ONLY beyond the window (band b10 — MEASURED: a b9 row carries
+ * `beyondUsableWindow: false` and `contextAction: undefined`), and at b10 the
+ * next request is ALREADY REJECTED — so a consumer that waits for that field
+ * fires only when the session can no longer be asked to compact itself.
+ * 0.9 = the START of band b9, the LAST rung whose request still fits.
+ * MEASURED runway from there at the host's active rate (9 183 tk/min): ~11 min
+ * (b9 spans effective [943718, 1048576) = 104 858 tk). NOT a re-derivation of
+ * the monitor's algebra: the comparison is done on the finding's OWN published
+ * fraction (`effectiveTokens / contextWindow`), so this consumer never forks the
+ * scan's arithmetic — it only decides WHICH published rung it acts on. */
+export const CONTEXT_ACTION_ADVISORY_FRACTION = 0.9
+
+/** ACTUADOR — this consumer's OWN action token for the advisory tier. Deliberately
+ * NOT `compact-or-rotate` (the scan's token, published only beyond the window):
+ * at b9 the session can still accept a turn, so the honest instruction is to
+ * rotate WHILE it still can. The fb-967 class is exactly «the text names an
+ * action the instrument did not» — hence a distinct, attributed token. */
+export const CONTEXT_ACTION_ADVISORY_TOKEN = 'rotate-before-death'
+
+/** ACTUADOR — the BOUNDED retry budget for a failed escalation delivery
+ * (fb-14717: the delivery seam is measured as failing — 25 `delivery-failed`
+ * keys over 7 distinct messages, 51 of 60 alerts in that class). A permanently
+ * broken seam must not be retried forever, and a transient one must not lose
+ * the act for the whole incarnation: 3 attempts over the retry window. */
+export const CONTEXT_ACTION_ESCALATION_MAX_ATTEMPTS = 3
+
+/** ACTUADOR — the retry cadence window in ms (the shared HEALTH_DEDUPE_WINDOW_MS
+ * convention, 30 min): a `pending` escalation is re-attempted no sooner than
+ * this after the last failed attempt, so the retry cannot become a per-tick
+ * storm while the seam is down. */
+export const CONTEXT_ACTION_ESCALATION_RETRY_MS = 30 * 60 * 1000
+
+/** ACTUADOR — decide what the NEXT tick must do with an existing mark for the
+ * SAME session: `'skip'` (already settled — delivered, or honestly actor-less),
+ * `'retry'` (a delivery failed and the budget/window still allow another try),
+ * or `'act'` (no mark for this session — a fresh act). PURE. Exported so the
+ * retry policy is testable on its own, without driving a tick. */
+export function contextActionResolution(
+  prev: ContextActionMark | undefined,
+  sessionId: string,
+  nowMs: number
+): 'skip' | 'retry' | 'act' {
+  if (prev === undefined || prev.sessionId !== sessionId) return 'act'
+  // A DIFFERENT tier on the same session is a NEW fact (the escalation of the
+  // consequence) — handled by the caller before this point; here we only decide
+  // the same-tier outcome.
+  if (prev.escalation !== 'pending') return 'skip'
+  if ((prev.escalationAttempts ?? 0) >= CONTEXT_ACTION_ESCALATION_MAX_ATTEMPTS) return 'skip'
+  // The retry clock is the LAST ATTEMPT when one is recorded, else the act's own
+  // ts (a legacy row that never recorded an attempt clock).
+  const since = prev.lastAttemptAt ?? prev.at
+  if (nowMs - since < CONTEXT_ACTION_ESCALATION_RETRY_MS) return 'skip'
+  return 'retry'
+}
+
+/** ACTUADOR — turn the findings into ACTIONS, anchored to the live session, in
+ * TWO declared tiers (see `phase`):
+ *   - `beyond-usable-window` (band b10, `beyondUsableWindow === true`): the scan
+ *     ITSELF named the action — execute `contextAction` verbatim.
+ *   - `advisory` (the fraction reaches `CONTEXT_ACTION_ADVISORY_FRACTION` while
+ *     the request still fits): the scan named NOTHING at this rung, so this
+ *     consumer acts on its OWN declared token — the last chance to save the
+ *     session, ~11 min before the wall at the measured rate.
+ * Both tiers are SESSION-INDEPENDENT (see `phase`). PURE — never throws. */
+export function planContextActions(input: ContextActionPlanInput): ContextActionPlan {
+  const ledger: Record<string, ContextActionMark> = { ...input.ledger }
+  const actions: Array<{ agentId: string; mark: ContextActionMark }> = []
+  let changed = false
+  // Which agents the FINDINGS loop already decided about this tick (so the
+  // retry pass below never double-handles the same mark).
+  const decided = new Set<string>()
+  for (const finding of input.findings) {
+    if (finding.kind !== 'context-threshold') continue
+    const agentId = finding.postId ?? finding.hostId
+    if (agentId === undefined || agentId === '') continue
+    // THE ANCHOR GATE: without the live session there is no event identity —
+    // the marker would be keyed to a band name (the measured fb-1091 trap).
+    // No session → NO action (conservative; the host ALERT path is unaffected).
+    const sessionId = finding.sessionId
+    if (sessionId === undefined || sessionId === '') continue
+    const contextWindow = finding.contextWindow
+    if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) continue
+    const projected = typeof finding.contextProjectedTokens === 'number' && Number.isFinite(finding.contextProjectedTokens) ? finding.contextProjectedTokens : 0
+    const reserve = typeof finding.contextReserveTokens === 'number' && Number.isFinite(finding.contextReserveTokens) ? finding.contextReserveTokens : 0
+    const effectiveTokens = projected + reserve
+    const pct = effectiveTokens / contextWindow
+    // THE TIER: the scan's own boolean decides first (it is the authority on
+    // «already impossible»); otherwise the published fraction decides whether
+    // this is the last rung that still fits.
+    const beyond = finding.beyondUsableWindow === true
+    const advisory = !beyond && pct >= CONTEXT_ACTION_ADVISORY_FRACTION
+    if (!beyond && !advisory) continue
+    const phase: ContextActionMark['phase'] = beyond ? 'beyond-usable-window' : 'advisory'
+    // Same session AND same tier already handled → the SAME episode. TWO
+    // outcomes, and conflating them was the fb-14717 bug:
+    //   * SETTLED (`delivered` / `no-actor`) → never re-act: the act happened
+    //     (or was honestly impossible) and re-acting would be noise;
+    //   * `pending` (the DELIVERY FAILED) → RETRY while the bounded budget and
+    //     the retry window allow it. Before this, the anchor was persisted even
+    //     on failure, so this gate skipped the act FOREVER for that incarnation
+    //     and the escalation died in silence — measured, and the seam failing
+    //     here is exactly the one measured as failing in production.
+    // A DIFFERENT session (a fresh incarnation) is a NEW event and DOES re-act.
+    // A tier ESCALATION (advisory → beyond) on the same session is a NEW fact.
+    const prev = ledger[agentId]
+    decided.add(agentId)
+    if (prev !== undefined && prev.sessionId === sessionId && prev.phase === phase) {
+      if (contextActionResolution(prev, sessionId, input.nowMs) !== 'retry') continue
+      // RETRY: keep the ORIGINAL anchor ts (`at` = when the act first ran — the
+      // event fact never moves) and re-emit the SAME mark so the tick re-attempts
+      // the delivery. It is NOT a new act: it is the SAME act, still undelivered.
+      const retryMark: ContextActionMark = { ...prev, lastAttemptAt: input.nowMs }
+      ledger[agentId] = retryMark
+      actions.push({ agentId, mark: retryMark })
+      // The ANCHOR is unchanged (the act's `at`/`sessionId`/tier are the same
+      // fact); only the attempt clock moved. `changed = true` so the caller
+      // PERSISTS the attempt clock — without it the delivery would be re-tried
+      // at the same ts forever and the window would never advance.
+      changed = true
+      continue
+    }
+    // The token: consumed VERBATIM when the instrument named it; this consumer's
+    // OWN declared token otherwise (never a fabricated `compact-or-rotate`).
+    const action = beyond
+      ? (typeof finding.contextAction === 'string' && finding.contextAction !== '' ? finding.contextAction : 'compact-or-rotate')
+      : CONTEXT_ACTION_ADVISORY_TOKEN
+    const mark: ContextActionMark = {
+      sessionId,
+      at: input.nowMs,
+      action,
+      phase,
+      pct,
+      effectiveTokens,
+      contextWindow
+    }
+    ledger[agentId] = mark
+    actions.push({ agentId, mark })
+    changed = true
+  }
+  // Retention prune (the file never grows unbounded). A pruned entry cannot
+  // shadow anything: identity is the SESSION, so a later crossing of the same
+  // agent with the same sessionId would re-act — which is the CORRECT behavior
+  // (the marker was 24 h stale; re-stating it costs one write).
+  for (const [agentId, mark] of Object.entries(ledger)) {
+    if (input.nowMs - mark.at > CONTEXT_ACTION_RETENTION_MS) {
+      delete ledger[agentId]
+      changed = true
+    }
+  }
+  return { actions, ledger, changed }
+}
+
+// ---------------------------------------------------------------------------
 // M-5 (FASE 4 kickoff 2026-08-31, owner gap «misión entregada a un head pero
 // NO INICIADA») — the mission-stalled watchdog: a HEAD post whose HOST→head
 // mission delivery (a mission message the host handed the head through the bus
@@ -8087,6 +8466,85 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         })
         contextFindings = contextScan.findings
         if (contextScan.changed) await writeContextTierLatches(deps.stateDir, contextScan.latches)
+        // ACTUADOR DEL CONTEXTO — THE CONSUMER (2026-09-16). The scan above
+        // ALREADY named the action (`contextAction`/`beyondUsableWindow`); this
+        // is who EXECUTES it. ANCHORED TO THE LIVE SESSION, never to the band
+        // name (the fb-1091 trap — the reasoning is in the block comment above
+        // `CONTEXT_ACTION_STATE_FILE`). It runs INSIDE this same try so a wiring
+        // failure degrades to the pre-actuator behavior (the finding + the host
+        // ALERT were already produced — the actuator is ADDITIVE, never a
+        // precondition of the monitor).
+        if (contextFindings.length > 0) {
+          const actionLedger = readContextActionLedger(deps.stateDir)
+          const managerByPost = new Map<string, string>()
+          for (const post of posts) {
+            if (post.managerId !== undefined && post.managerId !== '') managerByPost.set(post.postId, post.managerId)
+          }
+          const actionPlan = planContextActions({
+            findings: contextFindings,
+            nowMs,
+            ledger: actionLedger
+          })
+          // THE OBSERVABLE ACT (declare it to the log, always — a log line is
+          // the trace even when no escalation recipient resolves).
+          for (const { agentId, mark } of actionPlan.actions) {
+            deps.logger?.warn(
+              `[deepartments] system-health: context-action (${mark.phase}) ${mark.action} for "${agentId}" — session ${mark.sessionId} at ${Math.round(mark.pct * 100)}% (${mark.effectiveTokens}/${mark.contextWindow}); marker in ${CONTEXT_ACTION_STATE_FILE}`
+            )
+          }
+          if (deps.notifyPost !== undefined) {
+            for (const { agentId, mark } of actionPlan.actions) {
+              const manager = managerByPost.get(agentId)
+              // ANTI-SELF-FEED: the escalation goes to the MANAGER of the
+              // flagged post and NEVER to the flagged post itself. Addressing
+              // the post whose context is exhausted would add a NEW pending to
+              // the very entity that cannot process it (the fb-759 self-loop
+              // class — the same reason `healthNotifyHead` goes no-wake when
+              // `headId === postId`).
+              //
+              // HALLAZGO A (fb-14717 — DECLARED LIMIT, not a bug to «fix» by
+              // widening the anti-self-feed): a HEAD post carries NO `managerId`
+              // (MEASURED: quality-head / research-head / internal-programming-head
+              // are all undefined; only workers carry one). The incident's own
+              // victim is a HEAD ⇒ for it there is NO MANAGER TO ESCALATE TO and
+              // therefore NO delivery. That is TERMINAL and is now recorded
+              // HONESTLY as `no-actor` instead of being an invisible gap: the
+              // marker + the existing host ALERT still carry the fact, and the
+              // ledger names the missing actor. Delivering to the flagged post
+              // itself is NOT the answer — that is the fb-759 loop.
+              const managerSelfReferential = manager === undefined || manager === '' || manager === agentId
+              if (managerSelfReferential) {
+                actionPlan.ledger[agentId] = { ...mark, escalation: 'no-actor' }
+                actionPlan.changed = true
+                deps.logger?.warn(
+                  `[deepartments] system-health: context-action for "${agentId}" has NO escalation actor (${manager === agentId ? 'the manager IS the flagged post' : 'no manager resolves — a HEAD carries no managerId'}) — marker only, no delivery`
+                )
+                continue
+              }
+              try {
+                await deps.notifyPost(manager, buildContextActionFrame(agentId, { ...mark, escalatedTo: manager }), { sourceKey: contextActionKey(agentId, mark.sessionId) })
+                // The marker records WHERE it escalated (the act is auditable
+                // from the file alone — never only from the log).
+                actionPlan.ledger[agentId] = { ...mark, escalatedTo: manager, escalation: 'delivered' }
+                actionPlan.changed = true
+              } catch (error: unknown) {
+                // fb-14717 — THE FIX: a FAILED delivery is recorded as `pending`
+                // (with its attempt clock) instead of being swallowed. The next
+                // tick's `contextActionResolution` re-attempts it while the
+                // bounded budget and the retry window allow it. Before this the
+                // anchor was persisted on failure and the same-session gate
+                // skipped the act forever — the escalation died in silence.
+                const attempts = (mark.escalationAttempts ?? 0) + 1
+                actionPlan.ledger[agentId] = { ...mark, escalation: 'pending', escalationAttempts: attempts, lastAttemptAt: nowMs }
+                actionPlan.changed = true
+                deps.logger?.warn(
+                  `[deepartments] system-health: context-action escalation to "${manager}" FAILED (attempt ${attempts}/${CONTEXT_ACTION_ESCALATION_MAX_ATTEMPTS}, will retry): ${error instanceof Error ? error.message : String(error)}`
+                )
+              }
+            }
+          }
+          if (actionPlan.changed) await writeContextActionLedger(deps.stateDir, actionPlan.ledger)
+        }
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
