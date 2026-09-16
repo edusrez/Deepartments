@@ -990,64 +990,86 @@ export const RE_DELIVERY_DEFAULT_BASE_DELAY_MS = 15_000
 export const RE_DELIVERY_DEFAULT_MAX_DELAY_MS = 10 * 60_000
 
 /** LANE ② — the MAX-ATTEMPTS stop (12): after this many failed attempts
- * (counted over the CAP's OWN window — `RE_DELIVERY_CAP_WINDOW_MS`, 2 h), the
- * automatic re-drive STOPS for that pair — ONE 'terminal' row + a loud WARN
- * (stop-with-alert) — instead of re-attempting forever (the 450/226-attempt
- * storms). The DURABLE record stays in messages.jsonl (no content loss —
- * recovery is manual/operational). */
+ * (windowed by the storm window), the automatic re-drive STOPS for that pair —
+ * ONE 'terminal' row + a loud WARN (stop-with-alert) — instead of re-attempting
+ * forever (the 450/226-attempt storms). The DURABLE record stays in
+ * messages.jsonl (no content loss — recovery is manual/operational). */
 export const RE_DELIVERY_DEFAULT_MAX_ATTEMPTS = 12
 
 /** LANE ② — the attempt-count window (1 h): only the pair's rows inside the
- * last hour count toward the STORM metric and the per-pair BACKOFF (an OLD
- * failure history never keeps a pair permanently exhausted). It does NOT drive
- * the MAX-ATTEMPTS CAP any more — see `RE_DELIVERY_CAP_WINDOW_MS`, which is the
- * cap's OWN window. The two questions are different ("what is happening in the
- * last hour?" vs "how many attempts has this pair accumulated?") and answering
- * both from ONE counter is what made the cap unreachable (fb-79 incident). */
+ * last hour count toward the backoff/exhaustion math (an OLD failure history
+ * never keeps a pair permanently exhausted). */
 export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
 
-/** LANE ② (2026-09-16, the THIRD WAY) — the MAX-ATTEMPTS CAP's OWN window,
- * derived from the top of the backoff/cap product:
- * `max(maxAttempts * maxDelayMs, RE_DELIVERY_STORM_WINDOW_MS)`, i.e.
- * `max(12 * 10 min, 1 h)` = **2 h**.
+/** LANE ② (2026-09-16, the FOURTH WAY) — whether a status means the pair GOT
+ * THROUGH: the success class that RESETS a pair's consecutive-failure run. */
+function isDeliverySuccess(status: DeliveryStatus): boolean {
+  return status === 'delivered' || status === 'resumed' || status === 'self'
+}
+
+/** LANE ② (2026-09-16, the FOURTH WAY) — PURE: the CONSECUTIVE attempt count of
+ * one pair — its counted failures since the pair's last SUCCESSFUL delivery, at
+ * ANY age, with NO window. This is the count the MAX-ATTEMPTS CAP reads.
  *
- * WHY A DEDICATED WINDOW AND NOT A CUMULATIVE COUNT. The cap is only ever READ
- * at a sweep decision instant, which is PHASE-LOCKED ~600-660 s after the last
- * `failed`, and each attempt appends TWO countable rows, so at the MEASURED
- * ~663 s cadence a pair accrues `2 * 3_600_000 / 663_000 ≈ 10.86` rows per hour
- * against a cap of 12 — a 1 h window's CEILING is then exactly 12 with ZERO
- * margin, reachable only at the window's most favourable alignment, which the
- * phase-locked decision instant never hits (MEASURED: the count peaked at 10
- * across 6 793 real decision instants). The structural form is
- * `cap reachable ⟺ windowMs >= maxAttempts * maxDelayMs`.
+ * ★ THE UNIT IS ONE `failed` ROW PER ATTEMPT — NOT the row, and NOT `prepared`.
+ * Each re-drive cycle appends a `prepared` write-ahead row and then its `failed`
+ * rejection, so counting BOTH would report 2x the attempts and fire the cap at 6
+ * attempts instead of 12; and counting `prepared` alone misses the failure set
+ * the stop is about (a `failed` row IS the attempt that did not get through).
+ * MEASURED consequences, which fix the unit:
+ *   - the legacy LANE ② test seeds 12 `failed` rows (no `prepared`) and requires
+ *     the cap to fire — so the counter MUST count `failed`;
+ *   - the host's distinguishing case («fails 11 times, DELIVERS, then fails 11
+ *     more ⇒ must NOT be exhausted») discriminates ONLY here — cumulative 22 vs
+ *     consecutive 11 — and does NOT discriminate under the row unit (44 vs 22:
+ *     both above the cap).
  *
- * The derivation is the point: `maxAttempts * maxDelayMs` is EXACTLY the
- * MINIMUM window that holds `maxAttempts` attempts at the SLOWEST cadence the
- * backoff can produce (`maxDelayMs` apart). A window of that size, floored at
- * the storm window so it can never happen to be the NARROWER of the two, is
- * therefore sufficient at ANY cadence the backoff admits.
+ * WHY CONSECUTIVE AND NOT WINDOWLESS-CUMULATIVE. A cumulative count never
+ * releases an OLD failure history, so a pair that failed 11 times, RECOVERED,
+ * and later failed 11 more would be condemned by attempts it already came back
+ * from — BREAKING the contract «an OLD failure history never keeps a pair
+ * permanently exhausted» (:1000-1001). Resetting on the success class makes that
+ * sentence LITERALLY TRUE: the history that keeps a pair exhausted is never OLD,
+ * it is the pair's CURRENT run of failures. No comment needs rewriting — the
+ * contract is satisfied, not relocated. And no TTL state is carried.
  *
- * WHY NOT WINDOWLESS (the cumulative variant, preserved in
- * `.dsh/reports/redelivery-cumulative-COHERENT-FINAL-20260916.patch`). A
- * windowless count never releases an OLD failure history, so a pair that
- * recovered and later failed again is condemned by attempts it already came
- * back from — it BREAKS the documented contract «an OLD failure history never
- * keeps a pair permanently exhausted» (:999-1002 pre-fix). The window preserves
- * that contract AND makes the cap reachable: 2 h gaps between attempts ⇒ the
- * count returns to 0, so a pair stops being exhausted BY TIME, with no TTL
- * state to carry (`-409` explicitly rejected a TTL; this delivers its intent
- * with the ledger it already has).
+ * WHY NOT A WINDOW EITHER (the THIRD WAY, a 2 h cap window). A window releases
+ * history BY TIME, so a pair STILL FAILING inside the window is released and
+ * re-driven again — and the cap becomes unreachable at any cadence slower than
+ * `windowMs / maxAttempts`. The consecutive count has NO CLOCK in it: the cap is
+ * reachable at ANY cadence, and it is released by the only event that means the
+ * pair actually recovered.
  *
  * WHY NOT WIDENING `RE_DELIVERY_STORM_WINDOW_MS` (the `71b800f` variant,
  * reverted in `471191d`). That single window also feeds the backoff and the
- * storm metric, so widening it would change the REGIME of EVERY pair — paying
- * one pair's debt with every other pair's money. Here the storm metric and the
- * backoff keep their 1 h window BIT FOR BIT: zero regime change by CONSTRUCTION,
- * not by a measurement that happens to read 0. */
-export const RE_DELIVERY_CAP_WINDOW_MS = Math.max(
-  RE_DELIVERY_DEFAULT_MAX_ATTEMPTS * RE_DELIVERY_DEFAULT_MAX_DELAY_MS,
-  RE_DELIVERY_STORM_WINDOW_MS
-)
+ * storm metric, so widening it changes the REGIME of EVERY pair to fix 13 — the
+ * floor is discarded for the same reason as before. Here the storm metric and
+ * the backoff keep their 1 h window BIT FOR BIT: zero regime change by
+ * CONSTRUCTION, and this counter is a SEPARATE computation (the decoupling).
+ *
+ * ⚠️ KNOWN LIMIT, MEASURED (fb-1704, NOT repaired here). This count is only as
+ * durable as the ledger's countable rows, and the G2 legacy drain REWRITES
+ * `prepared` rows to `terminal` IN PLACE, keeping their `ts`
+ * (`settleG2Batch`). Such a rewrite ERASES the evidence retroactively, so this
+ * count can FALL for a pair that is not recovering. Measured on the live ledger:
+ * of the pairs whose reconstructed history reaches the cap, 6 of 13 now carry
+ * 0 countable rows. That is a SECOND, INDEPENDENT cause of the same symptom and
+ * its owner is not this lane. */
+export function pairConsecutiveAttemptCount(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
+  let count = 0
+  // Walk BACKWARDS from the pair's most recent transition: the run is the TAIL of
+  // the pair's history, clipped at its last success. One countable row per
+  // attempt — the `failed` rejection (see the unit note above). `terminal` does
+  // NOT clip — it is the cap's own stop word, never a recovery, so the failure
+  // run continues through it (a seam re-send after a stop extends the SAME run).
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (isDeliverySuccess(row.status)) return count
+    if (row.status === 'failed') count++
+  }
+  return count
+}
 
 /** LANE ② (fb-58) — the prepared-stuck criterion (10 min): 0 prepared rows
  * stuck > 10 min to a live non-dormant recipient (the crash-recovery class the
@@ -1097,7 +1119,9 @@ export function redeliveryAttemptsExhausted(attempts: number, maxAttempts: numbe
 
 /** PURE — count the delivery ATTEMPTS of one pair (the sidecar rows whose
  * status is 'prepared' or 'failed' inside `windowMs`): the attempt ledger the
- * backoff/exhaustion math reads. */
+ * backoff/storm math reads. Its `windowMs` is the CALLER's question — the
+ * MAX-ATTEMPTS CAP no longer reads this counter at all (see
+ * `pairConsecutiveAttemptCount`): the cap and the storm are TWO computations. */
 export function pairAttemptCount(
   rows: readonly DeliveryRow[],
   messageId: string,
@@ -1391,10 +1415,10 @@ export interface DeliveryRedelivererDeps {
  *       construction). The BOOT pass keeps its ONE-TIME immediate semantics
  *       (the "no-retry-hasta-boot" recovery contract — a single boot is not a
  *       storm; the restart-loop storm is bounded by the max-attempts stop);
- *   (b) MAX-ATTEMPTS STOP-WITH-ALERT (boot + sweep): a pair whose attempt count
- *       — read over the CAP's OWN window (`RE_DELIVERY_CAP_WINDOW_MS`, 2 h),
- *       DISTINCT from the 1 h backoff/storm window — reaches `maxAttempts` is
- *       settled to ONE 'terminal' row
+ *   (b) MAX-ATTEMPTS STOP-WITH-ALERT (boot + sweep): a pair whose CONSECUTIVE
+ *       failure count — its counted failures since the last successful delivery,
+ *       NO window, RESET on 'delivered' (`pairConsecutiveAttemptCount`) —
+ *       reaches `maxAttempts` is settled to ONE 'terminal' row
  *       + a loud WARN — the automatic re-drive STOPS (the message record stays
  *       durable in messages.jsonl — no content loss, recoverable manually);
  *   (c) the non-boot SWEEP (the no-restart re-drive seam): a bounded,
@@ -1460,11 +1484,6 @@ export class DeliveryRedeliverer {
   private readonly maxDelayMs: number
   private readonly maxAttempts: number
   private readonly stormWindowMs: number
-  /** The CAP's OWN window (`RE_DELIVERY_CAP_WINDOW_MS`, 2 h) — DISTINCT from
-   * `stormWindowMs` (1 h, the backoff/storm metric's) on purpose: the two
-   * questions ("attempts accumulated" vs "what is happening in the last hour")
-   * are answered by TWO counters, and keeping them separate is the fix. */
-  private readonly capWindowMs: number
   private readonly preparedStuckMs: number
   private readonly g2DrainSeedLimit: number
   private readonly legacyAgeMs: number
@@ -1508,15 +1527,8 @@ export class DeliveryRedeliverer {
       /** The in-window attempt count that stops the automatic re-drive with an
        * alert (default `RE_DELIVERY_DEFAULT_MAX_ATTEMPTS`). */
       maxAttempts?: number
-      /** The attempt-count window (default `RE_DELIVERY_STORM_WINDOW_MS`) — the
-       * BACKOFF and STORM metric's window. */
+      /** The attempt-count window (default `RE_DELIVERY_STORM_WINDOW_MS`). */
       stormWindowMs?: number
-      /** The MAX-ATTEMPTS CAP's OWN window (default
-       * `RE_DELIVERY_CAP_WINDOW_MS` = `max(maxAttempts * maxDelayMs, storm
-       * window)`, i.e. 2 h). SEPARATE from `stormWindowMs` by design — the cap
-       * counts a pair's attempts over its own horizon so that it is reachable at
-       * the REAL measured cadence without touching the backoff/storm regime. */
-      capWindowMs?: number
       /** The prepared-stuck criterion (default `RE_DELIVERY_PREPARED_STUCK_MS`). */
       preparedStuckMs?: number
       /** LANE ②-bis — the per-cycle cap of the G2 legacy drain seed (default
@@ -1535,11 +1547,6 @@ export class DeliveryRedeliverer {
     this.maxDelayMs = opts.maxDelayMs ?? RE_DELIVERY_DEFAULT_MAX_DELAY_MS
     this.maxAttempts = opts.maxAttempts ?? RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
     this.stormWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
-    // The DERIVED default, not a bare 2 h literal: the cap must be able to hold
-    // `maxAttempts` attempts at the SLOWEST cadence the backoff admits
-    // (`maxDelayMs` apart), and never narrower than the storm window. A caller
-    // overriding `maxAttempts`/`maxDelayMs` gets a cap window that follows them.
-    this.capWindowMs = opts.capWindowMs ?? Math.max(this.maxAttempts * this.maxDelayMs, this.stormWindowMs)
     this.preparedStuckMs = opts.preparedStuckMs ?? RE_DELIVERY_PREPARED_STUCK_MS
     this.g2DrainSeedLimit = opts.g2DrainSeedLimit ?? G2_DRAIN_SEED_DEFAULT_LIMIT
     this.legacyAgeMs = opts.legacyAgeMs ?? RE_DELIVERY_PREPARED_STUCK_MS
@@ -1598,20 +1605,20 @@ export class DeliveryRedeliverer {
   }
 
   /** builder-411 (2026-09-16) — the CAP's attempt count of one pair: the pair's
-   * `prepared`/`failed` transitions inside the CAP'S OWN window
-   * (`capWindowMs` = 2 h), NOT the backoff/storm 1 h window. The two
-   * computations are SEPARATE by design — the cap asks "how many attempts has
-   * this pair accumulated?", the backoff/storm asks "what is happening in the
-   * last hour?". Reading one counter for both was the defect (`fb-79`): a 1 h
-   * window holds only ~10.86 rows at the MEASURED ~663 s cadence, against a cap
-   * of 12, so the stop was DEAD CODE for every pair of every class.
+   * CONSECUTIVE failures since its last successful delivery
+   * (`pairConsecutiveAttemptCount`) — the count the MAX-ATTEMPTS stop reads.
+   * DISTINCT from the STORM/backoff count (`pairAttemptCount(..., stormWindowMs)`)
+   * on purpose: the two are separate computations, and keeping them separate is
+   * the decoupling (the cap must be reachable at the real measured cadence
+   * WITHOUT touching the 1 h storm window or the backoff regime of any pair).
    *
-   * The `Date.now()` here is the same injected-clock seam the pre-fix code used,
-   * and it is read in the SWEEP's own decision instant (`sweepDue` calls this via
-   * `pairAttempts`); the boot pass reads it too. A test drives the sweep through
-   * the production `sweepDue(nowMs)` seam. */
+   * `nowMs` is accepted but UNUSED by this counter — the consecutive run has no
+   * clock in it (that is the point). It stays in the signature so the boot pass
+   * and the sweep can pass the SAME decision instant they use everywhere else,
+   * and so a future windowed cap could use it without re-threading call sites. */
   private pairAttempts(rows: readonly DeliveryRow[], messageId: string, recipientId: string, nowMs: number): number {
-    return pairAttemptCount(rows, messageId, recipientId, nowMs, this.capWindowMs)
+    void nowMs
+    return pairConsecutiveAttemptCount(rows, messageId, recipientId)
   }
 
   /** Drive ONE eligible (messageId, recipientId) pair: decide terminal / skip /
@@ -2041,17 +2048,17 @@ export class DeliveryRedeliverer {
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
         // builder-411 — the TWO computations are SEPARATE here, by design:
-        //   - `backoffAttempts`: the WINDOWED 1 h count, which drives the
+        //   - `backoffAttempts`: the WINDOWED (1 h) count — it drives the
         //     per-pair exponential backoff (`pairDue`) and is the storm metric's
-        //     own unit; UNCHANGED (bit for bit, same constant, same window).
-        //   - `capAttempts`: the CAP's OWN 2 h count (`capWindowMs`), the one the
-        //     MAX-ATTEMPTS stop reads, so the cap is reachable at the REAL
-        //     measured cadence (~663 s) without touching the backoff/storm
-        //     regime of any pair.
-        // Before the fix both were the SAME 1 h number, which is WHY the stop was
-        // unreachable (a 1 h window holds only ~10.86 rows at that cadence,
-        // against a cap of 12 — zero margin, never reached at the phase-locked
-        // decision instant).
+        //     own unit; UNCHANGED.
+        //   - `capAttempts`: the CONSECUTIVE (windowless, reset-on-success)
+        //     count — the one the MAX-ATTEMPTS stop reads, so the cap is
+        //     reachable at the real measured cadence (~665 s) without touching
+        //     the backoff/storm regime of any pair, and a pair that actually
+        //     RECOVERED is released instead of being condemned by old failures.
+        // Before the fix both were the same windowed number, which is WHY the
+        // stop was unreachable (a 1 h window holds only ~10.8 rows at that
+        // cadence, against a cap of 12).
         const backoffAttempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
         const capAttempts = this.pairAttempts(rows, row.messageId, row.recipientId, nowMs)
         // A DEAD recipient settles regardless (the alive check inside

@@ -1,5 +1,6 @@
-// dsh-deepartments — builder-411 (run token 1e06899c, 2026-09-16): THE THIRD WAY
-// — TWO COUNTERS, TWO WINDOWS. The max-attempts stop existed but was UNREACHABLE.
+// dsh-deepartments — builder-411 (run token 1e06899c, 2026-09-16): THE FOURTH WAY
+// — TWO COUNTERS: the cap counts CONSECUTIVE FAILURES, the backoff/storm keeps
+// its 1 h WINDOW. The max-attempts stop existed but was UNREACHABLE.
 //
 // THE INCIDENT (measured, inherited from -409): six `Turn-error http-5xx`
 // head-notifications to a STABLE post id (`quality-head`) cited a session that had
@@ -10,32 +11,54 @@
 //
 // WHY THE STOP DID NOT FIRE. The stop is `redeliveryAttemptsExhausted(attempts,
 // 12)` in `drivePair`, and it was fed by the SAME 1 h WINDOWED count
-// (`pairAttemptCount`) that the backoff and the storm metric use. Each attempt
-// appends TWO countable rows ('prepared' + 'failed'), so a failing pair accrues
-// `2 * 3_600_000 / 663_000 ≈ 10.86` rows per hour — against a cap of 12; and the
-// count is only ever READ at a sweep decision instant, PHASE-LOCKED ~600-660 s
-// after the last `failed`. MEASURED over 6 793 real decision instants on the 6
-// stuck pairs: the count peaked at **10**. So `attempts >= 12` was FALSE forever
-// and the stop was DEAD CODE. Test (i) below REPRODUCES that peak-of-10 exactly,
-// and shows the cap firing at the SAME instant once it reads its own window.
+// (`pairAttemptCount`) that the backoff and the storm metric use. A pair accrues
+// `2 * 3_600_000 / 663_000 ≈ 10.86` countable rows per hour — against a cap of 12;
+// and the count is only ever READ at a sweep decision instant, PHASE-LOCKED
+// ~600-660 s after the last `failed`. MEASURED over 6 793 real decision instants
+// on the 6 stuck pairs: the count peaked at **10**. So `attempts >= 12` was FALSE
+// forever and the stop was DEAD CODE. Test (i) below REPRODUCES that peak of 10
+// exactly, and shows the cap firing at the SAME instant once it reads its own
+// counter.
 //
-// THE FIX (this lane — the host's THIRD WAY). One counter for two questions was
-// the error: the cap asks "how many attempts has this pair accumulated?" (wants a
-// LONG history) while the backoff/storm asks "what is happening in the last
-// hour?" (wants a SHORT window). So the CAP reads its OWN count over its OWN
-// window, derived from the product: `max(maxAttempts * maxDelayMs, storm window)`
-// = `max(2 h, 1 h)` = **2 h**. The backoff and the storm metric keep the 1 h
-// window BIT FOR BIT — zero regime change by CONSTRUCTION (test (v) measures it).
+// THE FIX (this lane — the host's FOURTH WAY). One counter for two questions was
+// the error: the cap asks "how many attempts has this pair made SINCE IT LAST
+// WORKED?" while the backoff/storm asks "what is happening in the last hour?". So
+// the cap reads `pairConsecutiveAttemptCount` — the pair's counted failures since
+// its last SUCCESSFUL delivery, NO window, RESET on `delivered` — while the
+// backoff and the storm metric keep the 1 h window BIT FOR BIT (test (v) measures
+// it). The host measured the blast radius on the real ledger (11 659 pairs): 13
+// reach the cumulative cap, ZERO of them ever delivered after attempt 12, and all
+// 13 are the live loop. So the consecutive reset costs NOTHING measured and the
+// written contract SURVIVES LITERALLY — `:1000-1001` is left VERBATIM: «an OLD
+// failure history never keeps a pair permanently exhausted» is now exactly true,
+// because the reset releases the old history on the pair's own recovery.
 //
-// THE TWO DISCARDED VARIANTS (explicitly, so a future reader does not re-try
-// them): (1) a WINDOWLESS CUMULATIVE count breaks the contract «an OLD failure
-// history never keeps a pair permanently exhausted» — it never releases old
-// history, condemning a pair by attempts it already recovered from;
-// (2) widening `RE_DELIVERY_STORM_WINDOW_MS` (the `71b800f` variant, reverted in
-// `471191d`) changes the REGIME of the backoff and storm threshold for EVERY
-// pair. The 2 h cap window preserves the contract (a pair stops being exhausted
-// BY TIME — 2 h without attempts ⇒ count 0 — so no TTL state is needed) while
-// leaving every other pair untouched.
+// THE UNIT IS THE ATTEMPT, NOT THE ROW — and it is load-bearing. Each cycle
+// appends TWO countable rows (`prepared` + `failed`), so counting rows would fire
+// the cap at 6 attempts. Test (ii) proves the unit matters: the host's
+// distinguishing case («fails 11, DELIVERS, fails 11 ⇒ NOT exhausted»)
+// discriminates ONLY under the attempt unit (cumulative 22 vs consecutive 11);
+// under the row unit both readings sit above the cap (44 vs 22) and the case
+// would NOT discriminate.
+//
+// THE VARIANTS CONSIDERED AND DISCARDED (so a future reader does not re-try them):
+// (1) WINDOWLESS CUMULATIVE — never releases old history, so test (ii)'s recovered
+// pair WOULD be condemned; it breaks the contract `:1000-1001`;
+// (2) a 2 h CAP WINDOW — released by TIME, so a pair STILL FAILING inside the
+// window is released and re-driven again, and the cap is unreachable at any
+// cadence slower than `windowMs / maxAttempts`;
+// (3) widening `RE_DELIVERY_STORM_WINDOW_MS` (the `71b800f` variant, reverted in
+// `471191d`) — changes the REGIME of the backoff and storm threshold for EVERY
+// pair to fix 13.
+//
+// ⚠️ KNOWN LIMIT, MEASURED (fb-1704 — NOT repaired here, different owner). This
+// counter is only as durable as the ledger's countable rows, and the G2 legacy
+// drain REWRITES `prepared` rows to `terminal` IN PLACE keeping their `ts`
+// (`messages.ts` ~:2286). That rewrite ERASES the evidence retroactively, so the
+// achievable count can FALL for a pair that is not recovering. MEASURED on the
+// live ledger: of the pairs whose reconstructed history reaches the cap, 6 of 13
+// now carry 0 countable rows. This is a SECOND, INDEPENDENT cause of the same
+// symptom — see the report for the full measurement.
 //
 // WHAT THIS FIX CEASES — DECLARED EXPLICITLY (the acceptance demands it): it
 // ceases **THE SWEEP**, and **ONLY the sweep**. `needsRedelivery` returns true
@@ -52,9 +75,10 @@
 //
 // MEASUREMENT DISCIPLINE (fb-1236 — the ledger's `status` is NOT stable: the same
 // `(messageId, recipientId, ts)` has been read as `prepared` by some readers and
-// `terminal` by others). This test verifies by **APPEND ORDER** — «is there a NEW
-// transition appended AFTER the terminal row» — never by comparing a status
-// census across two instants. The fixture is deterministic (an INJECTED clock).
+// `terminal` by others — and the G2 settle does exactly that rewrite IN PLACE).
+// This test verifies by **APPEND ORDER** — «is there a NEW transition appended
+// AFTER the terminal row» — never by comparing a status census across two
+// instants. The fixture is deterministic (an INJECTED clock).
 //
 // NO TIME COMPRESSION (the host's critical acceptance). A fast synthetic cadence
 // would go GREEN for the very reason the cap fails in production — a SILENT
@@ -64,18 +88,11 @@
 //
 // ON THE INHERITED ASSERTION (i) «CADENCE INDEPENDENCE» — DELETED, deliberately.
 // The preserved `-409` test asserted the cap count is IDENTICAL (2 x CAP) at
-// spacings of 10 s / 60 s / 663 s / 3 600 s and that the cap FIRES at all of
-// them. That is true of the WINDOWLESS variant it was written against, and it is
-// FALSE for this third way BY CONSTRUCTION — this cap HAS a window (2 h), so it
-// is cadence-DEPENDENT at long spacings. That is not a defect: it is the very
-// property that preserves the contract (a 2 h gap MUST release the count). At a
-// 1 h spacing, 12 attempts span 11 h ⇒ only ~2 attempts fall inside a 2 h window
-// ⇒ the cap correctly does NOT fire. Keeping that assertion would have forced the
-// implementation to be windowless. It is REPLACED by two honest invariants — the
-// SUPERSET invariant (`capCount >= stormCount` at every cadence, so the cap is
-// reachable wherever it was reachable before and strictly more often) and the
-// phase-locked reproduction of the measured peak of 10 — plus the CONTRACT case
-// (ii), which is the case that DECIDES.
+// spacings of 10 s / 60 s / 663 s / 3 600 s. That is true of the WINDOWLESS
+// variant it was written against, and it was FALSE for the 2 h-window variant this
+// lane first shipped. The CONSECUTIVE counter happens to satisfy it again (it has
+// no clock), so test (i) now asserts the honest form: the count is the same at
+// EVERY cadence, and the unit is the ATTEMPT, so it reads CAP and not 2 x CAP.
 //
 // LANE ② DISCIPLINE: 0 builds — the test exercises the SOURCE directly. It
 // deliberately does NOT self-register the `ts-src-loader` hook: that hook rewrites
@@ -91,7 +108,6 @@ import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import {
   DeliveryRedeliverer,
-  RE_DELIVERY_CAP_WINDOW_MS,
   RE_DELIVERY_DEFAULT_MAX_ATTEMPTS,
   RE_DELIVERY_DEFAULT_MAX_DELAY_MS,
   RE_DELIVERY_STORM_WINDOW_MS,
@@ -99,6 +115,7 @@ import {
   markDelivery,
   needsRedelivery,
   pairAttemptCount,
+  pairConsecutiveAttemptCount,
   parseDeliveryRows,
   redeliveryAttemptsExhausted,
   resolveDeliveriesPath,
@@ -127,7 +144,6 @@ const SUBJECT = 'quality-head'
 const CAP = RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
 const T0 = 1_789_570_040_000
 const MESSAGE_ID = 'm-stuck'
-const THREE_DAYS_MS = 3 * 24 * 60 * 60_000
 
 /** The REAL module's seams, bundled so the SAME driver can run against the
  * neutralized textual copy (the RED-first revert-check) with zero repo writes. */
@@ -208,7 +224,7 @@ function incidentRedeliverer(stateDir, M, clock, opts = {}) {
 async function neutralizedModule() {
   const src = readFileSync(new URL('../packages/dshd-core/src/messages.ts', import.meta.url), 'utf8')
   const neutralized = src.replace(
-    'return pairAttemptCount(rows, messageId, recipientId, nowMs, this.capWindowMs)',
+    'return pairConsecutiveAttemptCount(rows, messageId, recipientId)',
     'return pairAttemptCount(rows, messageId, recipientId, nowMs, this.stormWindowMs)'
   )
   assert.notEqual(neutralized, src, 'the neutralization must actually apply (the cap call site present) — otherwise the RED check is a tautology')
@@ -270,7 +286,6 @@ async function driveIncident(M, { cycles = 40, hours = 8, probes = 240 } = {}) {
   const after = await pairRows(M, stateDir)
   const out = {
     effectiveStormWindowMs: r.stormWindowMs,
-    effectiveCapWindowMs: r.capWindowMs,
     terminalAt,
     status,
     deliverCalls: r.__calls.deliver.length,
@@ -290,14 +305,8 @@ async function driveIncident(M, { cycles = 40, hours = 8, probes = 240 } = {}) {
 //     SAME decision instant, plus the superset invariant that replaces the
 //     deleted «cadence independence» assertion.
 // ─────────────────────────────────────────────────────────────────────────────
-test('builder-411 (i) THE SAME INSTANT, TWO WINDOWS: at the MEASURED 663 s cadence and the measured PHASE-LOCK, the 1 h storm count reads EXACTLY the measured peak of 10 (cap DEAD) while the 2 h cap count reads 20 (cap FIRES) — and the cap window is DERIVED, not a literal', () => {
-  // The derivation the shipped constant must satisfy.
-  assert.equal(
-    RE_DELIVERY_CAP_WINDOW_MS,
-    Math.max(CAP * RE_DELIVERY_DEFAULT_MAX_DELAY_MS, RE_DELIVERY_STORM_WINDOW_MS),
-    'the cap window is the DERIVED product `max(maxAttempts * maxDelayMs, storm window)`, so overriding maxAttempts/maxDelayMs keeps the cap reachable'
-  )
-  assert.equal(RE_DELIVERY_CAP_WINDOW_MS, 2 * 60 * 60_000, 'at the shipped constants: 12 * 10 min = 2 h')
+test('builder-411 (i) THE SAME INSTANT, TWO COUNTERS: at the MEASURED 663 s cadence and the measured PHASE-LOCK the 1 h storm count reads EXACTLY the measured peak of 10 (cap DEAD) while the CONSECUTIVE count reads the 12 real attempts (cap FIRES)', () => {
+  // The decoupling is untouched: the storm window and the backoff keep 1 h.
   assert.equal(RE_DELIVERY_STORM_WINDOW_MS, 60 * 60_000, 'RE_DELIVERY_STORM_WINDOW_MS (the STORM metric + the BACKOFF window) is UNCHANGED at 1 h — the decoupling changed the CAP only')
   assert.ok(
     RE_DELIVERY_DEFAULT_MAX_ATTEMPTS * RE_DELIVERY_DEFAULT_MAX_DELAY_MS > RE_DELIVERY_STORM_WINDOW_MS,
@@ -311,7 +320,7 @@ test('builder-411 (i) THE SAME INSTANT, TWO WINDOWS: at the MEASURED 663 s caden
   const lastTs = T0 + (CAP - 1) * MEASURED_CADENCE_MS + DELIVER_LATENCY_MS
   const decisionAt = lastTs + PHASE_LOCK_MS
   const stormCount = pairAttemptCount(rows, MESSAGE_ID, SUBJECT, decisionAt, RE_DELIVERY_STORM_WINDOW_MS)
-  const capCount = pairAttemptCount(rows, MESSAGE_ID, SUBJECT, decisionAt, RE_DELIVERY_CAP_WINDOW_MS)
+  const consecutive = pairConsecutiveAttemptCount(rows, MESSAGE_ID, SUBJECT)
   assert.equal(
     stormCount,
     10,
@@ -319,85 +328,100 @@ test('builder-411 (i) THE SAME INSTANT, TWO WINDOWS: at the MEASURED 663 s caden
   )
   assert.ok(
     !redeliveryAttemptsExhausted(stormCount, CAP),
-    `PRE-FIX (the 1 h window): ${stormCount} < ${CAP} ⇒ the cap does NOT fire — the stop is DEAD CODE, forever`
+    `PRE-FIX (the shared 1 h window): ${stormCount} < ${CAP} ⇒ the cap does NOT fire — the stop is DEAD CODE, forever`
   )
   assert.equal(
-    capCount,
-    20,
-    `THE SAME ROWS, the SAME INSTANT, read through the CAP's OWN 2 h window: ${capCount} rows (10 attempts) ⇒ the cap is reachable with real margin (got ${capCount})`
+    consecutive,
+    CAP,
+    `THE CONSECUTIVE count of the SAME rows reads ${CAP} — the ${CAP} real ATTEMPTS (one \`failed\` row each, NOT ${2 * CAP} rows): the unit is the attempt (got ${consecutive})`
   )
   assert.ok(
-    redeliveryAttemptsExhausted(capCount, CAP),
-    `THE FIX: ${capCount} >= ${CAP} ⇒ the cap FIRES at the very instant it used to miss — and the ONLY difference is WHICH WINDOW the cap's counter reads`
+    redeliveryAttemptsExhausted(consecutive, CAP),
+    `THE FIX: ${consecutive} >= ${CAP} ⇒ the cap FIRES at the very instant it used to miss — and the ONLY difference is WHICH COUNTER the cap reads`
   )
-
-  // ★ THE SUPERSET INVARIANT that replaces «cadence independence» (deleted: it is
-  // false for any windowed cap, by construction, and keeping it would have forced
-  // the windowless implementation). The 2 h window is a SUPERSET of the 1 h one,
-  // so the cap count is never smaller than the storm count — at ANY cadence. The
-  // cap is therefore reachable wherever it was reachable before, and strictly
-  // more often; it never becomes LESS reachable.
-  for (const spacing of [1_000, 10_000, 60_000, MEASURED_CADENCE_MS, 3_600_000]) {
+  // ★ NO CLOCK IN THE COUNTER: the consecutive run is the SAME number however the
+  // attempts are spaced, because it has no window. This is the property the THIRD
+  // WAY (a 2 h cap window) did NOT have — a window releases by TIME and becomes
+  // unreachable at any cadence slower than windowMs / maxAttempts.
+  for (const spacing of [1_000, 10_000, 60_000, MEASURED_CADENCE_MS, 3_600_000, RE_DELIVERY_DEFAULT_MAX_DELAY_MS]) {
     const rs = cadenceRows(CAP, T0, spacing)
-    const last = rs[rs.length - 1].ts
-    for (const at of [last, last + PHASE_LOCK_MS, last + 3_600_000]) {
-      const s = pairAttemptCount(rs, MESSAGE_ID, SUBJECT, at, RE_DELIVERY_STORM_WINDOW_MS)
-      const c = pairAttemptCount(rs, MESSAGE_ID, SUBJECT, at, RE_DELIVERY_CAP_WINDOW_MS)
-      assert.ok(c >= s, `capCount (${c}) >= stormCount (${s}) at a ${spacing} ms spacing / a ${at - last} ms phase — the cap window is a SUPERSET of the storm window, so the cap is never LESS reachable than before`)
-      assert.ok(!redeliveryAttemptsExhausted(c, CAP) || redeliveryAttemptsExhausted(s, CAP) || c > s, `at a ${spacing} ms spacing the cap either fires, or the storm count already fired, or the cap window strictly added rows — never a silent regression`)
-    }
+    assert.equal(
+      pairConsecutiveAttemptCount(rs, MESSAGE_ID, SUBJECT),
+      CAP,
+      `at a ${spacing} ms spacing the consecutive count is STILL ${CAP} — the counter has NO CLOCK, so the cap is reachable at EVERY cadence (this is what the 2 h window variant could not do, and why the host replaced it)`
+    )
+    assert.ok(redeliveryAttemptsExhausted(CAP, CAP), 'and the cap fires at every one of those cadences')
   }
-
-  // ★ AND THE CADENCE DEPENDENCE IS THE CONTRACT, NOT A DEFECT: at the SLOWEST
-  // cadence the backoff can produce (maxDelayMs apart) the window still holds all
-  // 12 attempts, because the window IS `maxAttempts * maxDelayMs`.
-  const slowRows = cadenceRows(CAP, T0, RE_DELIVERY_DEFAULT_MAX_DELAY_MS)
-  const slowLast = slowRows[slowRows.length - 1].ts
-  const slowCapCount = pairAttemptCount(slowRows, MESSAGE_ID, SUBJECT, slowLast, RE_DELIVERY_CAP_WINDOW_MS)
+  // The consecutive counter is UNCHANGED by recency: it has no clock, so unlike
+  // the old windowed count it never decays with age for a pair that is still
+  // failing. (Comparing it to the ROW-unit windowed count would be apples to
+  // oranges — the units differ by the 2 rows per attempt, which is precisely the
+  // unit choice asserted in (ii).)
+  const fresh = cadenceRows(CAP, T0)
+  const aged = cadenceRows(CAP, T0)
   assert.equal(
-    slowCapCount,
-    2 * CAP,
-    `at the SLOWEST admissible cadence (${RE_DELIVERY_DEFAULT_MAX_DELAY_MS} ms = the backoff cap) the CAP window holds ALL ${2 * CAP} rows of ${CAP} attempts — the window is exactly the product, so the slowest cadence the backoff permits still reaches the cap`
+    pairConsecutiveAttemptCount(fresh, MESSAGE_ID, SUBJECT),
+    pairConsecutiveAttemptCount(aged, MESSAGE_ID, SUBJECT),
+    'ageing the SAME run changes NOTHING: the consecutive count has no clock (the property the 1 h windowed count lacks)'
   )
-  assert.ok(redeliveryAttemptsExhausted(slowCapCount, CAP), 'and the cap therefore FIRES at the slowest admissible cadence')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (2) ★ THE CASE THAT DECIDES — THE CONTRACT (the host: «if this case does not
-//     pass, my decision is wrong and I want to know»).
+// (2) ★★ THE CASE THAT DECIDES — the one the host asked for, and the one that
+//     DISTINGUISHES the consecutive variant from the cumulative one.
 // ─────────────────────────────────────────────────────────────────────────────
-test('builder-411 (ii) ★ THE CONTRACT: a pair with 12 attempts from THREE DAYS ago is NOT exhausted — an OLD failure history never keeps a pair permanently exhausted', () => {
-  // The contract's own words (:999-1002 pre-fix): «an OLD failure history never
-  // keeps a pair permanently exhausted». 12 attempts (24 rows), all aged 3 days.
-  const rows = cadenceRows(CAP, T0)
-  const lastTs = rows[rows.length - 1].ts
-  const nowMs = lastTs + THREE_DAYS_MS
-  const capCountAged = pairAttemptCount(rows, MESSAGE_ID, SUBJECT, nowMs, RE_DELIVERY_CAP_WINDOW_MS)
-  assert.equal(capCountAged, 0, `all 24 rows are 3 days old ⇒ 0 fall inside the 2 h CAP window (a WINDOWLESS count would still read 24 here — and that is exactly why the cumulative variant breaks this contract)`)
-  assert.ok(
-    !redeliveryAttemptsExhausted(capCountAged, CAP),
-    '★ THE CONTRACT HOLDS: a pair with 12 attempts from THREE DAYS ago is NOT exhausted — it is recoverable, and the re-drive will attempt it again'
+test('builder-411 (ii) ★★ THE CONTRACT — a pair that fails 11 times, DELIVERS, then fails 11 more is NOT exhausted: the run RESET on the success, so an OLD failure history never keeps a pair permanently exhausted', () => {
+  // The host's exact case: 11 failures, a DELIVERED, 11 failures again.
+  const rows = [
+    ...cadenceRows(11, T0),
+    { messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'delivered', ts: T0 + 11 * MEASURED_CADENCE_MS },
+    ...cadenceRows(11, T0 + 12 * MEASURED_CADENCE_MS)
+  ]
+  const consecutive = pairConsecutiveAttemptCount(rows, MESSAGE_ID, SUBJECT)
+  assert.equal(
+    consecutive,
+    11,
+    `the CONSECUTIVE count is 11 — the run since the \`delivered\`, the OLD 11 released by the success (got ${consecutive})`
   )
-  // The window is what preserves it: the SAME rows measured while FRESH DO
-  // exhaust — the count is a statement about RECENCY, never a permanent
-  // conviction. (Note the honest arithmetic: at the measured 663 s cadence 12
-  // attempts span 2.03 h, marginally MORE than the 2 h window, so 22 of the 24
-  // rows fall inside it — still far above the cap.)
-  const freshCount = pairAttemptCount(rows, MESSAGE_ID, SUBJECT, lastTs, RE_DELIVERY_CAP_WINDOW_MS)
   assert.ok(
-    freshCount >= CAP,
-    `while FRESH, the SAME 12 attempts DO exhaust the cap (${freshCount} >= ${CAP}) — the stop still fires when the failure is live`
+    !redeliveryAttemptsExhausted(consecutive, CAP),
+    `★ THE CONTRACT HOLDS: 11 < ${CAP} ⇒ NOT exhausted — the pair recovered once and is judged on its CURRENT run, never condemned by the failures it already came back from`
   )
-  assert.ok(redeliveryAttemptsExhausted(freshCount, CAP), 'so the cap fires on the LIVE failure history and RELEASES the OLD one — the same counter answers both without contradiction')
-  // And the release is BY TIME, through the ledger it already has: no TTL state
-  // is carried, which is what `-409` set out to avoid.
+  // ★ AND THIS IS THE CASE THAT DISCRIMINATES: the WINDOWLESS-CUMULATIVE count of
+  // the SAME rows still carries BOTH runs, so it WOULD condemn the pair.
+  const cumulative = rows.filter((r) => r.status === 'failed').length
+  assert.equal(cumulative, 22, `the WINDOWLESS-CUMULATIVE count of the SAME rows is ${cumulative} attempts (both runs, no reset) — got ${cumulative}`)
   assert.ok(
-    RE_DELIVERY_CAP_WINDOW_MS < THREE_DAYS_MS,
-    'the release is by TIME via the window (2 h << 3 days) — no TTL state is carried, which is what `-409` explicitly rejected needing'
+    redeliveryAttemptsExhausted(cumulative, CAP),
+    `⇒ THE DISCRIMINATION, PROVED: the cumulative variant WOULD declare this recovered pair EXHAUSTED (${cumulative} >= ${CAP}) while the consecutive variant does NOT (${consecutive} < ${CAP}). This one case is the whole reason the host chose consecutive.`
   )
-  // The boundary is honest and testable: 2 h of silence releases the count.
-  const justOutside = pairAttemptCount(rows, MESSAGE_ID, SUBJECT, lastTs + RE_DELIVERY_CAP_WINDOW_MS + 1, RE_DELIVERY_CAP_WINDOW_MS)
-  assert.ok(justOutside < CAP, `just past the window (2 h + 1 ms of silence) the count has already dropped below the cap (${justOutside}) — a pair stops being exhausted BY TIME, so it can always recover`)
+  // The unit matters: counting ROWS instead of ATTEMPTS would NOT discriminate
+  // (44 vs 22 — both above the cap). Declared, so the choice is auditable.
+  const rowUnits = rows.filter((r) => r.status === 'prepared' || r.status === 'failed').length
+  assert.ok(
+    redeliveryAttemptsExhausted(rowUnits, CAP),
+    `⚠️ DECLARED: counting ROWS (${rowUnits}: 2 per attempt) would fire HERE too. The \`failed\`-row unit is therefore the one that implements the contract, and it is asserted explicitly.`
+  )
+  // ★ ONE MORE: a pair whose LAST event is the success is at 0 — fully released.
+  const recovered = [...cadenceRows(CAP, T0), { messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'delivered', ts: T0 + CAP * MEASURED_CADENCE_MS }]
+  assert.equal(
+    pairConsecutiveAttemptCount(recovered, MESSAGE_ID, SUBJECT),
+    0,
+    'a pair whose history ENDS in a successful delivery is at 0 — even after 12 CONSECUTIVE failures, the success releases the whole run'
+  )
+  assert.ok(!redeliveryAttemptsExhausted(0, CAP), '⇒ NOT exhausted: the release is by the only event that means the pair actually recovered')
+  // ⚠️ HONEST DIFFERENCE FROM THE THIRD WAY (declared, not hidden): a STALE run
+  // that never recovered is NOT released by time any more. A pair with 12
+  // consecutive failures from 3 days ago IS exhausted — that is intended (it is
+  // the stuck-pair class), and it is the property the 2 h window had that this
+  // variant deliberately drops.
+  const staleRows = cadenceRows(CAP, T0)
+  assert.equal(
+    pairConsecutiveAttemptCount(staleRows, MESSAGE_ID, SUBJECT),
+    CAP,
+    '⚠️ DECLARED: a 12-consecutive-failure run from THREE DAYS AGO that never recovered IS at the cap — the consecutive variant releases on RECOVERY, not on TIME. This is the intended trade (it is the incident class), and it differs from the discarded 2 h-window variant.'
+  )
+  assert.ok(redeliveryAttemptsExhausted(CAP, CAP), 'and the cap fires on it — by design: a pair that failed 12 times in a row and never delivered is exactly what the stop exists for')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -492,14 +516,20 @@ test('builder-411 (iv) INVARIANT over the SWEEP: the loop is BOUNDED — reached
       loggedCount <= 2 * CAP + 2,
       `and it stayed BOUNDED by the cap (${loggedCount} <= ${2 * CAP + 2} = 2 x cap + the in-flight cycle)`
     )
-    // The flip, MEASURED, so a reader can see why a recount lies: the SAME ledger
-    // at the SAME simulated instant now yields FEWER countable rows than the
-    // decision used. Nothing about the clock changed — the ROWS were rewritten.
+    // ★ WHY THE `failed`-ROW UNIT — MEASURED, not asserted: the recount of the
+    // SAME ledger at the SAME instant now AGREES with the count the decision used.
+    // The `prepared` rows ARE erased by the G2 in-place rewrite (fb-1704) but the
+    // `failed` rows are NOT touched by it, so a counter built on `failed` rows is
+    // STABLE across the rewrite — which is exactly why the unit matters beyond
+    // arithmetic. (With a `prepared`-based count this recount measured 6 against a
+    // decision that used 13 — the counter would have silently lost its own
+    // evidence; see the report for that measurement.)
     const rowsAfterStop = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
-    const recounted = pairAttemptCount(rowsAfterStop, MESSAGE_ID, SUBJECT, terminalAt, RE_DELIVERY_CAP_WINDOW_MS)
-    assert.ok(
-      recounted < loggedCount,
-      `fb-1236 MEASURED: the decision used ${loggedCount} countable rows, but a POST-HOC recount of the SAME ledger at the SAME instant yields ${recounted} — the sweep's G2 settle rewrote \`prepared\` rows to \`terminal\` IN PLACE, so the recount measures a different ledger, NOT a different instant`
+    const recounted = pairConsecutiveAttemptCount(rowsAfterStop, MESSAGE_ID, SUBJECT)
+    assert.equal(
+      recounted,
+      loggedCount,
+      `fb-1704 STABILITY, MEASURED: the decision used ${loggedCount} attempts and a POST-HOC recount of the SAME ledger at the SAME instant AGREES (${recounted}) — the \`failed\` rows survive the G2 \`prepared\`→\`terminal\` in-place rewrite, so this counter is immune to the erosion that afflicts a \`prepared\`-based one`
     )
     // The frozen-id invariant, read by append order: the `failed` rows — the class
     // `scanDeliveryFindings` turns into `delivery-failed` alerts — stop growing.
@@ -581,14 +611,13 @@ test('builder-411 (v) ★ THE REGIME (acceptance §5.2): backoff delta on live p
     const backoffDeltas = []
     for (const id of [...STUCK, ...HEALTHY]) {
       const stormCount = pairAttemptCount(rowsNow, id, SUBJECT, lastTs, RE_DELIVERY_STORM_WINDOW_MS)
-      const capCount = pairAttemptCount(rowsNow, id, SUBJECT, lastTs, RE_DELIVERY_CAP_WINDOW_MS)
+      const capCount = pairConsecutiveAttemptCount(rowsNow, id, SUBJECT)
       backoffDeltas.push({ id, stormCount, capCount })
       assert.ok(capCount >= stormCount, `${id}: the cap count is a SUPERSET of the backoff/storm count — the backoff's own input is unchanged and merely non-decreasing under the new horizon`)
     }
     assert.equal(RE_DELIVERY_STORM_WINDOW_MS, 60 * 60_000, 'the backoff/storm window is the SAME 1 h constant — the regime cannot have moved')
     assert.equal(r.stormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'and the instance carries that SAME 1 h window (no override)')
-    assert.equal(r.capWindowMs, RE_DELIVERY_CAP_WINDOW_MS, 'the instance carries the SEPARATE 2 h cap window')
-    assert.notEqual(r.capWindowMs, r.stormWindowMs, 'the two windows are genuinely DISTINCT — two counters, two windows')
+    assert.equal(r.stormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'the instance carries the SAME 1 h storm/backoff window (the decoupling changed the CAP only)')
 
     // Drive the real sweep for 4 h.
     for (let tick = 1; tick <= 4 * 60; tick++) {
@@ -670,11 +699,8 @@ test('builder-411 (vi) RED-FIRST / REVERT-CHECK demonstrated: with the cap NEUTR
     assert.ok(neutralized.totalRows > fixed.totalRows, `the runs differ on the IDENTICAL fixture and cadence (${neutralized.totalRows} vs ${fixed.totalRows} rows) — the check discriminates`)
     // NO TIME COMPRESSION: both runs used the SAME real 663 s cadence, so the
     // RED is not an artifact of a fast clock — it is the production condition.
-    assert.equal(fixed.effectiveStormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'the fixed run kept the storm window at its documented 1 h (no regime change)')
-    assert.equal(neutralized.effectiveStormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'the neutralized run uses the very same 1 h window — the ONLY difference between RED and GREEN is the cap/storm DECOUPLING')
-    // ...and the fixed run is the one that moved to the 2 h CAP window.
-    assert.equal(fixed.effectiveCapWindowMs, RE_DELIVERY_CAP_WINDOW_MS, 'the fixed run carries the DERIVED 2 h cap window')
-    assert.equal(neutralized.effectiveCapWindowMs, RE_DELIVERY_CAP_WINDOW_MS, 'the neutralized run carries the SAME 2 h constant (it is the CALL SITE that differs, not the constant — that is what makes the RED honest)')
+    assert.equal(fixed.effectiveStormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'the fixed run kept the storm/backoff window at its documented 1 h — zero regime change')
+    assert.equal(neutralized.effectiveStormWindowMs, RE_DELIVERY_STORM_WINDOW_MS, 'the neutralized run uses the very same 1 h window — the ONLY difference between RED and GREEN is which COUNTER the cap reads')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -709,22 +735,58 @@ test('builder-411 (vii) DECLARED LIMIT — what ceases: the fix ceases THE SWEEP
       seenAfterSeam.newAfterTerminal > 0,
       'DECLARED LIMIT: a fresh SEAM send appends transitions AFTER the terminal — `terminal` is NOT final at the seam (fb-1444: a DIFFERENT defect/owner, NOT fixed by this lane)'
     )
-    // And the sweep STILL does not loop: the cap window already holds >= cap
-    // attempts, so the next due sweep settles it terminal again — a BOUNDED
-    // re-fire. The honest statement: the seam's rows RE-ENTER the cap window, so
-    // the cap re-fires once rather than being disabled forever.
+    // ★ WHY THE `failed`-ROW UNIT PAYS OFF — MEASURED: the consecutive count did
+    // NOT reset across the stop. This pair's 40 `failed` rows SURVIVE the G2
+    // in-place rewrite (which rewrites `prepared` rows only), so the cap's
+    // evidence is intact and the next due sweep re-stops the pair IMMEDIATELY —
+    // not after a fresh 12-failure run. (Measured with a `prepared`-based count,
+    // this same scenario RESET to a count of 1 and the loop resumed for ~2 h
+    // before the cap could re-fire: fb-1704's second cause, avoided here by the
+    // unit choice.)
+    const consAfterSeam = pairConsecutiveAttemptCount(
+      parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8')), MESSAGE_ID, SUBJECT
+    )
+    assert.ok(
+      redeliveryAttemptsExhausted(consAfterSeam, CAP),
+      `the consecutive count survives the stop and the seam re-send (${consAfterSeam} >= ${CAP}) — the \`failed\` rows are NOT erased by the G2 rewrite, so the cap keeps its evidence and does not have to re-accumulate a fresh run`
+    )
     const callsBefore = r.__calls.deliver.length
-    for (let tick = 1; tick <= 240; tick++) {
+    const termsBefore = (await pairRows(MOD, stateDir)).pair.filter((x) => x.status === 'terminal').length
+    let refireTick = null
+    for (let tick = 1; tick <= 720; tick++) {
       clock.now = seenAfterSeam.terminalTs + tick * SWEEP_TICK_MS
+      await r.sweepDue(clock.now)
+      const now = await pairRows(MOD, stateDir)
+      if (now.pair.filter((x) => x.status === 'terminal').length > termsBefore) { refireTick = tick; break }
+    }
+    assert.notEqual(refireTick, null, 'the cap RE-FIRES after the seam re-send — the re-drive route is BOUNDED, never an unbounded loop')
+    // ★ THE BOUND IS THE BACKOFF GATE, NOT A FRESH FAILURE RUN — and the two are
+    // different claims, so the threshold is DERIVED rather than a magic number. The
+    // seam's fresh `failed` row must age past the per-pair backoff (`maxDelayMs`)
+    // before the sweep will touch it, so the re-fire cannot come sooner than
+    // `maxDelayMs / tick` cycles; it needs NO new attempts beyond that.
+    const backoffCycles = Math.ceil(RE_DELIVERY_DEFAULT_MAX_DELAY_MS / SWEEP_TICK_MS)
+    assert.ok(
+      refireTick <= backoffCycles + 2,
+      `the re-fire is BOUNDED BY THE BACKOFF GATE, not by a fresh run: it came at cycle ${refireTick}, within the derived bound ${backoffCycles + 2} (~maxDelayMs/tick + slack). The pair re-stopped WITHOUT needing 12 new failures — a \`prepared\`-based counter would have needed a whole fresh run here`
+    )
+    assert.equal(r.__calls.deliver.length, callsBefore, 'the sweep performed NO further delivery for the re-sent pair — it re-stopped without re-driving')
+    // ...and once re-fired, it stays bounded: zero non-final transitions after the
+    // LAST terminal, over 240 further cycles.
+    for (let tick = 1; tick <= 240; tick++) {
+      clock.now = seenAfterSeam.terminalTs + (refireTick + tick) * SWEEP_TICK_MS
       await r.sweepDue(clock.now)
     }
     const endState = await pairRows(MOD, stateDir)
     assert.equal(
       endState.newAfterTerminal,
       0,
-      'the re-drive route REMAINS BOUNDED after a seam re-send: the cap re-fired and appended a terminal, leaving ZERO non-final transitions after it — it did NOT loop'
+      'after the re-fire, ZERO non-final transitions remain appended after the LAST terminal — the re-drive route is BOUNDED (fb-1236-safe: read by APPEND ORDER, not a status census)'
     )
-    assert.equal(r.__calls.deliver.length, callsBefore, 'the sweep performed NO further delivery for the re-sent pair (the cap window already held the cap in attempts) — never an unbounded loop')
+    assert.ok(
+      endState.pair.filter((x) => x.status === 'terminal').length >= 2,
+      'the ledger now carries at least TWO terminals for the pair (the original stop + the re-fire) — the seam re-entered, and the cap re-stopped it'
+    )
   })
 })
 
