@@ -5739,6 +5739,24 @@ export interface ContextActionPlanInput {
   /** The durable ledger read by the tick (the system-idle pattern: passed in,
    * returned advanced, persisted ONLY on change). */
   ledger: Readonly<Record<string, ContextActionMark>>
+  /** ACTUADOR (fb-14717 RE, 2026-09-16 — THE RETRY-STARVATION TRAP, MEASURED).
+   * The scan's PER-(agent, BAND) TIER LATCH, as the tick just read it
+   * (`context-threshold-state.json`). `contextFindings` is EMPTY for a member
+   * that PERSISTS in its latched band (the fb-50 calibration: a repeat of the
+   * same level is not a new anomaly), so a `pending` escalation is INVISIBLE to
+   * `findings` on exactly the ticks that must retry it: a session that has
+   * already blown the window accepts no new turn, so its pressure FREEZES and
+   * the band can never rise again ⇒ the retry existed on paper and was
+   * UNREACHABLE in the measured production case (probe: 4 ticks with the seam
+   * back UP, `escalationAttempts` frozen at 1, zero deliveries).
+   * ⇒ The RESUME PASS below reads the LATCH as the membership test instead of a
+   * finding: `latches[agentId]` still PRESENT means the member is still above
+   * the alert threshold, which is the SAME condition that produced the act.
+   * This is the ONLY thing the latch is used for here — the tier POLICY is not
+   * re-derived from it (see the resume pass: a latch BELOW the mark's band is
+   * treated as «cannot certify the tier», NEVER as a down-tier, so a band reset
+   * can never fabricate an escalation). */
+  contextTierLatches?: Readonly<Record<string, number>>
 }
 
 /** ACTUADOR — the plan: the NEW actions to execute + the next ledger. */
@@ -5806,6 +5824,18 @@ export function contextActionResolution(
   return 'retry'
 }
 
+/** ACTUADOR — turn the retry DECISION above into the mark the tick must
+ * re-deliver, or `undefined` when there is nothing to resume. PURE.
+ * The ANCHOR never moves: `at`/`sessionId`/`phase`/`action` are the SAME act's
+ * facts, and only the ATTEMPT CLOCK advances (so the retry cadence has its own
+ * clock and can never loop at one ts). Extracted so the findings pass and the
+ * latch-driven RESUME PASS decide identically — the bug this closes was a retry
+ * that existed in ONE path and was unreachable from the path that matters. */
+export function resumeContextActionMark(prev: ContextActionMark, nowMs: number): ContextActionMark | undefined {
+  if (contextActionResolution(prev, prev.sessionId, nowMs) !== 'retry') return undefined
+  return { ...prev, lastAttemptAt: nowMs }
+}
+
 /** ACTUADOR — turn the findings into ACTIONS, anchored to the live session, in
  * TWO declared tiers (see `phase`):
  *   - `beyond-usable-window` (band b10, `beyondUsableWindow === true`): the scan
@@ -5858,17 +5888,12 @@ export function planContextActions(input: ContextActionPlanInput): ContextAction
     const prev = ledger[agentId]
     decided.add(agentId)
     if (prev !== undefined && prev.sessionId === sessionId && prev.phase === phase) {
-      if (contextActionResolution(prev, sessionId, input.nowMs) !== 'retry') continue
-      // RETRY: keep the ORIGINAL anchor ts (`at` = when the act first ran — the
-      // event fact never moves) and re-emit the SAME mark so the tick re-attempts
-      // the delivery. It is NOT a new act: it is the SAME act, still undelivered.
-      const retryMark: ContextActionMark = { ...prev, lastAttemptAt: input.nowMs }
+      // THE RETRY IS DECIDED IN ONE PLACE (`resumeContextActionMark`) so the
+      // findings pass and the latch-driven resume pass can never diverge.
+      const retryMark = resumeContextActionMark(prev, input.nowMs)
+      if (retryMark === undefined) continue
       ledger[agentId] = retryMark
       actions.push({ agentId, mark: retryMark })
-      // The ANCHOR is unchanged (the act's `at`/`sessionId`/tier are the same
-      // fact); only the attempt clock moved. `changed = true` so the caller
-      // PERSISTS the attempt clock — without it the delivery would be re-tried
-      // at the same ts forever and the window would never advance.
       changed = true
       continue
     }
@@ -5888,6 +5913,67 @@ export function planContextActions(input: ContextActionPlanInput): ContextAction
     }
     ledger[agentId] = mark
     actions.push({ agentId, mark })
+    changed = true
+  }
+  // -------------------------------------------------------------------------
+  // ACTUADOR (fb-14717 RE) — THE RESUME PASS: an UNDELIVERED escalation must be
+  // retried on EVERY tick, INCLUDING the ticks that produce NO finding.
+  //
+  // THE MEASURED DEFECT THIS CLOSES (it is NOT the same defect the intra-tick
+  // retry above fixed): the retry above lives INSIDE the findings loop, and the
+  // findings loop only sees what `scanContextThreshold` published. That scan is
+  // HYSTERETIC PER (agent, BAND) — the fb-50 calibration, «a repeat of the same
+  // level is not a new anomaly» — so a member that PERSISTS in its latched band
+  // produces NO finding at all. And the act this retry serves happens at the
+  // BAND'S CEILING: a session past its window accepts no new turn, so its
+  // projected pressure FREEZES and the band can NEVER rise again. ⇒ On exactly
+  // the ticks that must retry, `contextFindings` is EMPTY and the retry is
+  // unreachable — it was reachable only on an UPWARD re-crossing, which a blown
+  // session structurally cannot produce. MEASURED (probe, seam back UP, same
+  // session, frozen band): 4 consecutive ticks, `escalationAttempts` frozen at
+  // 1, ZERO deliveries. With an upward re-crossing the SAME code delivers
+  // immediately — which is what proves the retry was starved, not broken.
+  //
+  // THE MEMBERSHIP TEST: the TIER LATCH read by this same tick
+  // (`input.contextTierLatches`), NOT a finding. A latch still PRESENT means the
+  // member is STILL above the alert threshold — the very same condition that
+  // produced the act, and it stays true precisely while the session is frozen.
+  // ABSENT latch (a return to normal, or a wiring that cannot read it) → NO
+  // resume: the condition that justified the act is no longer certified.
+  //
+  // THE TIER INVARIANT (why this can never fabricate an escalation, and can
+  // never corrupt the tier semantics): the resume DELIVERS the mark's OWN tier —
+  // `mark.phase`/`mark.action` are re-emitted VERBATIM, so an `advisory` mark is
+  // never delivered as `beyond-usable-window` (b9 vs b10, untouched). The latch
+  // only CERTIFIES that tier:
+  //   * `beyond-usable-window` (pct ≥ 1.0, band ≥ 10): any latch band ≥ 10
+  //     certifies it — b10 is the TOP band, so there is no higher tier it could
+  //     be confused with, and a band ABOVE the mark's own cannot exist as a
+  //     different escalation.
+  //   * `advisory` (band 9, the ONLY rung that still fits): the latch must be
+  //     EXACTLY 9. A latch ≥ 10 means the member has since crossed into b10 —
+  //     a NEW fact owned by the findings pass — so this pass stays SILENT and
+  //     the two passes can never both deliver for one episode.
+  //   * a latch BELOW the mark's band is treated as «cannot certify», NEVER as a
+  //     DOWN-tier (`continue`, no mark mutated): a latch read after a restart is
+  //     not evidence about a different band, and a fabricated down-tier is
+  //     exactly the mis-anchored act the conservative rule forbids.
+  // `decided` excludes any agent the findings pass already handled THIS tick (so
+  // one episode is never delivered twice in the same tick), and the mark is left
+  // UNTOUCHED when the budget is spent or the window has not elapsed.
+  // -------------------------------------------------------------------------
+  const advisoryBand = Math.floor(CONTEXT_ACTION_ADVISORY_FRACTION * 10)
+  for (const [agentId, mark] of Object.entries(ledger)) {
+    if (decided.has(agentId)) continue
+    if (mark.escalation !== 'pending') continue
+    const latchBand = input.contextTierLatches?.[agentId]
+    if (typeof latchBand !== 'number' || !Number.isFinite(latchBand)) continue
+    const certified = mark.phase === 'beyond-usable-window' ? latchBand >= advisoryBand + 1 : latchBand === advisoryBand
+    if (!certified) continue
+    const retryMark = resumeContextActionMark(mark, input.nowMs)
+    if (retryMark === undefined) continue
+    ledger[agentId] = retryMark
+    actions.push({ agentId, mark: retryMark })
     changed = true
   }
   // Retention prune (the file never grows unbounded). A pruned entry cannot
@@ -8474,16 +8560,25 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         // failure degrades to the pre-actuator behavior (the finding + the host
         // ALERT were already produced — the actuator is ADDITIVE, never a
         // precondition of the monitor).
-        if (contextFindings.length > 0) {
+        // ACTUADOR (fb-14717 RE) — THE ONE EXECUTION BODY, shared by BOTH passes.
+        // A divergence between them is EXACTLY what starved the retry (the retry
+        // lived in the findings pass and the resume ticks publish no finding), so
+        // there is ONE place that calls `notifyPost` and ONE place that records
+        // the outcome — the two passes below differ only in the findings they
+        // hand it (PASS 1: the scan's; PASS 2: NONE — the latch certifies).
+        const runContextActuator = async (findingsToPlan: readonly HealthFinding[]): Promise<void> => {
           const actionLedger = readContextActionLedger(deps.stateDir)
           const managerByPost = new Map<string, string>()
           for (const post of posts) {
             if (post.managerId !== undefined && post.managerId !== '') managerByPost.set(post.postId, post.managerId)
           }
           const actionPlan = planContextActions({
-            findings: contextFindings,
+            findings: findingsToPlan,
             nowMs,
-            ledger: actionLedger
+            ledger: actionLedger,
+            // fb-14717 RE — the LATCH this tick read, handed to the plan so PASS 2
+            // can certify a `pending` member that produces NO finding.
+            contextTierLatches: tierLatches
           })
           // THE OBSERVABLE ACT (declare it to the log, always — a log line is
           // the trace even when no escalation recipient resolves).
@@ -8545,6 +8640,23 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
           }
           if (actionPlan.changed) await writeContextActionLedger(deps.stateDir, actionPlan.ledger)
         }
+        // PASS 1 — the FINDINGS: the tick that published a crossing acts on it.
+        // The literal below is the lane's declared entry gate (kept so the frozen
+        // revert-check still finds it EXACTLY once and still reds out the act).
+        if (contextFindings.length > 0) {
+          await runContextActuator(contextFindings)
+        }
+        // PASS 2 — THE RESUME (fb-14717 RE, THE BUG C CLOSURE): a `pending`
+        // escalation must be retried on the ticks that publish NO finding —
+        // passed an EMPTY findings list, so `planContextActions` reaches its
+        // LATCH-DRIVEN resume pass. Without this call the retry is unreachable
+        // on the ONLY ticks that can ever resume it (see the resume pass
+        // comment in `planContextActions`): a blown session's band is FROZEN, so
+        // its hysteresis latch swallows every later finding. MEASURED BEFORE
+        // THIS LINE: 4 ticks, seam UP, 0 deliveries, attempts frozen at 1.
+        // It is a NO-OP unless a `pending` mark exists, so it costs the findings
+        // tick nothing (PASS 1 already marked those agents `decided`).
+        await runContextActuator([])
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
