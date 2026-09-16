@@ -10727,8 +10727,15 @@ test('W3b runParallelMonitorTick: storm guard caps LIVE spawns WITHIN one page â
     assert.equal(state.monitors.m1.cursor, 'c_next', 'the cursor advances (the 3 skipped events are consumed, not re-fetched)')
     assert.ok(state.monitors.m1.seenEventIds.includes('mevt_0'), 'the fired event is recorded seen')
     assert.ok(state.monitors.m1.seenEventIds.includes('mevt_1'), 'the fired event is recorded seen')
-    assert.ok(!state.monitors.m1.seenEventIds.includes('mevt_2'), 'the first storm-guarded event is NOT recorded seen (skipped, consumed by the cursor advance)')
-    assert.ok(!state.monitors.m1.seenEventIds.includes('mevt_4'), 'the last storm-guarded event is NOT recorded seen (skipped, consumed by the cursor advance)')
+    // monitorredo1 (2026-09-16): the storm-guarded events ARE now recorded seen.
+    // The OLD assertions here asserted the opposite (`!includes('mevt_2')`) and
+    // justified it as "consumed by the cursor advance" â€” but `next_cursor` is a
+    // PAGINATION token and is ABSENT whenever the page is the last one (always,
+    // for limit=50 vs 1-2 events/day), so the cursor NEVER advanced and the
+    // skipped events were re-fetched and RE-SPAWNED as soon as the cap freed
+    // (the measured re-materialization). Consumption is now LOCAL to the tick.
+    assert.ok(state.monitors.m1.seenEventIds.includes('mevt_2'), 'the first storm-guarded event IS recorded seen (consumed locally, not re-fetched)')
+    assert.ok(state.monitors.m1.seenEventIds.includes('mevt_4'), 'the last storm-guarded event IS recorded seen (consumed locally, not re-fetched)')
     assert.match(warns.join(' '), /storm guard/, 'a storm-guard skip emits a warn')
   })
 })
