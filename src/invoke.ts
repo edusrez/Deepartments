@@ -3685,11 +3685,27 @@ export async function runParallelMonitorTick(deps: ParallelMonitorDeps): Promise
         }
         // Storm guard: never exceed maxConsecutiveSpawns LIVE researchers. Once
         // `live` reaches the cap the remaining page events are SKIPPED (the
-        // break) — but the cursor still advances (below), so they are consumed
-        // rather than re-fetched (the documented storm-guarded-consumption
-        // semantics).
+        // break) and must be CONSUMED rather than re-fetched — otherwise the
+        // next tick re-fetches them and, once the cap frees, RE-SPAWNS them (the
+        // measured monitor re-materialization: the same event body materialized
+        // x4 with zero new facts).
+        //
+        // The consumption is done HERE, LOCALLY, by recording the skipped ids as
+        // seen — it must NOT rely on the cursor advance (the previous, broken
+        // semantics): `next_cursor` is a PAGINATION token and is ABSENT whenever
+        // the page is the last one (the documented "pagination ends when
+        // next_cursor is absent"), which is ALWAYS the case for these monitors
+        // (limit=50 vs 1-2 events/day). With no `next_cursor` the cursor froze
+        // forever, nothing marked the skipped events consumed, and the local
+        // seen-set never recorded them (`seen.add` sits after the `break`) — so
+        // when the live cap freed the SAME events were re-fetched and
+        // re-materialized.
         if (live >= deps.maxConsecutiveSpawns) {
           deps.logger?.warn(`[deepartments] parallel-monitor: monitor "${key}" already has ${live} live workers ≥ ${deps.maxConsecutiveSpawns} — skip (storm guard)`)
+          for (const skipped of events) {
+            if (skipped == null || typeof skipped.event_id !== 'string' || skipped.event_id === '') continue
+            seen.add(skipped.event_id)
+          }
           break
         }
         try {
