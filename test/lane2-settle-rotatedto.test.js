@@ -165,7 +165,7 @@ test('LANE ② fb-58 (the m-424/425/429 + m-440 RE-DRIVE side): a reroutable ret
   })
 })
 
-test('LANE ② §7.5 (pure): scanDeliveryStormFindings — >30 rows/messageId/1h fires the `delivery-storm` finding; attempts/deliveries > 3:1 fires the ratio finding; a calm message (1:1, few rows) fires nothing; retired recipients are excluded', async () => {
+test('LANE ② §7.5 (pure): scanDeliveryStormFindings — >30 rows/PAIR/1h fires the `delivery-storm` finding; attempts/deliveries > 3:1 fires the ratio finding; a calm message (1:1, few rows) fires nothing; retired recipients are excluded', async () => {
   await withTempStateDir(async (stateDir) => {
     const rows = []
     // The m-183 class: 450 attempts for ONE message inside 1 h.
@@ -181,19 +181,59 @@ test('LANE ② §7.5 (pure): scanDeliveryStormFindings — >30 rows/messageId/1h
     await writeFile(resolveDeliveriesPath(stateDir), `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
 
     const findings = scanDeliveryStormFindings(stateDir, T0)
-    const storm = findings.filter((f) => f.key === 'delivery-storm:m-storm')
-    assert.equal(storm.length, 1, 'the >30-rows/messageId/1h storm fires ONE finding')
+    // fb-1707 (builder-412): the key is PER PAIR — `<messageId>#<recipientId>`.
+    const storm = findings.filter((f) => f.key === 'delivery-storm:m-storm#head-idle')
+    assert.equal(storm.length, 1, 'the >30-rows/PAIR/1h storm fires ONE finding')
     assert.equal(storm[0].kind, 'delivery-storm', 'the finding kind is delivery-storm')
+    assert.equal(storm[0].recipientId, 'head-idle', 'the finding names its PAIR recipient (fb-1707)')
     assert.equal(storm[0].count, 450, 'the finding carries the row count (450 — the m-183 class)')
     assert.match(storm[0].error, /450 delivery rows in 1 h \(> 30\)/, 'the error names the count + the threshold')
-    const ratio = findings.filter((f) => f.key === 'delivery-storm-ratio:m-ratio')
+    const ratio = findings.filter((f) => f.key === 'delivery-storm-ratio:m-ratio#a')
     assert.equal(ratio.length, 1, 'the attempts/deliveries ratio > 3:1 fires ONE finding')
     assert.match(ratio[0].error, /ratio 10:1 > 3:1/, 'the ratio finding names the attempts:deliveries vs the 3:1 bar')
     const calm = findings.filter((f) => f.messageId === 'm-calm' || f.messageId === 'm-old')
     assert.equal(calm.length, 0, 'a calm message (1 attempt / 1 delivery) and an out-of-window row fire nothing')
     // The retired-member exclusion.
     const retired = scanDeliveryStormFindings(stateDir, T0, new Set(['head-idle', 'a']))
-    assert.ok(retired.every((f) => f.messageId === 'm-storm' === false || false) === false || true, 'the retired exclusion removes the retired recipients’ rows (the storm finding disappears with all its rows retired)')
     assert.equal(retired.filter((f) => f.messageId === 'm-storm').length, 0, 'the m-storm finding disappears once its recipient is retired (C6/Bug-A parity)')
+  })
+})
+
+// fb-1707 (builder-412) — LA GUARDA CIEGA AL PEOR CASO, con las DOS caras
+// medidas sobre el ledger real:
+//   (a) REVERT-CHECK: el par cuyo peor caso es `deliveries === 0` NO alertaba
+//       NUNCA (la guarda `deliveries > 0` lo hacia invisible) y ahora SI.
+//   (b) MEZCLA DE PARES: en un FAN-OUT el numerador salia de un par y el
+//       denominador de OTRO ⇒ el ratio no pertenecia a ningun par real. Se
+//       reproduce el caso `m-14826` (quality-head 6 intentos / 0 entregas ·
+//       internal-programming-head 0 intentos / 1 entrega).
+test('fb-1707 (builder-412): el peor caso `deliveries === 0` AHORA alerta (era invisible por la guarda `deliveries > 0`), y en un FAN-OUT el ratio es POR PAR — no mezcla el numerador de un par con el denominador de otro', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const rows = []
+    // (a) EL PEOR CASO: intentos que NUNCA entregan. Con la guarda vieja
+    // (`deliveries > 0`) esta condicion era FALSA por construccion.
+    for (let i = 0; i < 12; i++) rows.push({ messageId: 'm-blind', recipientId: 'quality-head', status: 'prepared', ts: T0 - 3000_000 + i * 9000 })
+    // (b) EL FAN-OUT: un par con storm real e invisibles + otro par que SI
+    // entrega. `m-fanout` agregado = 6:1 (disparaba); por par: quality-head
+    // 6 intentos / 0 entregas, internal-programming-head 0 intentos / 1 entrega.
+    for (let i = 0; i < 6; i++) rows.push({ messageId: 'm-fanout', recipientId: 'quality-head', status: 'prepared', ts: T0 - 2000_000 + i * 11000 })
+    rows.push({ messageId: 'm-fanout', recipientId: 'internal-programming-head', status: 'delivered', ts: T0 - 400_000 })
+    // Un par SANO dentro del mismo mensaje no debe heredar el storm del otro.
+    rows.push({ messageId: 'm-fanout', recipientId: 'research-head', status: 'failed', ts: T0 - 350_000 })
+    rows.push({ messageId: 'm-fanout', recipientId: 'research-head', status: 'delivered', ts: T0 - 300_000 })
+    await writeFile(resolveDeliveriesPath(stateDir), `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
+
+    const findings = scanDeliveryStormFindings(stateDir, T0)
+    // (a) el peor caso alerta, y el ratio reportado es honesto (`12:0`).
+    const blind = findings.filter((f) => f.key === 'delivery-storm-ratio:m-blind#quality-head')
+    assert.equal(blind.length, 1, 'fb-1707(a): el par que NUNCA entrega AHORA dispara la alerta de ratio (antes: invisible por la guarda `deliveries > 0`)')
+    assert.match(blind[0].error, /ratio 12:0 > 3:1/, 'el ratio reportado es exacto: 12 intentos y 0 entregas (el caso mas grave, no el invisible)')
+    // (b) el ratio es POR PAR: el par culprit dispara...
+    const fanout = findings.filter((f) => f.key === 'delivery-storm-ratio:m-fanout#quality-head')
+    assert.equal(fanout.length, 1, 'fb-1707(b): el par con storm real del fan-out dispara CON SU PROPIO ratio (6:0)')
+    assert.match(fanout[0].error, /ratio 6:0 > 3:1/, 'el numerador y el denominador salen del MISMO par (6 intentos / 0 entregas) — no del par que entrego')
+    // ...y el par SANO del mismo mensaje NO hereda el storm del otro.
+    assert.equal(findings.filter((f) => f.messageId === 'm-fanout' && f.recipientId === 'internal-programming-head').length, 0, 'fb-1707(b): el par que SI entrega NO hereda el storm del par culprit (la mezcla de pares era el defecto)')
+    assert.equal(findings.filter((f) => f.messageId === 'm-fanout' && f.recipientId === 'research-head').length, 0, 'fb-1707(b): un par sano (1 intento / 1 entrega) del mismo mensaje no dispara nada')
   })
 })

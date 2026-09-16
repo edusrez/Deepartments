@@ -1116,6 +1116,20 @@ export interface HealthFinding {
   hostId?: string
   /** The messageId (delivery-failed) — the bus record that failed delivery. */
   messageId?: string
+  /** fb-1707 (builder-412, MEDIDO) — the RECIPIENT of the delivery PAIR a
+   * `delivery-storm` finding describes. The scan aggregates per
+   * `(messageId, recipientId)` because a FAN-OUT message has several
+   * independent pairs and a per-messageId aggregate mixes their numerators and
+   * denominators (the ratio then belongs to NO real pair: MEDIDO en `m-14826`,
+   * cuyo par `quality-head` tenia 6 intentos / 0 entregas mientras el par
+   * `internal-programming-head` aportaba la UNICA entrega — el ratio 7:1
+   * reportado no describia a ninguno de los dos). The identity is the SAME pair
+   * anchor `deliveryFailedKey` (linea 3470) adopted in fb-198, and for the same
+   * reason: the messageId is NOT stable (fb-730 — the compaction renumber
+   * REUSES ids: MEDIDO, 50 de las 75 alertas de storm historicas apuntan a un
+   * id cuya fila mas antigua es POSTERIOR a la alerta, i.e. a OTRO mensaje).
+   * Present on every `delivery-storm` finding; ABSENT elsewhere. */
+  recipientId?: string
   /** The finding's anchored row ts (ms epoch) — for a post-error finding the ts
    * of the group's WITNESS row (the row whose `error` text + `count` the alert
    * shows; fb-466 — pre-fb-466 this was the group's most-recent row while the
@@ -3570,10 +3584,12 @@ export function scanDeliveryFindings(
  *     scan rules). PURE besides the reads; never throws (the readers degrade
  *     to [] like the live scanners). */
 /** LANE ② (§7.5 — QD recommendation 5) — the retry-STORM thresholds: the
- * attempts-per-message window (1 h), the row-count alert (> 30 rows per
- * messageId per hour — the m-183/188 classes: 450/226), and the
- * attempts/deliveries ratio (must stay < 3:1 after the backoff re-drive
- * lands). */
+ * attempts-per-PAIR window (1 h), the row-count alert (> 30 rows per
+ * `(messageId, recipientId)` PAIR per hour — the m-183/188 classes: 450/226),
+ * and the attempts/deliveries ratio PER PAIR (must stay < 3:1 after the backoff
+ * re-drive lands). fb-1707 (builder-412): the unit is the PAIR, not the message
+ * (see scanDeliveryStormFindings), and the `deliveries === 0` case is the MOST
+ * severe, not the invisible one. */
 export const HEALTH_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
 export const HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR = 30
 export const HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO = 3
@@ -3585,14 +3601,51 @@ export const HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO = 3
  * deliveries rows the `delivery-failed` scan reads and yields TWO additive
  * finding classes (composed by scanDeliveryFindings):
  *   (S1) MORE THAN `HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR` (30) rows per
- *        messageId within the 1 h window ('prepared'+'failed' rows — the
- *        attempt ledger) → ONE `delivery-storm` finding, key
- *        `delivery-storm:<messageId>` (the m-183/188 classes: 450/226 rows).
+ *        PAIR within the 1 h window ('prepared'+'failed' rows — the attempt
+ *        ledger) → ONE `delivery-storm` finding, key
+ *        `delivery-storm:<messageId>#<recipientId>` (the m-183/188 classes:
+ *        450/226 rows).
  *   (S2) the ATTEMPTS/DELIVERIES RATIO > `HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO`
- *        (3:1): the message's 'prepared'+'failed' rows vs its
+ *        (3:1): the PAIR's 'prepared'+'failed' rows vs its
  *        'delivered'+'resumed' rows in the same window — the «el backoff real
  *        NO logra el ratio» check (a delivery attempt that eventually delivers
  *        should not burn > 3 attempts per delivered row).
+ * fb-1707 (builder-412, MEDIDO — 2026-09-16) — TWO measured defects fixed here:
+ *   (D1) LA AGREGACION ERA POR `messageId` SOLO. In a FAN-OUT message the
+ *        numerator came from one pair and the denominator from ANOTHER, so the
+ *        reported ratio belonged to NO real pair (MEDIDO `m-14826`: pair
+ *        `quality-head` 6 attempts / 0 deliveries — a REAL storm — while pair
+ *        `internal-programming-head` contributed the only delivery). The scan
+ *        now keys by `(messageId, recipientId)`, the same pair anchor
+ *        `deliveryFailedKey` (linea 3470) adopted in fb-198.
+ *   (D2) LA GUARDA `deliveries > 0` ERA CIEGA AL PEOR CASO. A pair whose
+ *        deliveries NEVER land has `deliveries === 0` → the condition was FALSE
+ *        → the alert could NOT fire exactly where it was needed most. MEDIDO
+ *        sobre el ledger: los pares con mas intentos son los que NUNCA entregan
+ *        (m-14840→quality-head 12 intentos / 0 entregas, m-14141 11/0, …) y
+ *        NINGUNO disparaba nunca; en cambio SI disparaba sobre pares que
+ *        acababan de entregar (m-14214 entregó 19:51:07 y la alerta salió
+ *        19:51:25 ⇒ 18 s DESPUES; m-14232 entregó 19:53:02, alerta 19:53:30 ⇒
+ *        28 s DESPUES) — el `delivered` era lo que HABILITABA la alerta: un
+ *        ACTA DE DEFUNCION. NO estaba declarado en ninguna parte (grep de
+ *        `deliveries > 0` sobre `packages/`: 1 sola ocurrencia, la propia
+ *        guarda): es un DESCUIDO, no un diseño. Ahora `deliveries === 0` es el
+ *        caso MAS GRAVE: dispara cuando los intentos superan
+ *        `HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO` (equivale a saturar el
+ *        denominador en 1). El literal `error` se conserva BYTE-IDENTICO (el
+ *        contrato lo congela, ver HealthFinding.recipients): con
+ *        `deliveries === 0` rinde `ratio <n>:0 > 3:1`, exacto y honesto.
+ * EFECTO DE REGIMEN DEL CAMBIO DE CLAVE (medido, NO ocultado): el dedupe vive
+ * en `health-alerts-state.json` por `key`, asi que renombrar la clave de
+ * `delivery-storm:<messageId>` a `delivery-storm:<messageId>#<recipientId>`
+ * hace que las claves YA AMORTIGUADAS con el nombre viejo NO amortigüen el
+ * nombre nuevo ⇒ un RE-DISPARO de una alerta ya silenciada en el PRIMER tick
+ * tras el cambio. MEDIDO sobre el ledger real: con la clave nueva el primer
+ * tick emite 9 alertas de ratio (8 de pares ciegos hoy, el objetivo) y de las
+ * 6 claves amortiguadas hoy 2 re-disparan (m-14832/m-14835→
+ * internal-programming-head, que son los DOS UNICOS pares que el scan viejo ya
+ * veia). El re-disparo es UNO solo por par (luego el ledger nuevo los amortigua
+ * 30 min) y es el precio de arreglar la identidad; queda DECLARADO aqui.
  * The retired-member exclusion applies per row recipient (the delivery-failed
  * rule). NEVER throws. */
 export function scanDeliveryStormFindings(
@@ -3610,34 +3663,64 @@ export function scanDeliveryStormFindings(
   const windowStart = nowMs - HEALTH_DELIVERY_STORM_WINDOW_MS
   const inWindow = rows.filter((row) => nowMs - row.ts <= HEALTH_DELIVERY_STORM_WINDOW_MS && nowMs - row.ts >= 0)
   const fresh = retiredMemberIds === undefined ? inWindow : inWindow.filter((row) => !retiredMemberIds.has(row.recipientId))
-  const byMessage = new Map<string, { attempts: number; deliveries: number; latestTs: number }>()
+  // fb-1707 (builder-412, MEDIDO) — LA AGREGACION ES POR PAR, NO POR messageId.
+  // MEDIDO sobre el ledger real: `m-14826` tiene DOS pares (quality-head y
+  // internal-programming-head). Agregando por messageId SOLO, el NUMERADOR sale
+  // de un par y el DENOMINADOR de OTRO, y el ratio reportado no pertenece a
+  // NINGUN par real (la alerta real @20:09:42.517Z reporto «ratio 7:1» cuando
+  // el par quality-head tenia 6 intentos y 0 entregas). La identidad del par es
+  // (messageId, recipientId) — el MISMO ancla que usa `deliveryFailedKey`
+  // (linea 3470) desde fb-198, por la misma razon: el messageId NO es estable
+  // (fb-730, el renumber de compactacion lo reusa).
+  const byPair = new Map<string, { messageId: string; recipientId: string; attempts: number; deliveries: number; latestTs: number }>()
   for (const row of fresh) {
-    let entry = byMessage.get(row.messageId)
+    const pairKey = `${row.messageId}#${row.recipientId}`
+    let entry = byPair.get(pairKey)
     if (entry === undefined) {
-      entry = { attempts: 0, deliveries: 0, latestTs: row.ts }
-      byMessage.set(row.messageId, entry)
+      entry = { messageId: row.messageId, recipientId: row.recipientId, attempts: 0, deliveries: 0, latestTs: row.ts }
+      byPair.set(pairKey, entry)
     }
     if (row.status === 'prepared' || row.status === 'failed') entry.attempts++
     else if (row.status === 'delivered' || row.status === 'resumed') entry.deliveries++
     if (row.ts > entry.latestTs) entry.latestTs = row.ts
   }
   const findings: HealthFinding[] = []
-  for (const [messageId, entry] of byMessage) {
+  for (const entry of byPair.values()) {
+    const { messageId } = entry
     if (entry.attempts > HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR) {
       findings.push({
         kind: 'delivery-storm',
-        key: `delivery-storm:${messageId}`,
+        key: `delivery-storm:${messageId}#${entry.recipientId}`,
         messageId,
+        recipientId: entry.recipientId,
         ts: entry.latestTs,
         count: entry.attempts,
         error: `${entry.attempts} delivery rows in 1 h (> ${HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR}) — retry storm WITHOUT backoff (fb-79; the backoff + max-attempts re-drive bounds this cadence)`
       })
     }
-    if (entry.deliveries > 0 && entry.attempts / entry.deliveries > HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO) {
+    // fb-1707 (builder-412, MEDIDO) — LA GUARDA `entry.deliveries > 0` ELIMINADA.
+    // Era una GUARDA CIEGA AL PEOR CASO: un par cuyas entregas NUNCA llegan tiene
+    // `deliveries === 0` ⇒ la condicion era FALSA ⇒ la alerta NO disparaba
+    // exactamente donde mas falta hacia. MEDIDO: los pares con mas intentos del
+    // ledger son justo los que NUNCA entregan (p.ej. m-14840→quality-head 12
+    // intentos / 0 entregas) y NINGUNO disparaba nunca; en cambio SI disparaba
+    // sobre pares que acababan de entregar (m-14214 entrego 19:51:07 y la alerta
+    // salio 19:51:25, 18 s DESPUES; m-14232 entrego 19:53:02 y la alerta 19:53:30,
+    // 28 s despues): el `delivered` era lo que HABILITABA la alerta — un ACTA DE
+    // DEFUNCION. El caso `deliveries === 0` es ahora el MAS GRAVE, no el
+    // invisible: se dispara cuando los intentos superan el umbral del ratio
+    // (equivalente a saturar el denominador en 1). El literal `error` se conserva
+    // BYTE-IDENTICO (invariante del contrato, ver HealthFinding.recipients): con
+    // `deliveries === 0` rinde `ratio <n>:0 > 3:1`, que es exacto y honesto.
+    const ratioViolated = entry.deliveries > 0
+      ? entry.attempts / entry.deliveries > HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO
+      : entry.attempts > HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO
+    if (ratioViolated) {
       findings.push({
         kind: 'delivery-storm',
-        key: `delivery-storm-ratio:${messageId}`,
+        key: `delivery-storm-ratio:${messageId}#${entry.recipientId}`,
         messageId,
+        recipientId: entry.recipientId,
         ts: entry.latestTs,
         count: entry.attempts,
         error: `attempts/deliveries ratio ${entry.attempts}:${entry.deliveries} > ${HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO}:1 in 1 h — the backoff is NOT achieving the < 3:1 ratio`
