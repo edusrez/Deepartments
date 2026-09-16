@@ -66,6 +66,9 @@ presupuesto para dominios 403). **Updated 2026-09-10** (fb-329 + fb-330 + fb-333
 + fb-334 + fb-370 + fb-410, dictámenes QH aceptados: `linux.do`,
 `status.opencode.ai`, `www.investing.com`, `reuters.com`, `reddit.com/.json`,
 `www.googblogs.com` + la **taxonomía de clase 403-vs-401/captcha**).
+**Updated 2026-09-16** (fb-334 + fb-843, edición documental RD: 6 filas nuevas —
+`mp.weixin.qq.com`, `huxiu.com`, `techtarget.com`, `4sysops.com`,
+`anadolu.agency`/`www.aa.com.tr`, `servicenow.github.io/eva`).
 
 **Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
 per domain per round — a single HTTP 403 confirms the state and exhausts the
@@ -99,8 +102,14 @@ documentada también en `sources/v4-1-flash-official.md:300`).
 | `status.opencode.ai` | **UNREACHABLE** | fetch failed desde este entorno; **sin status page verificable**, y no distinguible como DNS vs anti-bot (round 09-10; fb-330) | do not attempt; usar el patrón del status-page-repo (p. ej. Upptime en GitHub) o el releases API |
 | `www.investing.com` | **BLOCKED** | **403 anti-bot plano** vs datacenter IP (round 09-10; fb-333) | do not attempt; snippet del search-provider o mirror fechado |
 | `reuters.com` | **BLOCKED (variante de clase)** | **HTTP 401 + captcha DataDome** (round 09-10; fb-334) — challenge de sesión, NO bloqueo de contenido | do not attempt (el reintento no cambia el resultado); usar **secundarias fechadas** (p. ej. digest The Neuron) + snippet |
+| `mp.weixin.qq.com` | **BLOCKED (captcha, 200)** | HTTP 200 con **redirect a `/mp/wappoc_appmsgcaptcha`** y cuerpo «环境异常…» (fb-334) — **TERCERA forma** de la familia captcha, challenge de **SESIÓN**: no es un 403 anti-bot (la taxonomía separa las clases) y su reintento **consume presupuesto sin cambiar el resultado** | do not attempt; secundaria fechada o mirror del mismo contenido |
+| `huxiu.com` | **UNRELIABLE** | **timeout del PRESUPUESTO de 30 s** (fb-102, `en-estudio`: no per-call timeout override) | one attempt max, then vendor primary |
 | `reddit.com` (incl. `.json`) | **BLOCKED** | HTTP 403 también en el endpoint `.json` que el propio hint de la tool recomienda (round 09-10; fb-370) ⇒ **bucle de sugerencia** | do not attempt; snippets + secundarias; la clase ya constaba en `sources/v4-1-flash-official.md:300` |
 | `www.googblogs.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-10; fb-410) — espejo NO oficial de blogs de Google | do not attempt; el **blog primario** `developers.googleblog.com` responde 200 (misma pieza) |
+| `techtarget.com` | **200-TRUNCATED** | HTTP 200 con **cuerpo servido truncado** (fb-843) — clase «200-inservible» (ver tabla hermana) | no reintentar el mismo fetch; secundaria fechada o subpágina concreta |
+| `4sysops.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP | one attempt max; capturar por snippet del search-provider o secundaria fechada |
+| `anadolu.agency` (+ fallback punycode `xn--anadoluajans-d5b.com.tr`) | **UNREACHABLE** | **fetch failed**, y el fallback **punycode falla igualmente** (host no resoluble, clase `status.opencode.ai`) | do not attempt; la fila ÚTIL es **`www.aa.com.tr` = `200-TRUNCATED`** (clase fb-843) ⇒ ir directo a ella o a secundaria fechada |
+| `servicenow.github.io/eva` | **READABLE via proxy** | la página NO es «fuente inaccesible»: en directo es 200-inservible (shell JS), pero **con `r.jina.ai` da HTTP 200 y cuerpo COMPLETO** — es el WORKAROUND que funciona (mismo patrón que `docs.hetzner.com`) | fetch proxiado **`https://r.jina.ai/https://servicenow.github.io/eva/`** |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
