@@ -990,16 +990,64 @@ export const RE_DELIVERY_DEFAULT_BASE_DELAY_MS = 15_000
 export const RE_DELIVERY_DEFAULT_MAX_DELAY_MS = 10 * 60_000
 
 /** LANE ② — the MAX-ATTEMPTS stop (12): after this many failed attempts
- * (windowed by the storm window), the automatic re-drive STOPS for that pair —
- * ONE 'terminal' row + a loud WARN (stop-with-alert) — instead of re-attempting
- * forever (the 450/226-attempt storms). The DURABLE record stays in
- * messages.jsonl (no content loss — recovery is manual/operational). */
+ * (counted over the CAP's OWN window — `RE_DELIVERY_CAP_WINDOW_MS`, 2 h), the
+ * automatic re-drive STOPS for that pair — ONE 'terminal' row + a loud WARN
+ * (stop-with-alert) — instead of re-attempting forever (the 450/226-attempt
+ * storms). The DURABLE record stays in messages.jsonl (no content loss —
+ * recovery is manual/operational). */
 export const RE_DELIVERY_DEFAULT_MAX_ATTEMPTS = 12
 
 /** LANE ② — the attempt-count window (1 h): only the pair's rows inside the
- * last hour count toward the backoff/exhaustion math (an OLD failure history
- * never keeps a pair permanently exhausted). */
+ * last hour count toward the STORM metric and the per-pair BACKOFF (an OLD
+ * failure history never keeps a pair permanently exhausted). It does NOT drive
+ * the MAX-ATTEMPTS CAP any more — see `RE_DELIVERY_CAP_WINDOW_MS`, which is the
+ * cap's OWN window. The two questions are different ("what is happening in the
+ * last hour?" vs "how many attempts has this pair accumulated?") and answering
+ * both from ONE counter is what made the cap unreachable (fb-79 incident). */
 export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
+
+/** LANE ② (2026-09-16, the THIRD WAY) — the MAX-ATTEMPTS CAP's OWN window,
+ * derived from the top of the backoff/cap product:
+ * `max(maxAttempts * maxDelayMs, RE_DELIVERY_STORM_WINDOW_MS)`, i.e.
+ * `max(12 * 10 min, 1 h)` = **2 h**.
+ *
+ * WHY A DEDICATED WINDOW AND NOT A CUMULATIVE COUNT. The cap is only ever READ
+ * at a sweep decision instant, which is PHASE-LOCKED ~600-660 s after the last
+ * `failed`, and each attempt appends TWO countable rows, so at the MEASURED
+ * ~663 s cadence a pair accrues `2 * 3_600_000 / 663_000 ≈ 10.86` rows per hour
+ * against a cap of 12 — a 1 h window's CEILING is then exactly 12 with ZERO
+ * margin, reachable only at the window's most favourable alignment, which the
+ * phase-locked decision instant never hits (MEASURED: the count peaked at 10
+ * across 6 793 real decision instants). The structural form is
+ * `cap reachable ⟺ windowMs >= maxAttempts * maxDelayMs`.
+ *
+ * The derivation is the point: `maxAttempts * maxDelayMs` is EXACTLY the
+ * MINIMUM window that holds `maxAttempts` attempts at the SLOWEST cadence the
+ * backoff can produce (`maxDelayMs` apart). A window of that size, floored at
+ * the storm window so it can never happen to be the NARROWER of the two, is
+ * therefore sufficient at ANY cadence the backoff admits.
+ *
+ * WHY NOT WINDOWLESS (the cumulative variant, preserved in
+ * `.dsh/reports/redelivery-cumulative-COHERENT-FINAL-20260916.patch`). A
+ * windowless count never releases an OLD failure history, so a pair that
+ * recovered and later failed again is condemned by attempts it already came
+ * back from — it BREAKS the documented contract «an OLD failure history never
+ * keeps a pair permanently exhausted» (:999-1002 pre-fix). The window preserves
+ * that contract AND makes the cap reachable: 2 h gaps between attempts ⇒ the
+ * count returns to 0, so a pair stops being exhausted BY TIME, with no TTL
+ * state to carry (`-409` explicitly rejected a TTL; this delivers its intent
+ * with the ledger it already has).
+ *
+ * WHY NOT WIDENING `RE_DELIVERY_STORM_WINDOW_MS` (the `71b800f` variant,
+ * reverted in `471191d`). That single window also feeds the backoff and the
+ * storm metric, so widening it would change the REGIME of EVERY pair — paying
+ * one pair's debt with every other pair's money. Here the storm metric and the
+ * backoff keep their 1 h window BIT FOR BIT: zero regime change by CONSTRUCTION,
+ * not by a measurement that happens to read 0. */
+export const RE_DELIVERY_CAP_WINDOW_MS = Math.max(
+  RE_DELIVERY_DEFAULT_MAX_ATTEMPTS * RE_DELIVERY_DEFAULT_MAX_DELAY_MS,
+  RE_DELIVERY_STORM_WINDOW_MS
+)
 
 /** LANE ② (fb-58) — the prepared-stuck criterion (10 min): 0 prepared rows
  * stuck > 10 min to a live non-dormant recipient (the crash-recovery class the
@@ -1343,8 +1391,10 @@ export interface DeliveryRedelivererDeps {
  *       construction). The BOOT pass keeps its ONE-TIME immediate semantics
  *       (the "no-retry-hasta-boot" recovery contract — a single boot is not a
  *       storm; the restart-loop storm is bounded by the max-attempts stop);
- *   (b) MAX-ATTEMPTS STOP-WITH-ALERT (boot + sweep): a pair whose in-window
- *       attempt count reaches `maxAttempts` is settled to ONE 'terminal' row
+ *   (b) MAX-ATTEMPTS STOP-WITH-ALERT (boot + sweep): a pair whose attempt count
+ *       — read over the CAP's OWN window (`RE_DELIVERY_CAP_WINDOW_MS`, 2 h),
+ *       DISTINCT from the 1 h backoff/storm window — reaches `maxAttempts` is
+ *       settled to ONE 'terminal' row
  *       + a loud WARN — the automatic re-drive STOPS (the message record stays
  *       durable in messages.jsonl — no content loss, recoverable manually);
  *   (c) the non-boot SWEEP (the no-restart re-drive seam): a bounded,
@@ -1410,6 +1460,11 @@ export class DeliveryRedeliverer {
   private readonly maxDelayMs: number
   private readonly maxAttempts: number
   private readonly stormWindowMs: number
+  /** The CAP's OWN window (`RE_DELIVERY_CAP_WINDOW_MS`, 2 h) — DISTINCT from
+   * `stormWindowMs` (1 h, the backoff/storm metric's) on purpose: the two
+   * questions ("attempts accumulated" vs "what is happening in the last hour")
+   * are answered by TWO counters, and keeping them separate is the fix. */
+  private readonly capWindowMs: number
   private readonly preparedStuckMs: number
   private readonly g2DrainSeedLimit: number
   private readonly legacyAgeMs: number
@@ -1453,8 +1508,15 @@ export class DeliveryRedeliverer {
       /** The in-window attempt count that stops the automatic re-drive with an
        * alert (default `RE_DELIVERY_DEFAULT_MAX_ATTEMPTS`). */
       maxAttempts?: number
-      /** The attempt-count window (default `RE_DELIVERY_STORM_WINDOW_MS`). */
+      /** The attempt-count window (default `RE_DELIVERY_STORM_WINDOW_MS`) — the
+       * BACKOFF and STORM metric's window. */
       stormWindowMs?: number
+      /** The MAX-ATTEMPTS CAP's OWN window (default
+       * `RE_DELIVERY_CAP_WINDOW_MS` = `max(maxAttempts * maxDelayMs, storm
+       * window)`, i.e. 2 h). SEPARATE from `stormWindowMs` by design — the cap
+       * counts a pair's attempts over its own horizon so that it is reachable at
+       * the REAL measured cadence without touching the backoff/storm regime. */
+      capWindowMs?: number
       /** The prepared-stuck criterion (default `RE_DELIVERY_PREPARED_STUCK_MS`). */
       preparedStuckMs?: number
       /** LANE ②-bis — the per-cycle cap of the G2 legacy drain seed (default
@@ -1473,6 +1535,11 @@ export class DeliveryRedeliverer {
     this.maxDelayMs = opts.maxDelayMs ?? RE_DELIVERY_DEFAULT_MAX_DELAY_MS
     this.maxAttempts = opts.maxAttempts ?? RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
     this.stormWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
+    // The DERIVED default, not a bare 2 h literal: the cap must be able to hold
+    // `maxAttempts` attempts at the SLOWEST cadence the backoff admits
+    // (`maxDelayMs` apart), and never narrower than the storm window. A caller
+    // overriding `maxAttempts`/`maxDelayMs` gets a cap window that follows them.
+    this.capWindowMs = opts.capWindowMs ?? Math.max(this.maxAttempts * this.maxDelayMs, this.stormWindowMs)
     this.preparedStuckMs = opts.preparedStuckMs ?? RE_DELIVERY_PREPARED_STUCK_MS
     this.g2DrainSeedLimit = opts.g2DrainSeedLimit ?? G2_DRAIN_SEED_DEFAULT_LIMIT
     this.legacyAgeMs = opts.legacyAgeMs ?? RE_DELIVERY_PREPARED_STUCK_MS
@@ -1530,10 +1597,21 @@ export class DeliveryRedeliverer {
     return false
   }
 
-  /** The attempt-count of one pair in the storm window (the pair's own sidecar
-   * rows — the attempt ledger). */
-  private pairAttempts(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
-    return pairAttemptCount(rows, messageId, recipientId, Date.now(), this.stormWindowMs)
+  /** builder-411 (2026-09-16) — the CAP's attempt count of one pair: the pair's
+   * `prepared`/`failed` transitions inside the CAP'S OWN window
+   * (`capWindowMs` = 2 h), NOT the backoff/storm 1 h window. The two
+   * computations are SEPARATE by design — the cap asks "how many attempts has
+   * this pair accumulated?", the backoff/storm asks "what is happening in the
+   * last hour?". Reading one counter for both was the defect (`fb-79`): a 1 h
+   * window holds only ~10.86 rows at the MEASURED ~663 s cadence, against a cap
+   * of 12, so the stop was DEAD CODE for every pair of every class.
+   *
+   * The `Date.now()` here is the same injected-clock seam the pre-fix code used,
+   * and it is read in the SWEEP's own decision instant (`sweepDue` calls this via
+   * `pairAttempts`); the boot pass reads it too. A test drives the sweep through
+   * the production `sweepDue(nowMs)` seam. */
+  private pairAttempts(rows: readonly DeliveryRow[], messageId: string, recipientId: string, nowMs: number): number {
+    return pairAttemptCount(rows, messageId, recipientId, nowMs, this.capWindowMs)
   }
 
   /** Drive ONE eligible (messageId, recipientId) pair: decide terminal / skip /
@@ -1905,7 +1983,7 @@ export class DeliveryRedeliverer {
       const bootCtx: PassContext = { rows, records: new Map() }
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
-        const attempts = this.pairAttempts(rows, row.messageId, row.recipientId)
+        const attempts = this.pairAttempts(rows, row.messageId, row.recipientId, Date.now())
         await this.drivePair(row, attempts, Date.now(), 'boot', bootCtx)
       }
       // LANE ②-bis — the G2 legacy drain seed runs at boot too (the host
@@ -1962,11 +2040,24 @@ export class DeliveryRedeliverer {
       const due: Array<{ row: DeliveryRow; attempts: number }> = []
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
-        const attempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
+        // builder-411 — the TWO computations are SEPARATE here, by design:
+        //   - `backoffAttempts`: the WINDOWED 1 h count, which drives the
+        //     per-pair exponential backoff (`pairDue`) and is the storm metric's
+        //     own unit; UNCHANGED (bit for bit, same constant, same window).
+        //   - `capAttempts`: the CAP's OWN 2 h count (`capWindowMs`), the one the
+        //     MAX-ATTEMPTS stop reads, so the cap is reachable at the REAL
+        //     measured cadence (~663 s) without touching the backoff/storm
+        //     regime of any pair.
+        // Before the fix both were the SAME 1 h number, which is WHY the stop was
+        // unreachable (a 1 h window holds only ~10.86 rows at that cadence,
+        // against a cap of 12 — zero margin, never reached at the phase-locked
+        // decision instant).
+        const backoffAttempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
+        const capAttempts = this.pairAttempts(rows, row.messageId, row.recipientId, nowMs)
         // A DEAD recipient settles regardless (the alive check inside
         // drivePair); a NOT-yet-due live pair is left for a LATER sweep.
-        if (this.deps.recipientAlive(row.recipientId) && !this.pairDue(row, attempts, nowMs)) continue
-        due.push({ row, attempts })
+        if (this.deps.recipientAlive(row.recipientId) && !this.pairDue(row, backoffAttempts, nowMs)) continue
+        due.push({ row, attempts: capAttempts })
       }
       // Sort by (recipientId, seq): the re-drives of ONE recipient enter in
       // delivery-queue sequence (`m-<seq>` — the durable FIFO order; a
