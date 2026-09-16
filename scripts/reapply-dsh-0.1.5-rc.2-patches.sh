@@ -831,6 +831,84 @@ row_session_persist_reanchor() {
   fi
 }
 
+# ===========================================================================
+# ROW 18 — dsh-api-session-controller: session.list stops enumerating the
+#          invisible corpus (sidebarfix1, 2026-09-16)
+#   fichero: node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
+#   md5: pre 2443ac0c1184472ca09d064a38a8e344 -> post 539094cd75b47c91d860fdf561248f5a
+#   THE DEFECT (measured, not assumed): ApiSessionList.list() builds a summary
+#     for EVERY corpus record (:1829-1847), and each one reads the projection
+#     cache (projectionsFor -> cachedSnapshot, :1948-1959). The client hides
+#     registry-archived sessions in EVERY sidebar derivation
+#     (dsh-client-ui-workspace `sessionVisible` requires !archived.has(id)), so
+#     the host paid for rows nobody renders: on the Dev corpus, MEASURED
+#     3,099 records -> 30 renderable (99.03% invisible), with 3,004 projection
+#     reads -> 29 and a 578,098 B -> 6,366 B payload face (per-item CPU
+#     128.1 ms -> 6.5 ms).
+#   SECOND TERM (the burst): the header sweep itself is NOT free — MEASURED
+#     1.9-3.1 s wall / 2.1-4.0 s CPU per listing over 3,099 session directories,
+#     and the client re-polls on every reconnect AND every rotation (deepartments
+#     watcher, 5 s retry loop), so each burst re-paid it. A 2 s TTL collapses a
+#     burst onto one sweep. LIVE state is still per-call (records carry only
+#     persisted headers; `running`/blank come from ctx.sessions each call), so
+#     nothing is served stale and a new session appears within one TTL.
+#   NOT A LOG-STORE PROBLEM (refuted by measurement): a read-only replication of
+#     listArtifacts()'s per-session work over the SAME corpus costs 413 ms /
+#     24.6 MB — the log scan reads only the first zstd frame (the header), so the
+#     O(corpus) part is cheap. The cost removed here is the PER-ITEM work.
+#   ENGINE: the ROW 17B shape — presence gate (idempotency) + EXACT PRE md5 +
+#     guarded_patch (--dry-run FIRST; NOTHING is written if any hunk rejects) +
+#     post-state md5 verification.
+#   IDEMPOTENCY GATE: `LOCAL PATCH (deepartments, sidebarfix1)` is this patch's
+#     own signature; its PRESENCE short-circuits to NOOP (raw `patch` is NOT
+#     idempotent on these files — re-applying would stack a second body + .rej).
+#   -p1 FROM THE PACKAGE DIRECTORY, header paths
+#     `a/node_modules/@deepseek-ai/...`/`b/node_modules/...` (the ROW 17 0.1.1
+#     nested form — this package is NOT flat in the tree).
+#   BEHAVIOUR ON A REGISTRY FAULT: an unavailable/raising workspaceRegistry
+#     degrades to the FULL corpus with a warn; it can never make the listing
+#     unreadable (asserted by the lane's test).
+# ===========================================================================
+row_api_session_list_archived() {
+  # NESTED header form (like ROW 17): `a/node_modules/@deepseek-ai/...`, so the
+  # patch is applied from the TREE with -p1. Measured: from the PACKAGE dir the
+  # same patch needs -p4, and `-p1` there rejects with a confusing
+  # CONTEXT-ABSENT — the nested form is only meaningful relative to the tree.
+  local rel="node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js"
+  local F="${TREE}/${rel}"
+  local PRE=2443ac0c1184472ca09d064a38a8e344
+  local POST=539094cd75b47c91d860fdf561248f5a
+  # -- presence gate FIRST (idempotency): already-applied -> NOOP, no write ----
+  if grep -q 'LOCAL PATCH (deepartments, sidebarfix1)' "${F}"; then
+    if [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      echo "NOOP         dsh-api-session-controller-list-archived (already applied)"
+      NOOP=$((NOOP+1))
+    else
+      echo "WARN         dsh-api-session-controller-list-archived — the sidebarfix1 marker is present but md5 $(md5_of "${F}") != ${POST}; inspect" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+    return 0
+  fi
+  # -- exact base check: any other file is not this patch's base (anti-drag) ---
+  if [[ "$(md5_of "${F}")" != "${PRE}" ]]; then
+    echo "CONTEXT-ABSENT dsh-api-session-controller-list-archived — md5 $(md5_of "${F}") is not the declared PRE ${PRE}; NOT forcing" >&2
+    ABSENT=$((ABSENT+1)); return 1
+  fi
+  if guarded_patch "${TREE}" "${PATCH_DIR}/dsh-api-session-controller-list-archived.patch" -p1; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      report_applied dsh-api-session-controller-list-archived
+    elif [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      report_applied dsh-api-session-controller-list-archived
+    else
+      echo "FAIL dsh-api-session-controller-list-archived post-md5 $(md5_of "${F}") != ${POST}" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+  else
+    echo "CONTEXT-ABSENT dsh-api-session-controller-list-archived — a hunk rejects; NOTHING WRITTEN" >&2
+    ABSENT=$((ABSENT+1)); return 1
+  fi
+}
+
 # --- run every row; a failing row never aborts the sweep (we report ALL) ----
 # BOTH modes run the SAME row set. The old split silently DROPPED row_fs_local
 # from --check, so a check run reported an incomplete picture — a check must see
@@ -850,6 +928,7 @@ run_row row_llm_deepseek;    run_row row_compaction
 run_row row_pi_ai_overflow;  run_row row_pi_ai_parse
 run_row row_session_persist
 run_row row_session_persist_reanchor
+run_row row_api_session_list_archived
 
 echo
 echo "### summary: applied=${APPLIED} would-apply=${WOULD} noop=${NOOP} context-absent/skipped=${ABSENT} failed=${BAD}"

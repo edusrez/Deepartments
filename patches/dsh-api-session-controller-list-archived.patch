@@ -1,0 +1,100 @@
+--- a/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js
+@@ -1770,9 +1770,47 @@
+ 	}
+ 	return value;
+ }
++/** LOCAL PATCH (deepartments, sidebarfix1): the sidebar renders a few dozen rows
++* at most, but this RPC enumerated every log artifact in the corpus and built a
++* summary — with a projection-cache read and schema validation — for EACH one:
++* measured on the Dev corpus at 3,077 items / 2.29 MB for ~10 renderable rows
++* (99.7% invisible), while the web client aborts the call at a hard 30 s
++* (DEFAULT_TIMEOUT_MS, no config knob). `archivedSessionIds` is the
++* registry-global archive set, and an archived session is invisible in EVERY
++* sidebar derivation (dsh-client-ui-workspace `sessionVisible` requires
++* `!archived.has(id)`), so archived rows are dropped HERE, before any per-item
++* projection work. The log remains the authority and nothing is deleted from
++* disk; `session.history` still serves archived sessions.
++* @param records - complete logical corpus records, in listing order.
++* @param archivedIds - registry-global archive set (may be empty or undefined).
++* @returns the records a sidebar can render, in input order.
++*/
++function withoutArchivedSessions(records, archivedIds) {
++	if (archivedIds === void 0 || archivedIds.length === 0) return records;
++	const archived = new Set(archivedIds);
++	return records.filter((record) => !archived.has(record.header.id));
++}
++/** LOCAL PATCH (deepartments, sidebarfix1): F4 — a slow or oversized listing stops
++* being silent. At or above this many milliseconds the listing logs one warn
++* naming the corpus size and the number of rows actually returned, so the next
++* breakage is visible in the org's logs instead of only in a browser console. */
++const SESSION_LIST_SLOW_WARN_MS = 3000;
++/** LOCAL PATCH (deepartments, sidebarfix1): how long ONE corpus listing may be
++* reused. The header sweep itself is the remaining O(corpus) term and is NOT
++* free: measured 1.9-3.1 s wall / 2.1-4.0 s CPU per call over the Dev corpus
++* (3,099 session directories). The client re-polls in BURSTS — on every
++* reconnect (refreshList), on every host rotation (the deepartments watcher, and
++* on its 5 s retry loop) — so each of those paid the sweep again even though the
++* corpus had barely moved. TTL-bounded reuse collapses a burst onto one sweep.
++* LIVE state is never served from here: `records` carries only persisted HEADERS
++* plus live precedence recomputed per call from `ctx.sessions`, so `running` and
++* blank state stay fresh; a just-rotated session appears within one TTL. */
++const SESSION_LIST_RECORDS_TTL_MS = 2000;
+ /** Owns list projection registration, bounded cold summaries, and authorized search. */
+ var ApiSessionList = class {
+ 	ctx;
++	/** LOCAL PATCH (deepartments, sidebarfix1): TTL-bounded corpus listing reuse. */
++	recordsCache;
+ 	/** @param ctx - Host context carrying Session, query, persistence, and projection services. */
+ 	constructor(ctx) {
+ 		this.ctx = ctx;
+@@ -1828,11 +1866,21 @@
+ 	*/
+ 	async list(signal) {
+ 		signal?.throwIfAborted();
+-		const records = await this.ctx.sessionQuery.listSessions(signal);
++		const startedAt = Date.now();
++		/* LOCAL PATCH (deepartments, sidebarfix1): reuse a just-taken corpus listing
++		   (burst collapse); TTL-bounded, so nothing is served indefinitely. */
++		const now = Date.now();
++		if (this.recordsCache === void 0 || now - this.recordsCache.at > SESSION_LIST_RECORDS_TTL_MS) this.recordsCache = { at: now, records: await this.ctx.sessionQuery.listSessions(signal) };
++		const records = this.recordsCache.records;
++		signal?.throwIfAborted();
++		/* LOCAL PATCH (deepartments, sidebarfix1): drop the rows no sidebar can
++		   render BEFORE the per-item projection work, so the cost is O(renderable)
++		   instead of O(corpus). */
++		const visible = withoutArchivedSessions(records, this.archivedSessionIds());
+ 		signal?.throwIfAborted();
+ 		const items = [];
+ 		const cold = [];
+-		for (const record of records) {
++		for (const record of visible) {
+ 			const live = this.ctx.sessions.get(record.header.id);
+ 			if (live !== void 0) {
+ 				items.push(this.summaryFor(live));
+@@ -1843,8 +1891,25 @@
+ 		}
+ 		for (const header of cold) items.push(this.summarizeCold(header));
+ 		items.sort((left, right) => right.updatedAt - left.updatedAt);
++		/* LOCAL PATCH (deepartments, sidebarfix1): F4 — never fail silently. */
++		const elapsedMs = Date.now() - startedAt;
++		if (elapsedMs >= SESSION_LIST_SLOW_WARN_MS) this.ctx.logger.warn(`api-session.list: slow listing took ${elapsedMs} ms for ${records.length} corpus record(s); returned ${items.length} renderable row(s)`);
+ 		return items;
+ 	}
++	/** LOCAL PATCH (deepartments, sidebarfix1): the registry-global archive set, or
++	* an empty list when the workspace registry is not mounted. Never throws: an
++	* unavailable registry must not make the session list unreadable.
++	* @returns archived session ids.
++	*/
++	archivedSessionIds() {
++		try {
++			const registry = this.ctx.get("workspaceRegistry");
++			return registry?.archivedSessionIds ?? [];
++		} catch (error) {
++			this.ctx.logger.warn(`api-session.list: archive set unavailable; listing the whole corpus: ${String(error)}`);
++			return [];
++		}
++	}
+ 	summarizeCold(header) {
+ 		const projections = this.projectionsFor(header, void 0);
+ 		const metadata = projections?.values.sessionListMetadata;
