@@ -260,5 +260,28 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // the alert was CORRECT — a frozen-surface lock exists precisely to make an
   // intentional extension a deliberate, documented act. The bump below is that
   // act, verified by the 13-case suite test/fb-630-parity-channel-capacity.test.js.
-  assert.equal(names.length, 329, `lib/invoke.js export count frozen at 329 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LOCK CORRECTED 329 → 343 (44acf89+41932e9+9fe1a2b, fb-14717 RE / the context
+  // ACTUATOR lane): the surface was extended by the FOURTEEN runtime exports of
+  // the context actuator. MEASURED, not assumed: the runtime export count of
+  // lib/invoke.js is 343, and the name-level source diff of
+  // packages/dshd-health/src/index.ts between de47df6 (the commit that set this
+  // counter at 329) and HEAD is SEVENTEEN `+export` names / −0 — of which
+  // FOURTEEN are RUNTIME (`CONTEXT_ACTION_STATE_FILE`, `CONTEXT_ACTION_RETENTION_MS`,
+  // `CONTEXT_ACTION_ADVISORY_FRACTION`, `CONTEXT_ACTION_ADVISORY_TOKEN`,
+  // `CONTEXT_ACTION_ADVISORY_HEADROOM_TOKENS`, `CONTEXT_ACTION_MEASURED_ACTIVE_RATE`,
+  // `CONTEXT_ACTION_ESCALATION_MAX_ATTEMPTS`, `CONTEXT_ACTION_ESCALATION_RETRY_MS`,
+  // `contextActionKey`, `readContextActionLedger`, `writeContextActionLedger`,
+  // `buildContextActionFrame`, `contextActionResolution`, `planContextActions`)
+  // and THREE are TYPE-ONLY and emit no runtime export (`ContextActionMark`,
+  // `ContextActionPlan`, `ContextActionPlanInput` — the same rule as the two
+  // sibling comments above). 17 − 3 = 14 = the measured delta: the arithmetic
+  // closes to the symbol.
+  // NOTE (the honest part, and the reason this took hours): this lock FIRED as a
+  // real «main rojo», the alert was CORRECT, and its attribution was WRONG THREE
+  // TIMES — because the vector is the STAR RE-EXPORT BRIDGE (src/core/health.ts),
+  // NOT an `export` line in invoke.ts. Anyone writing in ANY module of the package
+  // can move this count without touching invoke.ts and without any signal. The
+  // first two attributions looked for the culprit in invoke.ts and were false.
+  // The bump below is the deliberate, documented act the lock exists to force.
+  assert.equal(names.length, 343, `lib/invoke.js export count frozen at 343 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
