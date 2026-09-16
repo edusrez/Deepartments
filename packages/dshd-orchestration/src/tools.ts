@@ -3927,20 +3927,55 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // session — the running-window class: a followup spliced during the
       // in-flight final turn is cleared by the dispose and now settles
       // 'terminal' instead of lying 'delivered').
+      // GHOST-GUARD (ghostguard1 — the 2026-09-16 smart_restart floor): the
+      // dispose MUST be dispatched even when a step above REJECTS. This arm
+      // previously had NO `finally` — so a rejection in the fb-130 drain, the
+      // bounded join, the log finalize or the delivery settle SKIPPED
+      // `disposeHandle()` ENTIRELY (the immediate path below never had that
+      // hole: its `finally { disposeHandle() }` is the precedent being mirrored).
+      //
+      // WHY THAT IS NOT A COSMETIC DIFFERENCE: the harness `handle.dispose()`
+      // does `machine.cancel()` → `await machine.whenIdle()` → and ONLY THEN
+      // `detachAgent?.()` (the unregister) —
+      // dsh-agent-loop/lib/index.js:1138-1146, contract at
+      // dsh-agent/lib/types/index.d.ts:147-148 ("stops the loop, awaits its
+      // exit, unregisters the agent"). An agent whose turn never converges to
+      // idle is therefore NEVER unregistered, so `ctx.agents.list()` keeps
+      // returning it — and the smart_restart read-before-edit guard (which
+      // faithfully filters `status === 'running'`) keeps counting a RETIRED
+      // agent as an interruption victim forever.
+      //
+      // And the ghost is PERMANENT by construction: `disposeHeadHandle` (:3285)
+      // deletes the `byHeadHandle` entry BEFORE awaiting `handle.dispose()`, so
+      // if the dispose is never dispatched (or never settles) the handle is
+      // unreachable — NO later dispose can ever retry it. Dispatching is the
+      // only chance; hence the guarantee belongs HERE, on the scheduling path.
       const runDeferredDisposeAndSettle = async (): Promise<void> => {
         // Capture the session BEFORE the dispose (the harness detaches it
         // during the teardown; the captured log keeps the canceled evidence).
         const liveRef = agents?.get(entry.sessionId)
-        await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
-        await joinHeadDisposeOnce(entry.sessionId)
-        // fb-308 (H1 — deferred/joined path): seal the retiring worker's session
-        // log right after the bounded detach join — the turn has concluded and
-        // the durable artifact holds the REAL turn/end (the join resolves once
-        // the driver is idle). Best-effort (the finalize never throws); a miss
-        // leaves the mid-turn capture as-is.
-        await finalizeSessionLog(postId, entry.roomId ?? 'board', entry.sessionId)
-        await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
-        await settleRetiredPostDeliveries(postId)
+        try {
+          await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
+          await joinHeadDisposeOnce(entry.sessionId)
+          // fb-308 (H1 — deferred/joined path): seal the retiring worker's session
+          // log right after the bounded detach join — the turn has concluded and
+          // the durable artifact holds the REAL turn/end (the join resolves once
+          // the driver is idle). Best-effort (the finalize never throws); a miss
+          // leaves the mid-turn capture as-is.
+          await finalizeSessionLog(postId, entry.roomId ?? 'board', entry.sessionId)
+          await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
+          await settleRetiredPostDeliveries(postId)
+        } catch (error: unknown) {
+          // Non-fatal (retirePost's semantics are unchanged — the retire already
+          // committed): a failed settle only warns. The dispose ALWAYS follows.
+          ctx.logger.warn(`[deepartments] retire deferred dispose/settle for "${postId}" failed (non-fatal — the dispose is still dispatched): ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          // GHOST-GUARD: the ONE unconditional dispatch — mirrors the immediate
+          // path's `finally { disposeHandle() }` (:3961). Reaching this line is
+          // what unblocks the registry detach (and therefore the smart_restart
+          // guard) for a worker whose turn is still converging.
+          disposeHandle()
+        }
       }
       const timer = setTimeout(() => { void runDeferredDisposeAndSettle() }, deferDisposeMs)
       if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
