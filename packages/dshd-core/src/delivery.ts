@@ -70,6 +70,7 @@ const FB467_INSTRUMENTATION_STAMP = 'fb467-i1'
 import { deliveryStatus, parseDeliveryRows, resolveDeliveriesPath } from './messages.js'
 import type { DeliveryRow } from './messages.js'
 import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import type { PostEntry, HostEntry } from './registry.js'
 // FASE 2 step (d): the messaging ACL is a PURE module (./acl.js — busProfileFor /
 // aclDenyGround / canSend / aclDenyReason). The delivery engine imports the pure
@@ -166,6 +167,17 @@ export interface DeliverOrQueueOptions {
    * (the WIRED no-wake branch). Absent → byte-identical (the observer is the
    * send_message tool-result enrichment seam). */
   gateReason?: (reason: 'fifo' | 'noWake', bySeq?: number) => void
+  /** CONTEXT-ADMISSION GATE (2026-09-16, run token 7cf42c47) — OPTIONAL observer
+   * (observability ONLY, never a behavior gate): invoked exactly when the
+   * delivery was DEFERRED because the recipient's LIVE session is the very
+   * session the health actuator marked as having crossed its context window
+   * (`<stateDir>/context-action.json`), with the marker's own frame. A SEPARATE
+   * seam on purpose: `gateReason`'s union is consumed by the send_message tool
+   * result (`tools.ts` assigns it to a `'fifo' | 'noWake' | undefined` local),
+   * so widening it would be a COMPILE break outside this lane; this additive
+   * optional observer keeps every existing caller byte-identical (absent → no
+   * call at all). Absent → no-op, exactly like `gateReason`/`failedGround`. */
+  contextDeferred?: (info: { recipientId: string; sessionId: string; action: string; phase: string; pct: number }) => void
   /** FB-198 (T1, 2026-09-07) — OPTIONAL failure-ground observer
    * (observability ONLY, never a behavior gate): invoked exactly when the
    * per-recipient delivery outcome resolves to 'failed', with the GROUND the
@@ -346,6 +358,24 @@ export interface DeliveryEngineDeps {
    * behavior byte-identical). A THROW inside the dep degrades to the gate
    * APPLIED (conservative — running-status is never assumed on an error). */
   recipientRunningLive?: (recipientId: string) => boolean | undefined
+  /** CONTEXT-ADMISSION GATE (2026-09-16, run token 7cf42c47) — OPTIONAL: the
+   * durable session id of the recipient's LIVE, CATALOG-RESOLVED incarnation —
+   * the EXACT identity the engine is about to materialize. This is THE
+   * DISCRIMINATOR of the context-admission gate below: the actuator's marker is
+   * keyed by `agentId` and SURVIVES 24 h, while a post ROTATES to a fresh, sane
+   * session — so a gate that read the marker WITHOUT comparing the session would
+   * DEFER THE SUCCESSOR (blocking a healthy session for a whole day) instead of
+   * only the dying one. `ledger[recipientId].sessionId === liveSessionId` is the
+   * ONLY thing separating «defer the one that is dying» from «block the whole
+   * org».
+   *
+   * ABSENT (`undefined` dep, or the dep returning undefined) → the gate is INERT
+   * (FAIL-OPEN, never defer): the identity cannot be established, and a defer
+   * without proof of identity is exactly the successor-blocking failure this
+   * gate must never cause. A THROW inside the dep is the SAME fail-open path
+   * (deferring on a probe error would trade a bounded 400 for an unbounded
+   * block). NEVER assumed on an error. */
+  liveSessionId?: (recipientId: string) => string | undefined
   /** P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
    * DISCRIMINATOR) — OPTIONAL: whether the GATING HEAD of the FIFO gate (the
    * EARLIEST strictly-earlier seq whose delivery pair is still 'prepared' —
@@ -457,7 +487,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
        * delivery, reported by `catalogRoute` (undefined for the child route /
        * a minimal composition). The final-mark seam below keys the
        * reroute terminalization on it. */
-      const routeOut: { kind?: string; successorId?: string } = {}
+      const routeOut: { kind?: string; successorId?: string; deferred?: boolean } = {}
       // Persist-before-deliver (D4): the write-ahead 'prepared' row is on disk
       // BEFORE any route/wake, so a crash mid-fan-out re-delivers idempotently.
       // m-707: a WIRED no-wake delivery marks BOTH its sidecar rows no-wake
@@ -717,7 +747,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             }
           }
         }
-        await deps.markFinal(record, recipientId, retiredReroute ? 'terminal' : status, retiredReroute || opts.noWake !== true ? undefined : { noWake: true })
+        // CONTEXT-ADMISSION GATE (2026-09-16, run token 7cf42c47): a DEFERRED
+        // delivery seals its 'prepared' row exactly like a wired noWake send —
+        // the ROW is what the sweep/drain/health read, and an unsealed
+        // 'prepared' is CRASH-CLASS (the ~10-min prepared-stuck re-drive into
+        // the same dead session: the fb-150 spool class). The deferral IS a
+        // deliberate no-wake-until-wake, so it carries the same `noWake` seal.
+        const sealNoWake = opts.noWake === true || routeOut.deferred === true
+        await deps.markFinal(record, recipientId, retiredReroute ? 'terminal' : status, retiredReroute || sealNoWake !== true ? undefined : { noWake: true })
         // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
         // AFTER the final mark (the current pair is settled, so the drain can
         // never re-drive it). Fire-and-forget + non-fatal: an absent hook → a
@@ -761,6 +798,85 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         throw error
       }
     }
+  }
+}
+
+/** CONTEXT-ADMISSION GATE (2026-09-16, run token 7cf42c47) — THE READER of the
+ * health actuator's durable marker. Returns the marker's frame WHEN the
+ * recipient's LIVE session is EXACTLY the session the actuator flagged;
+ * `undefined` in every other case (→ the delivery proceeds UNCHANGED).
+ *
+ * `<stateDir>/context-action.json` = `{ [agentId]: { sessionId, at, action,
+ * phase, pct, … } }` — the flat, agentId-keyed file the actuator designed for
+ * this consumer (its `sessionId` field is the discriminator this gate needs).
+ *
+ * THE COMPARISON IS THE GATE. `marker.sessionId === liveSessionId` AND ONLY
+ * THEN defer. The ledger is keyed by agentId and survives 24 h while a post
+ * ROTATES — comparing sessions is what prevents deferring a healthy SUCCESSOR.
+ *
+ * FAIL-OPEN BY CONSTRUCTION (never throws, never defers on doubt):
+ *   - absent file (ENOENT) / unreadable / malformed JSON → undefined;
+ *   - an entry without a non-empty string `sessionId`, or without a finite `at`
+ *     (the same bar the actuator's own reader applies) → undefined;
+ *   - a marker older than the actuator's own 24 h retention → undefined (a stale
+ *     episode cannot shadow a fresh incarnation; the actuator prunes by the same
+ *     window, and re-reading a pruned entry must not resurrect it);
+ *   - a `liveSessionId` that cannot be established (empty/undefined from the
+ *     route entry) → undefined: NO identity, NO defer;
+ *   - ANY throw → undefined (a delivery must never break on a state file).
+ *
+ * The actuator's retention is re-declared here as a literal rather than
+ * imported: `dshd-health` is OUTSIDE this package's lane (and importing
+ * `dshd-core` → `dshd-health` would invert the dependency direction). The two
+ * values are the same 24 h window; should the actuator change it, this gate
+ * only becomes MORE conservative (an older marker stops deferring).
+ * MODULE-PRIVATE on purpose (no export-surface growth — the frozen export-parity
+ * pin holds by construction). */
+const CONTEXT_ACTION_STATE_FILE = 'context-action.json'
+const CONTEXT_ACTION_RETENTION_MS = 24 * 60 * 60 * 1000
+
+async function contextAdmissionProbe(
+  deps: DeliveryEngineDeps,
+  recipientId: string,
+  liveSessionId: string | undefined
+): Promise<{ sessionId: string; action: string; phase: string; pct: number } | undefined> {
+  // THE DISCRIMINATOR, first: without a known live session there is nothing to
+  // compare against — deferring here would be the successor-blocking failure.
+  // The route entry's own `sessionId` is the identity the engine is about to
+  // materialize; the optional `liveSessionId` dep overrides it when a wiring can
+  // resolve the handle's identity more precisely (absent → the entry's value).
+  let anchor: string | undefined
+  try {
+    anchor = deps.liveSessionId?.(recipientId) ?? liveSessionId
+  } catch (error: unknown) {
+    deps.logger.warn(`[deepartments] context-admission gate: live-session probe for "${recipientId}" failed (the delivery proceeds UNCHANGED — fail-open, never defer on a probe error): ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+  if (typeof anchor !== 'string' || anchor === '') return undefined
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(await readFile(path.join(deps.stateDir, CONTEXT_ACTION_STATE_FILE), 'utf8')) as Record<string, unknown>
+  } catch (error: unknown) {
+    // ENOENT is the ordinary case (the actuator has never crossed a window) —
+    // silent, exactly like the sibling sidecar reads of this module.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      deps.logger.warn(`[deepartments] context-admission gate: the context-action marker of ${deps.stateDir} could not be read (the delivery proceeds UNCHANGED — fail-open): ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return undefined
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined
+  const raw = parsed[recipientId]
+  if (raw === null || typeof raw !== 'object') return undefined
+  const mark = raw as Record<string, unknown>
+  if (typeof mark.sessionId !== 'string' || mark.sessionId === '') return undefined
+  if (mark.sessionId !== anchor) return undefined // ← the successor case: NOT deferred
+  if (typeof mark.at !== 'number' || !Number.isFinite(mark.at)) return undefined
+  if (Date.now() - mark.at > CONTEXT_ACTION_RETENTION_MS) return undefined // stale episode
+  return {
+    sessionId: mark.sessionId,
+    action: typeof mark.action === 'string' && mark.action !== '' ? mark.action : 'compact-or-rotate',
+    phase: typeof mark.phase === 'string' && mark.phase !== '' ? mark.phase : 'beyond-usable-window',
+    pct: typeof mark.pct === 'number' && Number.isFinite(mark.pct) ? mark.pct : 0
   }
 }
 
@@ -872,7 +988,7 @@ async function catalogRoute(
   /** DRENAJE (2026-09-10): additive out-param — the resolved route KIND, read
    * by the caller's final-mark seam (the reroute terminalization). Absent → the
    * caller simply does not learn the kind (safe default: no terminalization). */
-  routeOut?: { kind?: string; successorId?: string }
+  routeOut?: { kind?: string; successorId?: string; deferred?: boolean }
 ): Promise<DeliveryStatus> {
   const route = deps.resolveCatalogRoute(recipientId)
   if (route.kind === 'unknown') {
@@ -937,6 +1053,73 @@ async function catalogRoute(
       return 'failed'
     }
     return 'prepared'
+  }
+  // ─── CONTEXT-ADMISSION GATE (2026-09-16, run token 7cf42c47) ────────────────
+  // THE READER of the durable marker the health actuator writes. Until this
+  // gate, `<stateDir>/context-action.json` had NO production consumer: the
+  // actuator (dshd-health) recorded that a session crossed its context window
+  // and escalated to the manager, and the delivery seam then went on
+  // MATERIALIZING turns into that very session — which can no longer accept a
+  // request (`effective = projected + reserve > contextWindow` ⇒ the endpoint
+  // rejects it ⇒ Turn-error, the self-fed loop the actuator cannot drain).
+  //
+  // WHAT IT DOES: DEFER the materialization — persist the record, do NOT wake —
+  // instead of waking a session that provably cannot serve the turn. It is the
+  // SAME shape as the WIRED `noWake` branch directly above (persist + queue, no
+  // materialize), so the caller's final-mark seam settles the pair 'prepared'
+  // and the record stays durable for the recipient's next REAL wake.
+  //
+  // THE DISCRIMINATOR (the whole reason this gate is safe): `sessionId`. The
+  // marker ledger is keyed by `agentId` and SURVIVES 24 h, while a post that hit
+  // the wall is ROTATED to a fresh, sane session. A gate that read the marker
+  // WITHOUT comparing the session would DEFER THE SUCCESSOR — a healthy session
+  // blocked for a whole day, the org-wide failure class. The comparison is
+  // therefore not a detail: it is what separates «defer the one that is dying»
+  // from «block a live one».
+  //
+  // THE MANAGER IS NEVER CONSULTED. MEASURED: the flagged post of the incident
+  // (the quality head, 3 082 turn-errors / 15 dead generations) has NO
+  // `managerId` — a head carries none (only workers do). An implementation that
+  // deferred only posts with a manager would leave the measured victim with no
+  // actor: the defer happens REGARDLESS of manager resolution.
+  //
+  // FAIL-OPEN, BY DOCTRINE (symmetric with the actuator's own conservative
+  // rule «a finding WITHOUT `sessionId` produces NO action»): absent file,
+  // unreadable file, malformed JSON, an entry without a usable `sessionId`/`at`,
+  // a marker older than the actuator's own 24 h retention, or ANY throw in the
+  // probe → NO defer, NO throw. A state file that may not exist must never break
+  // a delivery.
+  //
+  // SCOPE OF THE DEFER: the ADDRESSED catalog recipient classes 'post' and
+  // 'host' ONLY. A 'reroute' is EXCLUDED by construction: its entry is the LIVE
+  // SUCCESSOR (a different, sane session), so deferring on the marker of the
+  // retired addressed id would park a delivery whose real target is healthy.
+  if (route.kind === 'post' || route.kind === 'host') {
+    const deferred = await contextAdmissionProbe(deps, recipientId, route.entry.sessionId)
+    if (deferred !== undefined) {
+      opts.contextDeferred?.({
+        recipientId,
+        sessionId: deferred.sessionId,
+        action: deferred.action,
+        phase: deferred.phase,
+        pct: deferred.pct
+      })
+      // [fb-467 instrumentation stamp reuse — the SAME traceable version tag the
+      // neighboring decision lines carry, so this defer is identifiable in the
+      // log by the build that took it.]
+      deps.logger.warn(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] context-admission gate: DEFERRING materialization for ${record.id} → ${recipientId} — the LIVE session ${deferred.sessionId} is the one the context actuator flagged (phase=${deferred.phase}, action=${deferred.action}, ${Math.round(deferred.pct * 100)}%): the turn is QUEUED ('prepared', NO wake) instead of being materialized into a session whose next request is already impossible. The record stays durable and drains at the recipient's next real wake (or a rotated successor).`)
+      // Persist-and-queue: EXACTLY the wired noWake branch's outcome. The
+      // DEFER INTENT is reported through the caller's out-param so the SINGLE
+      // final-mark seam settles the pair with the `noWake` seal (see there):
+      // without the seal the pair is CRASH-CLASS and the ~10-min prepared-stuck
+      // sweep re-drives it into the same dead session forever — the measured
+      // fb-150 spool (28 'prepared' rows / 0 terminals in ~2.4h). The seal is
+      // the established vocabulary for «this 'prepared' is a DELIBERATE
+      // no-wake-until-wake, never a crash» (m-707), which is exactly what a
+      // deferral is.
+      if (routeOut !== undefined) routeOut.deferred = true
+      return 'prepared'
+    }
   }
   // ALWAYS-WAKE (DEFAULT — the pre-step (c) behavior EXACTLY).
   // VALLE 09-07 (BATCH-DRAIN): the batch-eligibility TRANSPORT flag is threaded
