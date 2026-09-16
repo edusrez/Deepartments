@@ -27,6 +27,7 @@ in `presets/departments/internal-programming/ARCHITECTURE.md`.
 docs/departments/internal-programming/
 ├── README.md      ← this file (layout + job-definition convention)
 ├── INCIDENT-PLAYBOOK.md ← incident classes runbook (session archives map, bare-400 class, escalation checklists)
+├── ACTUADOR-CONTEXTO.md ← the context actuator (the consumer of `contextAction`): its session anchor, its observable, and the admission-cut piece that lives OUTSIDE the lane
 └── jobs/          ← versioned job definitions, one file per job
     ├── weekly-repo-health.md
     └── version-watch.md
