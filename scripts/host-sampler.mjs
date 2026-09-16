@@ -57,7 +57,7 @@
 //                stalled, `some` = at least one. null = file absent (kernel
 //                without PSI, < 4.20) or unreadable.
 //   daemon       { unit, profile, pid, rssKb, vmSizeKb, threads, state,
-//                  cpuTicks } | null
+//                  cpuTicks, pressure } | null
 //                The `node` process of the systemd unit (RSS from
 //                /proc/<pid>/status VmRSS, cumulative utime+stime from
 //                /proc/<pid>/stat — USER_HZ = 100, so cpuTicks/100 = CPU
@@ -65,6 +65,30 @@
 //                cpuTicks is what separates "the daemon was COMPUTING" from
 //                "the daemon was WAITING": its delta over a window divided by
 //                the window's wall time is the CPU-core share it burned.
+//   daemon.pressure { source, usedMb, ceilingMb, usedPct, level } | absent
+//                THE BAND (norm §4.6) — and the reason it is here at all:
+//                **the V8 heap of the daemon is NOT readable from outside the
+//                process.** `heapUsed`/`heapTotal` are RUNTIME datums that only
+//                `process.memoryUsage()` can produce, FROM INSIDE; `/proc` has
+//                no such field (VmRSS is KERNEL process memory and is a
+//                different, larger quantity: at the 2026-09-16T14:43:47Z
+//                `FATAL ERROR: Reached heap limit` the daemon's RSS was
+//                3261 MB against a 2096 MB heap ceiling = 156 %). So this
+//                sampler CANNOT publish the heap itself, and it publishes the
+//                band over the BEST datum it can reach:
+//                  source = 'heapUsed'  → the daemon's OWN heap, relayed from
+//                           `<stateDir>/health-heartbeat.json` (the daemon's
+//                           health tick writes it from inside — the natural
+//                           home of the datum; norm §4.7). The block appears
+//                           ONLY when that file carries it, NEVER as a null
+//                           slot.
+//                  source = 'rss-upper-bound' → no heap published yet: the band
+//                           over VmRSS of the daemon, which is an UPPER BOUND on
+//                           its heap (RSS ≥ heap) and therefore never warns
+//                           LATE — it can warn EARLY/unnecessarily.
+//                ceilingMb = V8's `heap_size_limit` (2096 MB measured on this
+//                host, norm §4.6) — the daemon's own limit when it reports one.
+//                level: NORMAL < 80 % · WARN >= 80 % · CRITICAL >= 90 %.
 //   disk         { path: '/', totalBytes, usedBytes, availBytes, usedPct,
 //                  inodesUsedPct } — df semantics (usedPct = used/(used+avail))
 //   stateDir     { path, bytes, files, bytesAt, ageSec, truncated, skipped }
@@ -114,7 +138,38 @@ export const DEFAULT_LOG_KEEP_LINES = 1000
 export const DEFAULT_DIR_BYTES_EVERY_SEC = 900
 export const DEFAULT_DIR_WALK_DEADLINE_MS = 10000
 
+/** The V8 heap ceiling this host ACTUALLY has, in MB — measured, never assumed:
+ * `v8.getHeapStatistics().heap_size_limit` on node v22.23.2 with
+ * `os.totalmem() = 7,57 GB` returns **2096,0 MB** (the Node 22 default scaled by
+ * RAM; the unit declares no `--max-old-space-size` and no `NODE_OPTIONS`). The
+ * **5,8 G** that systemd prints for the unit is the CGROUP peak, NOT the heap.
+ * Do not raise this number to make a graph look calmer: at the
+ * 2026-09-16T14:43:47Z `FATAL ERROR: Reached heap limit` the daemon's RSS was
+ * 3261 MB = 156 % of this ceiling, so a band that compared RSS against 5,8 G
+ * would have read 56 % (NORMAL) while the process was dying. */
+export const HEAP_CEILING_MB = 2096
+
+/** The BAND (norm §4.6): thresholds as a percentage of the heap ceiling. */
+export const HEAP_BAND = { warnPct: 80, criticalPct: 90 }
+
 const PSI_RESOURCES = ['cpu', 'io', 'memory']
+
+/** The BAND: the level of a memory reading (MB) against a heap ceiling (MB).
+ * PURE (exported for the hermetic test). `NORMAL` (silent) below `warnPct`,
+ * `WARN` at/above `warnPct`, `CRITICAL` at/above `criticalPct`. Returns null for
+ * a non-finite reading, so the caller OMITS the block instead of publishing a
+ * null slot. */
+export function heapBand(usedMb, ceilingMb = HEAP_CEILING_MB) {
+  if (!Number.isFinite(usedMb) || !Number.isFinite(ceilingMb) || ceilingMb <= 0) return null
+  // Compare the UNROUNDED ratio. Rounding first MOVES THE THRESHOLD: 1676/2096
+  // = 79,96 % would print as «80.0» and fire WARN on a reading that is under
+  // the band — a threshold that quietly sits at 79,95 % instead of 80 %. The
+  // rounding is for the READER, the comparison is for the DECISION.
+  const rawPct = (usedMb / ceilingMb) * 100
+  const usedPct = Number(rawPct.toFixed(1))
+  const level = rawPct >= HEAP_BAND.criticalPct ? 'CRITICAL' : rawPct >= HEAP_BAND.warnPct ? 'WARN' : 'NORMAL'
+  return { usedMb, ceilingMb, usedPct, level }
+}
 
 /** Read a small /proc file as UTF-8 text; null when absent/unreadable. */
 function readProcText(file) {
@@ -242,6 +297,35 @@ export function resolveDaemonPid(profile, cachedPid) {
   return null
 }
 
+/** The daemon's OWN V8 heap, as the DAEMON published it — relayed, never
+ * invented. The daemon's health tick writes `<stateDir>/health-heartbeat.json`
+ * FROM INSIDE the process (`packages/dshd-health/src/index.ts:611-613`, called
+ * from the tick at `:7667`), which is the ONLY place the heap datum can be born:
+ * `heapUsed`/`heapTotal` come from `process.memoryUsage()` and no external
+ * reader (this sampler included) can obtain them from `/proc`.
+ *
+ * Reads the `heapMb` block when the daemon publishes one — `{ used, total,
+ * limit? }`, MB — and returns `null` for: file absent, file unparseable (the
+ * daemon's non-atomic `writeFile` can be caught mid-write), or no `heapMb`.
+ * The CALLER then OMITS the band's `heapUsed` source: a field that is always
+ * `null` is an EMPTY SLOT, not a datum, and this sampler must not open one. */
+export function readHeartbeatHeap(stateDir) {
+  const raw = readProcText(path.join(stateDir, 'health-heartbeat.json'))
+  if (raw === null) return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  const heap = parsed?.heapMb
+  if (heap === null || typeof heap !== 'object') return null
+  const used = Number(heap.used)
+  if (!Number.isFinite(used)) return null
+  const limit = Number(heap.limit)
+  return { usedMb: used, limitMb: Number.isFinite(limit) && limit > 0 ? limit : null }
+}
+
 /** Parse /proc/<pid>/status for the RSS block. PURE (exported for the test). */
 export function parseProcStatus(text) {
   if (typeof text !== 'string') return null
@@ -270,23 +354,45 @@ export function parseProcStat(text) {
   return { utimeTicks, stimeTicks, cpuTicks: utimeTicks + stimeTicks }
 }
 
-/** The daemon block of a sample (block null when the PID cannot be resolved). */
-export function daemonBlock(opts, cachedPid) {
+/** THE BAND'S DECISION — the pure seam (norm §4.6/§4.7). Returns the
+ * `pressure` object, or **null when there is no reading** so the caller OMITS
+ * the key entirely. This returning-null-rather-than-a-placeholder IS the law:
+ * a field that always reads `null` is an EMPTY SLOT, not a datum, and this
+ * series must not open one (`fb-1587`'s "reserva vacía" defect).
+ *
+ * The datum's priority is honest about what is reachable FROM OUTSIDE the
+ * daemon: its OWN heap when it published one (`heartbeat`, relayed from
+ * `health-heartbeat.json`) — otherwise `rssKb`, which is an UPPER BOUND on the
+ * heap (RSS >= heap) and can therefore only warn EARLY, never late. */
+export function daemonPressure(rssKb, heartbeat = null) {
+  const usedMb = heartbeat !== null ? heartbeat.usedMb : typeof rssKb === 'number' ? rssKb / 1024 : null
+  const ceilingMb = heartbeat?.limitMb ?? HEAP_CEILING_MB
+  const band = heapBand(usedMb, ceilingMb)
+  return band === null ? null : { source: heartbeat !== null ? 'heapUsed' : 'rss-upper-bound', ...band }
+}
+
+/** The daemon block of a sample (block null when the PID cannot be resolved).
+ * `heartbeat` (optional) is what `readHeartbeatHeap` relayed: the daemon's own
+ * heap when it publishes one. */
+export function daemonBlock(opts, cachedPid, heartbeat = null) {
   const found = resolveDaemonPid(opts.profile, cachedPid)
   if (found === null) return { block: null, pid: null }
   const status = parseProcStatus(readProcText(`/proc/${found.pid}/status`) ?? '')
   const stat = parseProcStat(readProcText(`/proc/${found.pid}/stat`) ?? '')
+  const rssKb = status === null ? null : status.rssKb
+  const pressure = daemonPressure(rssKb, heartbeat)
   return {
     pid: found.pid,
     block: {
       unit: opts.unit,
       profile: opts.profile,
       pid: found.pid,
-      rssKb: status === null ? null : status.rssKb,
+      rssKb,
       vmSizeKb: status === null ? null : status.vmSizeKb,
       threads: status === null ? null : status.threads,
       state: status === null ? null : status.state,
       cpuTicks: stat === null ? null : stat.cpuTicks,
+      ...(pressure === null ? {} : { pressure }),
     },
   }
 }
@@ -378,10 +484,21 @@ export function collectSample(opts, state = {}) {
     load = { load1: os3[0], load5: os3[1], load15: os3[2], runnable: null, procs: null }
   }
 
+  // The daemon's own heap, relayed from the heartbeat the daemon writes
+  // (norm §4.7). Absent → the band falls back to VmRSS (upper bound). A torn
+  // read is NOT an error: the daemon rewrites this file non-atomically every
+  // tick, so it is expected to be caught mid-write now and then.
+  let heartbeat = null
+  try {
+    heartbeat = readHeartbeatHeap(opts.stateDir)
+  } catch (err) {
+    errors.push(`heartbeat: ${err?.message ?? String(err)}`)
+  }
+
   let daemon = null
   let daemonPid = Number.isFinite(state.daemonPid) ? state.daemonPid : null
   try {
-    const resolved = daemonBlock(opts, daemonPid)
+    const resolved = daemonBlock(opts, daemonPid, heartbeat)
     daemon = resolved.block
     daemonPid = resolved.pid
     if (daemon === null) {
@@ -654,6 +771,25 @@ export function tick(opts, state) {
   appendFileSync(opts.out, `${JSON.stringify(sample)}\n`, 'utf8')
   const rot = rotateIfNeeded(opts.out, { maxLines: opts.maxLines, keepLines: opts.keepLines, maxBytes: opts.maxBytes })
   if (rot.rotated) logLine(opts, `rotated ${opts.out}: ${rot.lines} -> ${rot.keep} lines (caps ${opts.maxLines} lines / ${opts.maxBytes} bytes)`)
+  // The BAND's own log line (norm §4.6): WARN/CRITICAL are logged ONCE per
+  // crossing (state.bandLevel latches the last level), not once per tick — the
+  // log is AUXILIARY (§6) and a line every 45 s would only churn it. The
+  // AUTHORITATIVE record of the level is the sample's `daemon.pressure`.
+  const level = sample.daemon?.pressure?.level ?? null
+  if (level !== null && level !== state.bandLevel) {
+    if (level !== 'NORMAL') {
+      const p = sample.daemon.pressure
+      logLine(
+        opts,
+        `HEAP ${level} (${p.source}): ${p.usedMb.toFixed(0)} MB of a ${p.ceilingMb.toFixed(0)} MB heap ceiling = ${p.usedPct}% ` +
+          `(band: WARN >= ${HEAP_BAND.warnPct}%, CRITICAL >= ${HEAP_BAND.criticalPct}% — norm §4.6: INVESTIGATE, this daemon can die with ` +
+          `'FATAL ERROR: Reached heap limit')`,
+      )
+    } else if (state.bandLevel !== undefined && state.bandLevel !== null) {
+      logLine(opts, `HEAP NORMAL again: ${sample.daemon.pressure.usedPct}% of the ceiling`)
+    }
+    state.bandLevel = level
+  }
   state.ticks = (state.ticks ?? 0) + 1
   if (state.ticks % 100 === 0) {
     const logRot = rotateIfNeeded(opts.log, { maxLines: DEFAULT_LOG_MAX_LINES, keepLines: DEFAULT_LOG_KEEP_LINES, maxBytes: 0 })
@@ -664,10 +800,12 @@ export function tick(opts, state) {
 
 /** Compact one-line status render (used by the loop log). */
 export function renderStatus(sample, ticks) {
+  const p = sample.daemon?.pressure
   return (
     `tick ${ticks} ts=${sample.iso} load1=${sample.load1} ` +
     `cpu.some60=${sample.psi.cpu?.some?.avg60 ?? 'n/a'} io.some60=${sample.psi.io?.some?.avg60 ?? 'n/a'} ` +
-    `mem.some60=${sample.psi.memory?.some?.avg60 ?? 'n/a'} rssKb=${sample.daemon?.rssKb ?? 'n/a'} tickMs=${sample.tickMs}`
+    `mem.some60=${sample.psi.memory?.some?.avg60 ?? 'n/a'} rssKb=${sample.daemon?.rssKb ?? 'n/a'} ` +
+    `heap=${p === undefined ? 'n/a' : `${p.level} ${p.usedPct}%(${p.source})`} tickMs=${sample.tickMs}`
   )
 }
 
@@ -706,11 +844,12 @@ export async function main(argv = process.argv.slice(2)) {
   })
   process.on('exit', cleanup)
 
-  const state = { daemonPid: opts.daemonPid, stateDirBlock: null, ticks: 0 }
+  const state = { daemonPid: opts.daemonPid, stateDirBlock: null, ticks: 0, bandLevel: null }
   logLine(
     opts,
     `start pid=${process.pid} out=${opts.out} interval=${opts.intervalSec}s ` +
-      `caps=${opts.maxLines} lines/${opts.maxBytes} bytes keep=${opts.keepLines} unit=${opts.unit} profile=${opts.profile}`,
+      `caps=${opts.maxLines} lines/${opts.maxBytes} bytes keep=${opts.keepLines} unit=${opts.unit} profile=${opts.profile} ` +
+      `heapCeilingMb=${HEAP_CEILING_MB} band=WARN>=${HEAP_BAND.warnPct}% CRITICAL>=${HEAP_BAND.criticalPct}%`,
   )
 
   if (opts.once) {

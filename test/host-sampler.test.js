@@ -7,7 +7,10 @@
 //   · the sampler's row key set is asserted EXACTLY (a new/renamed field breaks
 //     the readers, so it must break this test too);
 //   · PRESSURE / FLAT / INSUFFICIENT are each pinned by a synthetic window
-//     (the criterion is the norm's §4 — a change there must be deliberate).
+//     (the criterion is the norm's §4 — a change there must be deliberate);
+//   · THE HEAP BAND (norm §4.6) is pinned against the MEASURED 2096 MB ceiling
+//     — including the fb-1587 defect it exists to prevent: a band compared
+//     against the 5,8 G CGROUP peak reads "NORMAL" while the daemon is dying.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -19,17 +22,25 @@ import {
   DEFAULT_INTERVAL_SEC,
   DEFAULT_KEEP_LINES,
   DEFAULT_MAX_LINES,
+  HEAP_BAND,
+  HEAP_CEILING_MB,
   cmdlineMatchesDaemon,
   countLines,
+  daemonBlock,
+  daemonPressure,
   dirBytes,
+  heapBand,
   memBlock,
+  parseArgs,
   parseLoadavg,
   parseMeminfo,
   parsePressure,
   parsePressureLine,
   parseProcStat,
   parseProcStatus,
+  readHeartbeatHeap,
   rotateIfNeeded,
+  tick,
 } from '../scripts/host-sampler.mjs'
 import {
   CRITERION,
@@ -506,4 +517,132 @@ test('correlate() reports an absent samples file as MISSING, not as a flat host'
   assert.equal(summary.samplesMissing, true)
   assert.equal(results.length, 1)
   assert.equal(results[0].evaluation.verdict, 'INSUFFICIENT')
+})
+
+
+// --- THE HEAP BAND (norm §4.6) ----------------------------------------------
+//
+// WHY THIS BLOCK EXISTS: the daemon's V8 heap CANNOT be read from outside the
+// process. `heapUsed`/`heapTotal` are RUNTIME datums only
+// `process.memoryUsage()` can produce, FROM INSIDE; `/proc` has no such field.
+// At the 2026-09-16T14:43:47Z `FATAL ERROR: Reached heap limit` the daemon's
+// VmRSS was 3261 MB against a 2096 MB heap ceiling (156 %), so RSS is an
+// UPPER BOUND on the heap — good enough to warn with, NOT the datum itself.
+
+test('heapBand: NORMAL below 80%, WARN at 80%, CRITICAL at 90% of the ceiling', () => {
+  assert.equal(HEAP_BAND.warnPct, 80)
+  assert.equal(HEAP_BAND.criticalPct, 90)
+  assert.equal(heapBand(1000).level, 'NORMAL') // 47,7 %
+  assert.equal(heapBand(1676).level, 'NORMAL') // 79,96 % — just under
+  assert.equal(heapBand(1677).level, 'WARN') // 80,0 %
+  assert.equal(heapBand(1886).level, 'WARN') // 90,0 % — the boundary is inclusive downwards
+  assert.equal(heapBand(1887).level, 'CRITICAL') // 90,03 %
+  assert.equal(heapBand(2096).level, 'CRITICAL') // AT the ceiling
+  // a non-finite reading is NOT a level: the caller must OMIT the block rather
+  // than publish a null slot (a field that is always null is not a datum).
+  assert.equal(heapBand(null), null)
+  assert.equal(heapBand(Number.NaN), null)
+  assert.equal(heapBand(100, 0), null)
+})
+
+test('THE CEILING IS THE MEASURED 2096 MB, never the 5,8 G CGROUP peak (fb-1587)', () => {
+  assert.equal(HEAP_CEILING_MB, 2096)
+  // The defect this pins: with a 5,8 G denominator the fatal daemon's 3261 MB
+  // of RSS reads 56 % — NORMAL — at the very instant it was dying.
+  const withRealCeiling = heapBand(3261, HEAP_CEILING_MB)
+  const withCgroupPeak = heapBand(3261, 5800)
+  assert.equal(withRealCeiling.level, 'CRITICAL')
+  assert.equal(withCgroupPeak.level, 'NORMAL')
+  assert.notEqual(withRealCeiling.level, withCgroupPeak.level)
+  // and the fatal incarnation's RSS is, as measured, ABOVE the heap ceiling
+  assert.ok(withRealCeiling.usedPct > 150)
+})
+
+test('readHeartbeatHeap relays the daemon heap, and degrades to null (never a throw)', (t) => {
+  const dir = fixtureDir(t)
+  // (a) absent file → null (the state of the world BEFORE the daemon publishes it)
+  assert.equal(readHeartbeatHeap(dir), null)
+  // (b) a torn read — the daemon's writeFile is NOT atomic, so this really happens
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapM')
+  assert.equal(readHeartbeatHeap(dir), null)
+  // (c) a heartbeat WITHOUT the heap (every heartbeat written to date) → null
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","crashStreak":0}')
+  assert.equal(readHeartbeatHeap(dir), null)
+  // (d) the datum, when the daemon publishes one
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapMb":{"used":2000,"total":2048,"limit":2096}}')
+  assert.deepEqual(readHeartbeatHeap(dir), { usedMb: 2000, limitMb: 2096 })
+  // (e) no limit published → the caller must fall back to the MEASURED ceiling
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapMb":{"used":1800,"total":1900}}')
+  assert.deepEqual(readHeartbeatHeap(dir), { usedMb: 1800, limitMb: null })
+})
+
+test('daemonBlock: an unresolvable daemon is a null block; a relayed heap names its source', () => {
+  // A profile no daemon runs → the block is null (the degrade path, no throw).
+  const absent = parseArgs(['--state-dir', '/nonexistent-fixture', '--profile', 'no-such-profile-xyz', '--quiet'])
+  assert.equal(daemonBlock(absent, null, null).block, null)
+  // The LIVE daemon of this host, banded from a relayed heap and from RSS.
+  const live = parseArgs(['--state-dir', '/nonexistent-fixture', '--quiet'])
+  const withHeap = daemonBlock(live, null, { usedMb: 2000, limitMb: 2096 })
+  if (withHeap.block === null) return // no daemon resolvable in this environment
+  assert.deepEqual(withHeap.block.pressure, { source: 'heapUsed', usedMb: 2000, ceilingMb: 2096, usedPct: 95.4, level: 'CRITICAL' })
+  const rssOnly = daemonBlock(live, null, null)
+  assert.equal(rssOnly.block.pressure.source, 'rss-upper-bound')
+  assert.equal(rssOnly.block.pressure.ceilingMb, HEAP_CEILING_MB)
+  assert.ok(Math.abs(rssOnly.block.pressure.usedMb - rssOnly.block.rssKb / 1024) < 0.01)
+})
+
+test('NO EMPTY SLOT: with no reading at all, the band is OMITTED — never a null placeholder', () => {
+  // The law (fb-1587's "reserva vacía"): a field that always reads null is not a
+  // datum. With NO rssKb and NO relayed heap there is nothing to band, so the
+  // decision must be null and the caller must OMIT the key.
+  assert.equal(daemonPressure(null, null), null)
+  assert.equal(daemonPressure(undefined, null), null)
+  assert.equal(daemonPressure(Number.NaN, null), null)
+  // One reading is enough, and the source names WHICH datum was banded.
+  // rssKb is in kB: 2 GiB of RSS = 2097152 kB = 2048 MB — banded against the
+  // MEASURED ceiling that is 97,7 % (the real shape of this host's daemon).
+  assert.deepEqual(daemonPressure(2097152, null), { source: 'rss-upper-bound', usedMb: 2048, ceilingMb: HEAP_CEILING_MB, usedPct: 97.7, level: 'CRITICAL' })
+  assert.deepEqual(daemonPressure(1024 * 1024, null), { source: 'rss-upper-bound', usedMb: 1024, ceilingMb: HEAP_CEILING_MB, usedPct: 48.9, level: 'NORMAL' })
+  assert.deepEqual(daemonPressure(null, { usedMb: 1900, limitMb: 2096 }), { source: 'heapUsed', usedMb: 1900, ceilingMb: 2096, usedPct: 90.6, level: 'CRITICAL' })
+  // The daemon's own heap WINS over RSS when both exist (it is the real datum).
+  assert.equal(daemonPressure(9999, { usedMb: 100, limitMb: 2096 }).source, 'heapUsed')
+})
+
+test('THE BAND IS IN THE ROW: --once publishes daemon.pressure of the DECLARED keys, with NO null slot', (t) => {
+  const dir = fixtureDir(t)
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapMb":{"used":2000,"total":2048,"limit":2096}}')
+  const stdout = execFileSync(process.execPath, [SAMPLER, '--once', '--state-dir', dir, '--quiet'], { encoding: 'utf8' })
+  const row = JSON.parse(stdout)
+  if (row.daemon === null) return // no resolvable daemon on this host: nothing to pin here
+  // EXACT key set: a renamed/added field breaks the readers, so it breaks here too
+  assert.deepEqual(Object.keys(row.daemon), ['unit', 'profile', 'pid', 'rssKb', 'vmSizeKb', 'threads', 'state', 'cpuTicks', 'pressure'])
+  assert.deepEqual(Object.keys(row.daemon.pressure), ['source', 'usedMb', 'ceilingMb', 'usedPct', 'level'])
+  assert.equal(row.daemon.pressure.source, 'heapUsed')
+  assert.equal(row.daemon.pressure.usedMb, 2000)
+  assert.equal(row.daemon.pressure.ceilingMb, 2096)
+  assert.equal(row.daemon.pressure.usedPct, 95.4)
+  assert.equal(row.daemon.pressure.level, 'CRITICAL')
+  // THE LAW: no heap field anywhere may be an empty slot. RSS-based or
+  // heap-based, the band is always a READING — never `null`.
+  for (const k of ['source', 'usedMb', 'ceilingMb', 'usedPct', 'level']) {
+    assert.notEqual(row.daemon.pressure[k], null, `pressure.${k} must never be a null slot`)
+  }
+})
+
+test('THE ALERT: a WARN/CRITICAL crossing is written to the sampler log (once per crossing)', (t) => {
+  const dir = fixtureDir(t)
+  const log = path.join(dir, 'sampler.log')
+  writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapMb":{"used":2000,"total":2048,"limit":2096}}')
+  const opts = parseArgs(['--state-dir', dir, '--quiet', '--log', log])
+  const state = { daemonPid: null, stateDirBlock: null, ticks: 0, bandLevel: null }
+  const sample = tick(opts, state)
+  if (sample.daemon === null) return // no resolvable daemon on this host
+  const text = readFileSync(log, 'utf8')
+  assert.match(text, /HEAP CRITICAL \(heapUsed\): 2000 MB of a 2096 MB heap ceiling = 95\.4%/)
+  assert.match(text, /INVESTIGATE/)
+  assert.match(text, /Reached heap limit/)
+  // ONCE per crossing, not once per tick (the log is AUXILIARY, norm §6)
+  tick(opts, state)
+  const after = readFileSync(log, 'utf8').split('HEAP CRITICAL').length - 1
+  assert.equal(after, 1, 'the CRITICAL line must not repeat every tick')
 })

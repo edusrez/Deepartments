@@ -104,7 +104,8 @@ authoritative list; this table is the reader's contract):
 | `mem.totalKb` `availableKb` `usedKb` `usedPct` | `usedKb = totalKb - availableKb` — **MemAvailable**, never MemFree-only |
 | `mem.swapTotalKb` `swapFreeKb` `swapUsedKb` `dirtyKb` `writebackKb` | swap + writeback (evidence, not criteria) |
 | `psi.{cpu,io,memory}.{some,full}.{avg10,avg60,avg300,totalUs}` | `/proc/pressure/*` verbatim: percent-of-window + the **cumulative** microsecond counter (the only way to reconstruct a window retroactively) |
-| `daemon.{unit,profile,pid,rssKb,vmSizeKb,threads,state}` | the `node` process of the unit `dsh-deepartments-dev` (`/proc/<pid>/status` VmRSS); `null` = not resolvable this tick |
+| `daemon.{unit,profile,pid,rssKb,vmSizeKb,threads,state,cpuTicks}` | the `node` process of the unit `dsh-deepartments-dev` (`/proc/<pid>/status` VmRSS, `/proc/<pid>/stat` utime+stime); `null` = not resolvable this tick |
+| `daemon.pressure.{source,usedMb,ceilingMb,usedPct,level}` | **THE HEAP BAND** — §4.6. `source` = `heapUsed` (the daemon's OWN heap, relayed from its `health-heartbeat.json`) or `rss-upper-bound` (`rssKb` = VmRSS, an **upper bound** on the heap). **ABSENT when there is no reading — never a `null` slot** (§4.7) |
 | `disk.{path,totalBytes,usedBytes,availBytes,usedPct,inodesUsedPct}` | `/` with **df semantics** (`usedPct = used/(used+avail)`) |
 | `stateDir.{path,bytes,files,bytesAt,ageSec,truncated,skipped}` | apparent-size sum of the stateDir tree (`du -sb` semantics), computed at most every 15 min |
 | `tickMs` | the sampler's own overhead |
@@ -262,6 +263,181 @@ Measured 2026-09-10 (the live case): `ps -o time` for the unit's pid showed
 **15 s of CPU per 10 s of wall (1,5 core)**, lifetime average `%cpu` **111**, and
 the JSONL delta **59,1 s / 45 s = 1,31 core** — one process eating ~1,3 of the
 4 cores, i.e. most of the box's used CPU, while `psi.cpu.full` stayed at 0,00 %.
+
+### 4.6 THE HEAP BAND (2026-09-16 — the V8 OOM, and the ceiling that is NOT 5,8 G)
+
+**What it is for.** On **2026-09-16T14:43:47Z** the daemon died with
+`FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of
+memory` → `status=6/ABRT` → systemd relaunched at 14:45:11Z. The host's
+question ("is the server too small?") was answered **post-mortem**, because
+`host-health.jsonl` published `rssKb`/`vmSizeKb`/`threads` and **no memory
+band at all** → ficha **`fb-1587`**. This subsection is the band.
+
+**The ceiling — and the number that must NOT be used.** The band is read against
+**V8's own `heap_size_limit`**, which on this host is:
+
+```
+$ node -e "console.log(require('v8').getHeapStatistics().heap_size_limit/1048576)"
+2096.0        # node v22.23.2, os.totalmem() = 7,57 GB; no --max-old-space-size,
+              # no NODE_OPTIONS in the unit or its 6 drop-ins
+```
+
+**2.096 MB — NOT 5,8 G.** The **5,8 G** systemd prints for the unit is the
+**CGROUP `MemoryPeak`** (page cache + native memory included), **not the heap**.
+The distinction is not pedantic, it is the whole defect: at the FATAL the
+daemon's `VmRSS` was **3.261 MB = 156 % of the 2096 MB ceiling**, so a band
+computed against 5,8 G would have read **56 % — `NORMAL` — at the very instant
+the process was dying.** A threshold that ignores the real ceiling does not warn
+late; it never warns.
+
+| term | value | why |
+|---|---|---|
+| `ceilingMb` | **2096 MB** (`HEAP_CEILING_MB`), or the daemon's own `limit` when it publishes one | V8's `heap_size_limit`: the hard wall. **The CGROUP peak is NOT a ceiling** |
+| `usedMb` | the daemon's heap when relayed; else `rssKb / 1024` | see §4.7 — **RSS ≥ V8 heap**, always |
+| `usedPct` | `usedMb / ceilingMb x 100` | compared **unrounded**; the rounding is for the reader, not the decision |
+| **`WARN`** | `usedPct >= 80 %` (**1677 MB**) | the "act soon" line |
+| **`CRITICAL`** | `usedPct >= 90 %` (**1886 MB**) | the "this daemon can die with `Reached heap limit`" line |
+| `NORMAL` | `< 80 %` | silent |
+
+**The reading rule (what is NORMAL, what is INVESTIGATE).**
+
+- **`NORMAL` (< 80 % of the ceiling)** — no action. **`NORMAL` is NOT a clean
+  bill of health:** the daemon's RSS on this host has sat **≥ 2096 MB in 73,7 % of
+  the 11.493 samples** of the 6-day series, so a band that only looks at the top
+  of the range is looking at a chronic condition, not an incident.
+- **`WARN` (>= 80 %) ⇒ INVESTIGATE.** Name the incarnation (`daemon.pid`) and
+  read `daemon.cpuTicks` (§4.5) next: heap near the ceiling **with the loop
+  saturated** is the OOM lane (§4.5's `ratio near 1,0`), not a sizing lane.
+- **`CRITICAL` (>= 90 %) ⇒ INVESTIGATE, and expected within hours-to-minutes.**
+  Measured on the fatal incarnation (`pid 1191415`, 17,0 h): it crossed **80 %
+  16,8 h** and **90 % 16,4 h** before its last sample — i.e. the band would have
+  been open **~16 h before the crash**, and the crash itself was a **puntual
+  event on an already-saturated base** (Mark-Compact freed 0,1 MB of 2027 MB: a
+  periodic message blew a heap that was 99,6 % live).
+- **The band's alert is written to `host-sampler.log`** (`HEAP CRITICAL ...`)
+  **once per crossing** — never once per tick. The AUTHORITATIVE record is the
+  sample's `daemon.pressure`; the log line is the notification. See §4.6.1.
+
+**WHY THERE IS NO "GROWTH" BAND — measured, not assumed.** The obvious second
+rule (a MB/h rate) would have **failed on the exact incident it was written
+for**: over the fatal incarnation, a `>= 3000 MB/h` rule on a 30-minute
+lookback fired **0 times in 1.361 samples**, because that daemon reached
+**2.446 MB in its first 3 h and then sat on a plateau** (2.67-2.81 GB for 12,5 h)
+before the puntual event killed it. Calibrated against the healthiest measured
+plateau (`pid 810027`, 62,8 h lived, h12-30: 1.440 samples) a 12-sample (~9 min)
+window at a sane threshold carries a **1,05 % false-positive rate** while a
+40-sample (~30 min) window carries **0,00 %** — so a growth rule is *feasible*
+(>= 3000 MB/h, 30-min lookback: 1 false positive in 11.504 samples), but it is
+**not what saves the daemon**. **A ceiling event needs a LEVEL band; adding a
+growth band would raise the alert count without covering the incident.** If one
+is ever added it must be justified by a case this band missed — not by symmetry.
+
+#### 4.6.1 The consumer: WHO warns the host
+
+**The path is real and already proven — there is no new mechanism here.**
+
+1. **Every sample** carries the level in `daemon.pressure` (`host-health.jsonl`).
+   That is the record a reader (or a human) opens for *when* the daemon was
+   near its ceiling — the datum `fb-1587` asked for.
+2. **The crossing is announced** on the lane's own bounded log,
+   `<stateDir>/host-sampler.log`, via the same `logLine` seam every other
+   sampler event already uses (`scripts/host-sampler.mjs`, `tick()`): one line
+   per crossing, and one `HEAP NORMAL again` when it clears.
+3. **The human/agent channel is the `host-sampler` custodian job** (every 6 h,
+   `docs/departments/internal-programming/jobs/host-sampler.md`), which already
+   reports to the Internal Programming Head and is the **only** reader that
+   turns this series into a message. **A crossing must be reported there like a
+   dead sampler is** — that is the escalation, and it needs no invention.
+
+**What this lane must NOT do:** write `<stateDir>/health-alerts.jsonl`. That
+file is **`dshd-health`'s** (`packages/dshd-health/src/index.ts`: its audit cap,
+its `health-alerts-state.json` dedupe ledger, its host notification). The
+sampler is a **separate OS process with no daemon context**; writing into that
+ledger from here would forge another component's audit trail and bypass its
+dedupe. **It is also structurally out of reach: `dshd-health` never reads
+`host-health.jsonl`** (0 matches in `packages/dshd-health`), so nothing there
+would see the sampler's number even if the sampler wrote it. The relay is the
+custodian job, by design.
+
+### 4.7 WHERE THE HEAP DATUM CAN BE BORN (and why it is not reachable from this lane)
+
+**This is the finding that decides the design, and it is a hard technical limit,
+not a preference.**
+
+**`heapUsed`/`heapTotal` are RUNTIME datums.** They come from
+`process.memoryUsage()` **inside** the process. **`/proc` has no such field** —
+it is a **KERNEL** interface that describes **process** memory, and `VmRSS` is a
+different (and larger) quantity. Measured on this host:
+
+| what | value | source |
+|---|---|---|
+| heap ceiling | **2096 MB** | `v8.getHeapStatistics().heap_size_limit` |
+| daemon RSS **at the heap FATAL** | **3261 MB** (= 156 % of the ceiling) | `host-health.jsonl`, `pid 1191415`, 14:45:01Z |
+| daemon RSS that **never** died of the heap | **3917 MB** (= 187 % of the ceiling) | `pid 810027`, 62,8 h lived |
+
+**⇒ An external reader can NEVER say "the heap is at X".** Two daemons with the
+same RSS can have heap at 40 % or at 95 %; and the one that died had **less** RSS
+than one that survived 62,8 h.
+
+**Measured reachability, one line per route:**
+
+| route | verdict | evidence |
+|---|---|---|
+| **V1** any `/proc` file | **NO** — no V8 heap field exists | `parseProcStatus` reads `VmRSS`/`VmSize`/`Threads`/`State` only |
+| **V1** `/proc/<pid>/smaps` | **NO — and it is a trap**: it gives the PROCESS's memory (per-mapping RSS/Pss), **not the V8 heap** | same `/proc` surface as VmRSS; a larger heap does not map to a larger `smaps` row |
+| **V1** V8 inspector (port 9229 / `--inspect`) | **NO** — nothing is listening | `ss -ltnp`: the daemon (pid 1314627) owns only `127.0.0.1:3090` and `127.0.0.1:4097`; **no 9229** anywhere on the host; `--inspect`/`NODE_OPTIONS` appear in **no** unit and no drop-in |
+| **V1** HTTP/metrics endpoint | **NO** | `/api/health`, `/api/status`, `/health`, `/metrics` on :3090 all **404** |
+| **V1** `writeHeapSnapshot` / heap snapshot | **NO** — and it is a **write inside the daemon** | 0 matches in the tree (V3); it requires code inside the process |
+| **V2** the daemon publishes it itself | **YES — the only route** | `writeHealthHeartbeatFile` (`packages/dshd-health/src/index.ts:611-613`), called from inside the health tick at `:7667`, writes `<stateDir>/health-heartbeat.json` |
+
+**WHAT THIS LANE DOES ABOUT IT (already implemented, no scope extension
+needed for the band):** the sampler **relays** the datum when the daemon
+publishes it. `readHeartbeatHeap()` reads `heapMb` from
+`<stateDir>/health-heartbeat.json` and the band is then computed over the
+**daemon's own heap** (`source: 'heapUsed'`). **Until the daemon publishes it,
+the band runs on `rssKb` (`source: 'rss-upper-bound'`)** — an **upper bound**
+on the heap (RSS ≥ heap), which can therefore warn **early or unnecessarily,
+never late**. **The relay is the whole handoff: this lane needs NO change to
+receive the datum.**
+
+**THE PIECE THAT MUST BE ASKED FOR OUTSIDE THIS LANE (declared, NOT
+implemented here).** One file, three additions, in
+**`packages/dshd-health/src/index.ts`** — *outside this lane; the head and the
+host decide*:
+
+1. **`:506` — the `HealthHeartbeat` interface:** add one optional field, in
+   the same "ABSENT → the tick never guesses" style the other optional fields
+   already use:
+   ```ts
+   /** The daemon's OWN V8 heap, MB (process.memoryUsage(): heapUsed/heapTotal,
+    * and v8.getHeapStatistics().heap_size_limit). The ONLY place this datum can
+    * be born: it is a RUNTIME datum and no external reader can obtain it from
+    * /proc. ABSENT → unreadable. */
+   heapMb?: { used: number; total: number; limit: number }
+   ```
+2. **`:7667` — the `writeHealthHeartbeatFile(...)` object:** one spread, the
+   exact pattern of the lines already there:
+   ```ts
+   ...(heapMb() !== undefined ? { heapMb: heapMb() } : {}),
+   ```
+   (resolve it once into a local, the way `gatedIdleHeld` is resolved above.)
+3. **The producer** — a tiny helper next to the other health datums:
+   ```ts
+   const m = process.memoryUsage()
+   const limit = (await import('node:v8')).getHeapStatistics().heap_size_limit
+   return { used: Math.round(m.heapUsed / 1048576), total: Math.round(m.heapTotal / 1048576), limit: Math.round(limit / 1048576) }
+   ```
+
+**`used`/`total`/limit MB, integers: no secret, no content, and `fb-16`-clean.**
+
+**One caveat the head must weigh, measured:** the heartbeat file is written
+**non-atomically** (`writeFile`, not tmp+rename) and the sampler reads it
+**every 45 s**. A torn read is therefore possible and was **observed** while
+measuring this report; `readHeartbeatHeap()` handles it (`null` → the band
+falls back to RSS for that tick, no error, no hole). **If the daemon adopts this
+field, an atomic write (tmp + rename, the pattern `rotateIfNeeded` already uses
+in this lane) is worth requesting at the same time** — otherwise a tick can
+silently lose the datum it was added for.
 
 ## 5. The recipe (the command the owner asked for)
 
