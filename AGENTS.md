@@ -76,6 +76,8 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 
 **Tests (SRC-NATIVE method, fb-95)**: run the suite with PLAIN `node --test` over the BUILT `lib/` (`pnpm test`) — never `node --loader ./test/ts-src-loader.mjs --test` as a whole-suite default, which FALSE-FAILS the composition/Loader family even on a clean tree. The `ts-src-loader.mjs` hook is only for the lane-② src-native tests that SELF-REGISTER it (`register(new URL('./ts-src-loader.mjs', import.meta.url), …)`); built-lib tests load byte-identical either way. For the suite-integrity guard (fb-91) use `pnpm test:guarded`; full ladder reference (incl. review worktree isolation A4-2 + the fb-140 absolute-report-path convention): `docs/VERIFICATION-LADDER.md`.
 
+5. **CI gate — ONLY for repos WITH CI (`.github/workflows/`), and it runs BEFORE the push.** The ladder above is ENTIRELY LOCAL: it can certify a commit that breaks the PUBLISHED pipeline. For any repo with CI, the push is not verified until the run of the PUSHED commit is `completed`/`success` — and that result must be OBSERVED (GitHub does not notify: on 2026-09-16 two red pushes to `dsh-smart-restart` went unnoticed for ~2 h). The exact query, the green criterion and the three exit poles (green / red / NO-RUN, the last one NEVER a pass) are in `docs/VERIFICATION-LADDER.md` §13. `deepartments` itself has NO CI, so steps 1-4 remain its authority — a gate demanded where it cannot go red is an empty checkbox (§13.3).
+
 Before restarting the service to verify a change: use the `smart_restart` tool (canary) — never a raw `systemctl restart`/`reboot` — because a raw restart with active subagents/workers kills their in-flight turn.
 
 Development and smoke ALWAYS in `deepartments-dev` — **never against the web

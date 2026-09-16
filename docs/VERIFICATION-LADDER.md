@@ -638,3 +638,142 @@ restart, but the restored TARGET does (a lib file of the running daemon is read
 at boot): `apply` alone leaves the daemon on the old bytes until the service is
 restarted — the same pending-state the A-HARNESS chain documents.
 
+## 13. CI GATE — el gate de `main` en los repos CON CI entra en la escalera ANTES DEL PUSH (fb-XXX, 2026-09-16, run token `cigate1`)
+
+> **LA LEY.** En un repo con CI, un commit NO está verificado por la escalera
+> local: la escalera (`pnpm build` → `plugin add` → `dump-config` → smoke) es
+> **TODA LOCAL** y puede dar por VERDE un commit que rompe el **pipeline
+> publicado**. El gate de `main` es un paso de la escalera y se ejecuta **ANTES
+> DEL PUSH** — no después.
+
+**El caso medido (2026-09-16, `dsh-smart-restart`).** El host corrió la escalera
+completa, todo verde local, y pusheó **dos veces** a un `main` con CI: runs
+**#19** (`4e2bf5e`) y **#20** (`643ec6e`), ambas **`failure`** — y son las DOS
+únicas rojas de las 20 del repo. El paso roto fue `pnpm test` (paso 7 del job
+`build`); `pnpm build` (paso 6) pasó en ambos. **Nadie se enteró durante ~2 h**:
+GitHub no avisa, y la escalera no tenía la mitad observable.
+
+### 13.1 Las DOS mitades (un gate sin la segunda es una casilla que se marca sola)
+
+**(a) La forma — cuándo corre.** Todo push a `main` de un repo con
+`.github/workflows/` se da por NO verificado hasta que el run del commit
+pusheado esté `completed`/`success`. La escalera local sigue siendo necesaria
+(es más rápida y localiza mejor), pero ya **no es suficiente**.
+
+**(b) La observabilidad — `cómo` se consulta y qué cuenta como verde.** Ésta es
+la mitad que faltaba: **si el resultado de la CI no es OBSERVABLE, el gate no
+existe** — es una casilla que se marca sola. El criterio es **el run del commit
+PUSHEADO**, no el último run del repo (un run viejo verde tapa la roja nueva).
+
+```bash
+# GATE DE CI — listo para copiar. Sólo lectura; NO requiere credenciales
+# para un repo PÚBLICO (HTTP 200 verificado sin token). NUNCA poner un token
+# en un informe ni en un mensaje (fb-16).
+REPO=edusrez/dsh-smart-restart      # <owner>/<repo> CON CI
+SHA=$(git rev-parse HEAD)           # SHA COMPLETO — ver la trampa ⚠️ de abajo
+curl -fsS "https://api.github.com/repos/$REPO/actions/runs?head_sha=$SHA&per_page=1" \
+| node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const r=(JSON.parse(s).workflow_runs||[])[0];
+    if(!r){console.error("NO RUN for this sha — NOT a pass");process.exit(2);}
+    console.log("run #"+r.run_number, r.status, r.conclusion||"");
+    process.exit(r.status==="completed" && r.conclusion==="success" ? 0 : 1);
+  })'
+```
+
+**Lectura del exit code (los tres polos, medidos con el gate real):**
+
+| Exit | Significado | Medición (2026-09-16) |
+|---|---|---|
+| `0` | **VERDE** — el run del SHA pusheado está `completed`/`success` | `35e4c3d` ⇒ run #18 GREEN |
+| `1` | **ROJO** — el run existe y terminó distinto de `success` | `643ec6e` ⇒ run #20 `failure` |
+| `2` | **NO-RUN** — no hay run para ese SHA *(o sigue `queued`/`in_progress` y expira el plazo)* | SHA falso ⇒ exit 2, **jamás 0** |
+
+**⚠️ UN GATE QUE NO PUEDE PONERSE ROJO CUANDO EL DEFECTO EXISTE NO ES UN GATE.**
+Por eso la tabla de arriba **no es decorativa**: `0/1/2` se probaron uno por uno
+contra la API real. El polo `2` es el que impide el falso verde más peligroso —
+`head_sha` sin runs devuelve `total_count: 0` con **HTTP 200**, un **cero
+silencioso** que un `curl` sin comprobación lee como «no hay problema». Un SHA
+sin run NUNCA es un pase: es «aún no verificado» (o un repo/push equivocado).
+
+**⚠️ TRAMPA MEDIDA — el SHA tiene que ser COMPLETO.** `head_sha=643ec6e` (7
+chars) devuelve `total_count: 0` con HTTP 200 — **cero silencioso**, indistinguible
+de «no hay run». `head_sha=643ec6eaf6746b63f4e86f6317f881a10a8572f7` devuelve
+`total_count: 1` ⇒ run #20 `failure`. Usa SIEMPRE `git rev-parse HEAD`.
+
+**Credenciales.** Ninguna para un repo público (medido: HTTP 200 sin token). Para
+un repo **privado** la misma consulta necesita un `Authorization: Bearer …` con
+un token de sólo lectura `actions:read`; ese token **NUNCA** va al informe ni a
+un mensaje (fb-16) — se lee del entorno del operador. Un `403` es **NO-RUN
+(exit 2)**, jamás un verde: no poder consultar no es un aprobado.
+
+**Si `gh` está disponible** (`gh` NO lo está hoy en este host — medido: no
+resuelve), el equivalente es `gh run list --repo "$REPO" --commit "$SHA" --limit 1
+--json status,conclusion,databaseId`; hoy el comando de arriba es el que se
+verifica, y el `curl`+`node` no añade dependencias nuevas (ambos ya presentes).
+
+### 13.2 Por qué esto es un paso y no un aviso (y el daño que previene)
+
+El defecto que originó esta sección **no era de código**: el repo tenía la suite
+correcta y la CI correcta, y el commit era bueno. Lo que falló fue el
+**barrido**: `package.json:47` decía `"test": "node --test"` **sin argumentos**,
+y el patrón por defecto de Node incluye **todo** lo que vive bajo un directorio
+`test/`. `4e2bf5e` añadió `test/proto-runner.mjs` y
+`test/red-401-liveness.mjs`, que **no son tests sino RUNNERS que exigen un path
+por CLI** (sus cabeceras lo documentan). Medido en el árbol real:
+
+- `test/red-401-liveness.mjs` **FALLA** sin argumento
+  (`ERR_MODULE_NOT_FOUND: .../lib/canary.js`) ⇒ **es el rojo de #19/#20**.
+- `test/proto-runner.mjs` **pasa** (84/84) pero **DUPLICA los 84 tests de
+  canary**, porque su default `process.argv[2] ?? './lib/canary.js'` sí existe:
+
+```text
+node --test            # bare: 272 tests / 270 pass / 2 fail   ← +85 (84 duplicados + 1 rojo)
+node --test test/*.test.js   # scoped: 187 / 186 / 1 fail
+```
+
+**⇒ La lección que se generaliza, y es la razón de que esto sea una SECCIÓN de la
+escalera y no un `chore` del repo:** *un fichero AUXILIAR añadido a `test/` es
+código no-probado que entra en la suite por descubrimiento implícito*. **Mover
+el fichero arregla el caso de hoy y deja la trampa para el siguiente `.mjs`;
+ESCOPAR el barrido cierra la CLASE.** El arreglo aplicado (scoped sweep
+`test/*.test.js` + exclusión declarada por nombre del artefacto ROJO a propósito
++ **floor `ls`** para que un glob sin coincidencias sea ruidoso en vez de un
+`# tests 0` verde) vive en el `package.json` de `dsh-smart-restart`, con su
+razón escrita en la clave `"//test"` del propio fichero.
+
+**El floor (fabricado, medido).** `node --test` con un glob que no casa NINGÚN
+fichero sale **verde**: `# tests 0` / EXIT=0. Es el mismo cero silencioso de
+§13.1(b) trasladado a la suite: un rename o un vaciado del directorio pasaría
+inadvertido para siempre. El `ls` previo lo convierte en EXIT=1 (node ni se
+ejecuta) — y esa mitad **se probó por separado**, en el repo y en un directorio
+de control.
+
+### 13.3 Especificidad del gate — no todo repo lo tiene
+
+El gate se aplica a repos **con CI** (`.github/workflows/` presente y declarando
+`push` a `main`). `deepartments` **no tiene CI** (medido: `.github/workflows/`
+no existe) ⇒ su escalera local (pasos 1-4 de `AGENTS.md` § TIERED verification)
+sigue siendo la autoridad y este §13 no le añade un paso. Declararlo importa: un
+gate que se exige donde no puede ponerse rojo es exactamente la casilla vacía
+contra la que esta sección previene.
+
+**Cambios en el `package.json` de un repo con CI: el `--frozen-lockfile`.** El
+paso 5 de la CI es `pnpm install --frozen-lockfile`, así que un cambio de
+`package.json` obliga a comprobar que **ninguna** sección de dependencias
+(`dependencies`/`devDependencies`/`peerDependencies`/`packageManager`/`engines`)
+cambió — si cambió, el lockfile está desincronizado y la CI falla en el paso 5
+ANTES de compilar. Verificación barata y sin red:
+
+```bash
+git show HEAD:package.json > /tmp/old.json   # (en el árbol real, la ruta del brief)
+node -e 'const a=require("/tmp/old.json"),b=require("./package.json");
+  for(const k of ["dependencies","devDependencies","peerDependencies","packageManager","engines"])
+    console.log(k, JSON.stringify(a[k])===JSON.stringify(b[k])?"IDENTICAL":"*** CHANGED ***")'
+```
+
+**Fuentes:** run token `cigate1`, IPD builder-401, 2026-09-16 — informe
+`/home/esuarez/projects/deepartments/.dsh/reports/builder/2026-09-16-cigate1.md`.
+Evidencia primaria: API de GitHub sin credenciales (`runs` + `runs/<id>/jobs`),
+más los barridos bare/scoped corridos en el árbol real de `dsh-smart-restart`.
+
+
