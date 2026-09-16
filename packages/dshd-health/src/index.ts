@@ -5830,8 +5830,16 @@ export function contextActionResolution(
  * facts, and only the ATTEMPT CLOCK advances (so the retry cadence has its own
  * clock and can never loop at one ts). Extracted so the findings pass and the
  * latch-driven RESUME PASS decide identically — the bug this closes was a retry
- * that existed in ONE path and was unreachable from the path that matters. */
-export function resumeContextActionMark(prev: ContextActionMark, nowMs: number): ContextActionMark | undefined {
+ * that existed in ONE path and was unreachable from the path that matters.
+ *
+ * DELIBERATELY **NOT** EXPORTED (fb-14717 RE lane rule): every runtime export of
+ * this module reaches `lib/invoke.js`'s frozen superset through the
+ * `src/core/health.ts` → `export * from 'dshd-health'` bridge, and
+ * `test/export-parity.test.js` LOCKS that count — so a new export here would move
+ * a lock owned by ANOTHER mission. Nothing needs this symbol: the retry policy is
+ * already testable through the ALREADY-EXPORTED `planContextActions`, which is
+ * exactly how this lane's policy test exercises it. */
+function resumeContextActionMark(prev: ContextActionMark, nowMs: number): ContextActionMark | undefined {
   if (contextActionResolution(prev, prev.sessionId, nowMs) !== 'retry') return undefined
   return { ...prev, lastAttemptAt: nowMs }
 }
