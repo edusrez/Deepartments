@@ -218,6 +218,14 @@ test('w7-fb132 (i): N sweep passes over a GATED inbox of an ALIVE recipient DO N
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 0,
       noWakeHeld: 1,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the no-wake census is now read
+      // on ANY status — the seal is imposed by the ROUTE (`delivery.ts` seals
+      // `opts.noWake || routeOut.deferred`), so a settled sealed pair belongs to
+      // the class too — and it is split by `needsRedelivery`: here the ONLY
+      // sealed pair is 'prepared' (m-1) → the whole census is AWAKE, nothing is
+      // CLOSING (the partition awake + closing === noWakeHeld holds).
+      noWakeAwake: 1,
+      noWakeClosing: 0,
       gatedHeld: 1
     }, 'the sweep-state closure datum discriminates the held classes: noWakeHeld (m-1) + gatedHeld (m-2 — the FIFO-blocked ALIVE queue)')
 
@@ -387,6 +395,11 @@ test('w7-fb132 (iii): B3 dormancy + P2 noWake holds are untouched (never gate-se
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 1,
       noWakeHeld: 1,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the same corrected census and
+      // its directions — the ONLY sealed pair is the 'prepared' m-2, so the
+      // census is entirely AWAKE (nothing CLOSING) and the partition holds.
+      noWakeAwake: 1,
+      noWakeClosing: 0,
       gatedHeld: 1
     }, 'the P4 honest summary discriminates ALL THREE held classes (m-3 fresh is NOT prepared-stuck — the criterion stays exact)')
 

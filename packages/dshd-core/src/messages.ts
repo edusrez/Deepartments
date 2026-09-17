@@ -1378,6 +1378,22 @@ function deliveryKey(row: Pick<DeliveryRow, 'messageId' | 'recipientId'>): strin
   return `${row.messageId}\u0000${row.recipientId}`
 }
 
+/** LANE (B) 2026-09-17 — the LOG-bounding cap of the fb-467 held-by-id line
+ * (`sweep-held-by-id`): the no-wake census reads the ledger with NO status
+ * filter, so its id list is a LIVE-ledger quantity (measured 528 sealed pairs,
+ * 505 of them in one direction) — printing it in full would emit ~10 KB per
+ * sweep cycle, 60 s apart. The COUNT is always exact (`noWakeHeld` in
+ * `sweepState()` and the resulting heartbeat); only the LOG list is capped, and
+ * a truncated list SAYS so (`+N more`). Pure + log-only: no decision reads it. */
+export const SWEEP_HELD_ID_LOG_CAP = 40
+
+/** LANE (B) — render a bounded `id id id` list for the log line (see
+ * `SWEEP_HELD_ID_LOG_CAP`). PURE. */
+function boundedIds(ids: readonly string[]): string {
+  if (ids.length <= SWEEP_HELD_ID_LOG_CAP) return ids.join(' ')
+  return `${ids.slice(0, SWEEP_HELD_ID_LOG_CAP).join(' ')} +${ids.length - SWEEP_HELD_ID_LOG_CAP} more`
+}
+
 // ---------------------------------------------------------------------------
 // LANE ②-bis (G2 — the LEGACY 'prepared' residue; host decision 2026-09-03:
 // G2 = the store's 'prepared' rows without a 'delivered' — the 843 pre-boot
@@ -1725,13 +1741,13 @@ export class DeliveryRedeliverer {
   // `gatedHeld`) — the classes the single `preparedStuckRemaining` integer
   // cannot discriminate. Never synthesized: ABSENT until a cycle actually
   // computed it (the heartbeat omits it pre-first-cycle).
-  private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; gatedHeld: number } | undefined
+  private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; noWakeAwake: number; noWakeClosing: number; gatedHeld: number } | undefined
   // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the LAST cycle's held
   // classes BY ID (the discriminator the single integer cannot give: WHICH pair
   // is `dormantHeld` vs `gatedHeld`). Purely observational — it is never read by
   // a decision and never returned by `sweepState()` (whose frozen shape is
   // untouched).
-  private lastSweepHeldIds: { dormant: string[]; noWake: string[]; gated: string[] } = { dormant: [], noWake: [], gated: [] }
+  private lastSweepHeldIds: { dormant: string[]; noWakeAwake: string[]; noWakeClosing: string[]; gated: string[] } = { dormant: [], noWakeAwake: [], noWakeClosing: [], gated: [] }
   // FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
   // the per-recipient RE-ENTRANCY GUARD of `drainRecipientQueue` (R1 — the
   // drain → deliver → wake → drain recursion): a recipient id present here is
@@ -2338,12 +2354,17 @@ export class DeliveryRedeliverer {
       // (the same pre-settle `rows` snapshot as the residue — consistent); the
       // heartbeat reports each held class separately.
       this.lastSweepPreparedSummary = await this.summarizePreparedState(rows, nowMs)
-      // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the held classes BY ID
-      // (dormantHeld vs gatedHeld vs noWakeHeld — WHICH pair is held and why),
-      // one line per cycle, emitted after the classification and read by no
-      // decision (log-only).
-      logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] sweep-held-by-id cycle=${this.sweepCycle} dormantHeld=[${this.lastSweepHeldIds.dormant.join(' ')}] noWakeHeld=[${this.lastSweepHeldIds.noWake.join(' ')}] gatedHeld=[${this.lastSweepHeldIds.gated.join(' ')}]`)
       const held = this.lastSweepPreparedSummary
+      // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the held classes BY ID
+      // (dormantHeld vs gatedHeld vs the no-wake census — WHICH pair is held and
+      // why), one line per cycle, emitted after the classification and read by no
+      // decision (log-only). LANE (B) 2026-09-17: the no-wake census supersedes
+      // the old prepared-only `noWakeHeld` id list and is reported by DIRECTION —
+      // the fully-qualified list of the CLOSING direction is NOT printed (505
+      // entries in the measured class would bloat the line ~10 KB per cycle);
+      // its COUNT is, and every id list stays bounded by
+      // SWEEP_HELD_ID_LOG_CAP (the line can never grow with the ledger).
+      logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] sweep-held-by-id cycle=${this.sweepCycle} dormantHeld=[${boundedIds(this.lastSweepHeldIds.dormant)}] noWakeHeld=${held.noWakeHeld}(awake=${held.noWakeAwake} closing=${held.noWakeClosing}) noWakeAwake=[${boundedIds(this.lastSweepHeldIds.noWakeAwake)}] noWakeClosing=[${boundedIds(this.lastSweepHeldIds.noWakeClosing)}] gatedHeld=[${boundedIds(this.lastSweepHeldIds.gated)}]`)
       if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
         logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}${held.oldestPreparedTs !== undefined ? `; oldestPreparedTs=${new Date(held.oldestPreparedTs).toISOString()}` : ''}${held.dormantHeld > 0 ? `; dormantHeld=${held.dormantHeld}` : ''}${held.noWakeHeld > 0 ? `; noWakeHeld=${held.noWakeHeld}` : ''}${held.gatedHeld > 0 ? `; gatedHeld=${held.gatedHeld}` : ''}`)
       }
@@ -2364,16 +2385,19 @@ export class DeliveryRedeliverer {
    * the cycle's honest prepared-state summary — `oldestPreparedTs` (the oldest
    * pair-latest 'prepared' row ts), `dormantHeld` (pairs of a DORMANT recipient
    * the B3 guard holds — the residue that may never reach 0 BY DESIGN),
-   * `noWakeHeld` (pairs whose LATEST row carries the explicit noWake flag — the
-   * P2 no-wake guard holds them until the recipient's next real wake or a
-   * currently-running recipient) and, fb-132 WAKE-ON-DELIVERED 2026-09-06,
+   * `noWakeHeld` (the NO-WAKE CENSUS since 2026-09-17 — pairs whose LATEST row
+   * carries the explicit noWake flag, **ANY status**: the seal is imposed by the
+   * route, so the census must show every sealed pair, plus its two directions
+   * `noWakeAwake` (still on the sweep's wheel — a wake is still possible) and
+   * `noWakeClosing` (settled for good — the pair only ever closes), split by
+   * `needsRedelivery`) and, fb-132 WAKE-ON-DELIVERED 2026-09-06,
    * `gatedHeld` (pairs of an ALIVE recipient the FIFO gate holds — an
    * EARLIER-seq pending pair blocks them; the 2nd-half sweep skips instead of
    * settling, and they drain at the recipient's next REAL wake — the legitimate
    * fb-27 exception of a live-but-blocked queue). All are ABSENT before the
    * first cycle and (for the counts) present once a cycle computed them —
    * truthful, never guessed. */
-  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number; gatedHeld?: number } {
+  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number; noWakeAwake?: number; noWakeClosing?: number; gatedHeld?: number } {
     return {
       cycles: this.sweepCycle,
       ...(this.lastSweepCycleTs !== undefined ? { lastCycleTs: this.lastSweepCycleTs } : {}),
@@ -2391,9 +2415,32 @@ export class DeliveryRedeliverer {
    *   - `dormantHeld`: pairs held by the B3 dormancy guard (the recipient's
    *     `sleepEpoch` — its queue drains at its next real wake; a residue that
    *     legitimately never reaches 0 while the recipient sleeps);
-   *   - `noWakeHeld`: pairs whose LATEST row carries the explicit `noWake` flag
-   *     (the no-wake-until-wake intent — the P2 guard never re-drives them into
-   *     a NON-running recipient);
+   *   - `noWakeHeld`: THE NO-WAKE CENSUS — pairs whose LATEST row carries the
+   *     explicit `noWake` flag, **ANY status**. The filter is deliberately NOT
+   *     `status === 'prepared'`: the seal is imposed by the ROUTE (not only
+   *     requested by the sender — see `delivery.ts`, `routeOut.deferred` /
+   *     `opts.noWake`), so a sender that asked for an ALWAYS-WAKE delivery can
+   *     end up with a SEALED pair it never asked for. A prepared-only filter
+   *     hid the whole settled half of that class (measured 2026-09-17 on the
+   *     real ledger `/.deepartments/deliveries.jsonl`: 21 prepared vs 528
+   *     sealed pairs — 505 of them `self`, 2 `failed`). INSTRUMENTATION ONLY:
+   *     this count reads rows, it decides NOTHING (the seal, the delivery
+   *     decisions and the P2/B3/gate holds are untouched by it);
+   *   - `noWakeAwake` / `noWakeClosing`: the TWO DIRECTIONS of that census,
+   *     split by the house's OWN re-deliverability predicate
+   *     (`needsRedelivery(row.status)` — the very function the sweep uses, so
+   *     the criterion cannot drift from the engine's):
+   *       AWAKE   (`prepared` | `failed`) — the pair is still on the sweep's
+   *               wheel: a wake is still POSSIBLE (a running recipient drains
+   *               it; the drain-at-real-wake delivers it). The pair exists to
+   *               WAKE someone;
+   *       CLOSING (every settled status — `self` | `terminal` | `delivered` |
+   *               `resumed`) — the pair can never wake again: it survives only
+   *               as the durable record of a CLOSED intent (`self` is the
+   *               ack-loop guard: persisted, never materialized, never
+   *               re-delivered — the auto-retire / self-directed-notice seal).
+   *     Invariant BY CONSTRUCTION: `noWakeAwake + noWakeClosing === noWakeHeld`
+   *     (the fork is a total partition of the paired rows);
    *   - `gatedHeld` (fb-132 WAKE-ON-DELIVERED 2026-09-06): pairs of an ALIVE
    *     recipient held by the FIFO gate — an EARLIER-seq pending pair of the
    *     same recipient blocks the drain (the gate branch degrades a re-drive
@@ -2407,19 +2454,34 @@ export class DeliveryRedeliverer {
    * The classes OVERLAP (a noWake row to a dormant recipient is held by both)
    * but each is reported separately — the QD closure criterion gets the
    * discrimination the single `preparedStuckRemaining` integer cannot give. */
-  private async summarizePreparedState(rows: readonly DeliveryRow[], nowMs: number): Promise<{ oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; gatedHeld: number }> {
+  private async summarizePreparedState(rows: readonly DeliveryRow[], nowMs: number): Promise<{ oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; noWakeAwake: number; noWakeClosing: number; gatedHeld: number }> {
     const latestKey = new Map<string, DeliveryRow>()
     for (const row of rows) latestKey.set(deliveryKey(row), row)
     let oldestPreparedTs: number | undefined
     let dormantHeld = 0
     let noWakeHeld = 0
+    let noWakeAwake = 0
+    let noWakeClosing = 0
     let gatedHeld = 0
     // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the same classes BY ID.
-    const heldIds: { dormant: string[]; noWake: string[]; gated: string[] } = { dormant: [], noWake: [], gated: [] }
+    const heldIds: { dormant: string[]; noWakeAwake: string[]; noWakeClosing: string[]; gated: string[] } = { dormant: [], noWakeAwake: [], noWakeClosing: [], gated: [] }
     for (const row of latestKey.values()) {
+      // LANE (B) — THE NO-WAKE CENSUS (2026-09-17, run token 79c9bdbb): the seal
+      // is read on the pair's LATEST row with NO status filter (the CORRECTED
+      // filter — see `sweepState`). The direction is the house's OWN
+      // re-deliverability predicate: `needsRedelivery(status)` true → the pair
+      // is still on the sweep's wheel (a wake is still possible: AWAKE);
+      // false → the pair is settled for good and only ever CLOSES. READ-ONLY:
+      // nothing below this block is reachable by it.
+      if (row.noWake === true) {
+        noWakeHeld++
+        if (needsRedelivery(row.status)) { noWakeAwake++; heldIds.noWakeAwake.push(`${row.messageId}→${row.recipientId}`) } else { noWakeClosing++; heldIds.noWakeClosing.push(`${row.messageId}→${row.recipientId}`) }
+      }
+      // The three PREPARED-only classes below keep their ORIGINAL filter and
+      // semantics (byte-identical reporting; the no-wake census above is the
+      // additive correction).
       if (row.status !== 'prepared') continue
       if (oldestPreparedTs === undefined || row.ts < oldestPreparedTs) oldestPreparedTs = row.ts
-      if (row.noWake === true) { noWakeHeld++; heldIds.noWake.push(`${row.messageId}→${row.recipientId}`) }
       if (this.deps.recipientDormant?.(row.recipientId) === true) { dormantHeld++; heldIds.dormant.push(`${row.messageId}→${row.recipientId}`) }
       if (this.deps.pendingEarlierSeq === undefined) continue
       // The fb-132 gate class: pair-latest 'prepared' of an ALIVE recipient
@@ -2435,7 +2497,7 @@ export class DeliveryRedeliverer {
       }
     }
     this.lastSweepHeldIds = heldIds // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY]
-    return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld, gatedHeld }
+    return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld, noWakeAwake, noWakeClosing, gatedHeld }
   }
 
   /**

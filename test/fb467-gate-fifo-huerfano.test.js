@@ -326,6 +326,11 @@ test('fb-467 (C-CONTROL): a SANE head settles EXACTLY as today — the gate hold
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 0,
       noWakeHeld: 0,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the corrected no-wake census
+      // (ANY status) and its two directions are all 0 in this case — there is NO
+      // sealed pair at all (nothing AWAKE, nothing CLOSING).
+      noWakeAwake: 0,
+      noWakeClosing: 0,
       gatedHeld: 1
     }, 'the SANE sweep summary is EXACTLY today\'s (gatedHeld 1, dormant 0, noWake 0)')
 
@@ -390,6 +395,11 @@ test('fb-467 (D-CONTROL): an ORPHAN head whose content has NOT landed at the suc
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 2,
       noWakeHeld: 0,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the corrected no-wake census
+      // (ANY status) and its two directions are all 0 in this case — there is NO
+      // sealed pair at all (nothing AWAKE, nothing CLOSING).
+      noWakeAwake: 0,
+      noWakeClosing: 0,
       gatedHeld: 1
     }, 'the window-fence summary is EXACTLY today\'s (both pairs dormantHeld, the pair behind counted gatedHeld; only the head is prepared-stuck — the gated pair\'s write-ahead is fresh)')
   })
@@ -424,6 +434,10 @@ test('fb-467 (E-CONTROL): a SANE dormant recipient\'s \'prepared\' queue is stil
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 1,
       noWakeHeld: 0,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the corrected census and its
+      // directions are 0 — this case carries no sealed pair at all.
+      noWakeAwake: 0,
+      noWakeClosing: 0,
       gatedHeld: 0
     }, 'the SANE dormant summary is EXACTLY today\'s (dormantHeld 1)')
   })

@@ -535,8 +535,18 @@ export interface HealthHeartbeat {
  * P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary —
  * `oldestPreparedTs` (the OLDEST pair-latest 'prepared' row ts), `dormantHeld`
  * (pairs held by the B3 dormancy guard — a residue that may never reach 0 BY
- * DESIGN), `noWakeHeld` (pairs held by the P2 no-wake guard — the explicit
- * no-wake-until-wake intent the sweep no longer violates) and, FB-132
+ * DESIGN), `noWakeHeld` (THE NO-WAKE CENSUS since 2026-09-17 — pairs whose
+ * LATEST row carries the explicit noWake flag, **ANY status**: the seal is
+ * imposed by the ROUTE whenever the recipient is not running, so an ALWAYS-WAKE
+ * sender can end up with a sealed pair it never asked for, and the
+ * pre-2026-09-17 filter `status === 'prepared'` hid the settled half of that
+ * class — measured 2026-09-17 on the real ledger `/.deepartments/deliveries.jsonl`:
+ * 21 prepared vs 528 sealed pairs) plus its two DIRECTIONS, split by the house's
+ * own re-deliverability predicate (`needsRedelivery`): `noWakeAwake`
+ * (`prepared`/`failed` — still on the sweep's wheel, a wake is still possible)
+ * and `noWakeClosing` (every settled status — the pair only ever CLOSES; `self`
+ * is the ack-loop guard / retire seal). Invariant BY CONSTRUCTION:
+ * `noWakeAwake + noWakeClosing === noWakeHeld`.) and, FB-132
  * (wake-on-delivered 2026-09-06), `gatedHeld` (pairs of an ALIVE recipient
  * the FIFO gate holds — the 2nd-half sweep skips instead of settling; they
  * drain at the recipient's next REAL wake — the legitimate fb-27 exception of
@@ -550,6 +560,14 @@ export interface SweepHealthState {
   oldestPreparedTs?: number
   dormantHeld?: number
   noWakeHeld?: number
+  /** LANE (B) 2026-09-17 — the TWO DIRECTIONS of the no-wake census (see
+   * `noWakeHeld`): `noWakeAwake` = the sealed pairs still on the sweep's wheel
+   * (`prepared`/`failed`, `needsRedelivery` true — a wake is still possible);
+   * `noWakeClosing` = the sealed pairs settled for good (every other status —
+   * they only ever close). Read verbatim from the sweep; ABSENT until a cycle
+   * computed them (never synthesized). */
+  noWakeAwake?: number
+  noWakeClosing?: number
   gatedHeld?: number
   /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the manager-
    * delivery-STUCK hold count of the CURRENT tick — how many QUIESCENT workers
@@ -588,6 +606,10 @@ export function readHealthHeartbeatFile(stateDir: string, opts?: StoreFileReadOp
           if (typeof sweep.oldestPreparedTs === 'number') state.oldestPreparedTs = sweep.oldestPreparedTs
           if (typeof sweep.dormantHeld === 'number') state.dormantHeld = sweep.dormantHeld
           if (typeof sweep.noWakeHeld === 'number') state.noWakeHeld = sweep.noWakeHeld
+          // LANE (B) 2026-09-17: the TWO DIRECTIONS of the no-wake census read
+          // back verbatim (never synthesized — only when a cycle observed them).
+          if (typeof sweep.noWakeAwake === 'number') state.noWakeAwake = sweep.noWakeAwake
+          if (typeof sweep.noWakeClosing === 'number') state.noWakeClosing = sweep.noWakeClosing
           // FB-132 (wake-on-delivered 2026-09-06): the FIFO-gate-held class
           // read back verbatim (never synthesized — only when a cycle observed
           // it AND the sweep datum carried it).
@@ -8246,7 +8268,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         // sweep closure criterion (prepared-stuck > 10 min = the fb-58
         // criterion) + the held-class summary (dormantHeld/noWakeHeld) so a QD
         // closure read never mistakes a B3/P2-held residue for a stuck pair.
-        `[deepartments] system-health: boot tick boot=<${deps.bootId}> surface=${deps.sessionSurface ?? 'n/a'} nRestarts=${deps.nRestarts ?? 'n/a'} crashStreak=${deps.crashStreak ?? 'n/a'} sweep=${deps.sweep !== undefined ? `armed=${deps.sweep.armed}, cycles=${deps.sweep.cycles}, criterion=prepared-stuck>10min, preparedStuckRemaining=${deps.sweep.preparedStuckRemaining ?? 'n/a'}${deps.sweep.dormantHeld !== undefined ? `, dormantHeld=${deps.sweep.dormantHeld}` : ''}${deps.sweep.noWakeHeld !== undefined ? `, noWakeHeld=${deps.sweep.noWakeHeld}` : ''}${deps.sweep.gatedHeld !== undefined ? `, gatedHeld=${deps.sweep.gatedHeld}` : ''}` : 'n/a'}`
+        `[deepartments] system-health: boot tick boot=<${deps.bootId}> surface=${deps.sessionSurface ?? 'n/a'} nRestarts=${deps.nRestarts ?? 'n/a'} crashStreak=${deps.crashStreak ?? 'n/a'} sweep=${deps.sweep !== undefined ? `armed=${deps.sweep.armed}, cycles=${deps.sweep.cycles}, criterion=prepared-stuck>10min, preparedStuckRemaining=${deps.sweep.preparedStuckRemaining ?? 'n/a'}${deps.sweep.dormantHeld !== undefined ? `, dormantHeld=${deps.sweep.dormantHeld}` : ''}${deps.sweep.noWakeHeld !== undefined ? `, noWakeHeld=${deps.sweep.noWakeHeld}` : ''}${deps.sweep.noWakeAwake !== undefined ? ` (awake=${deps.sweep.noWakeAwake}, closing=${deps.sweep.noWakeClosing ?? 'n/a'})` : ''}${deps.sweep.gatedHeld !== undefined ? `, gatedHeld=${deps.sweep.gatedHeld}` : ''}` : 'n/a'}`
       )
     }
     // fb-43 — the restart-registry reconcile (right after the heartbeat — the

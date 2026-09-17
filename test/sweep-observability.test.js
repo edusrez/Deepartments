@@ -223,8 +223,13 @@ test('sweep-observability [redeliverer] sweepDue fires count + the last prepared
     // oldestPreparedTs stays ABSENT (there is no prepared row).
     // FB-132 (wake-on-delivered 2026-09-06): the FIFO-gate-held class joins
     // the summary (gatedHeld: 0 on the empty ledger).
+    // LANE (B) (2026-09-17, run token 79c9bdbb): the no-wake census is read on
+    // ANY status and split into its two DIRECTIONS (noWakeAwake: still on the
+    // sweep's wheel — a wake is still possible; noWakeClosing: settled for good,
+    // the pair only ever closes). On the empty ledger every count is 0 and the
+    // invariant awake + closing === noWakeHeld holds.
     await r.sweepDue(5_000)
-    assert.deepEqual(r.sweepState(), { cycles: 1, lastCycleTs: 5_000, preparedStuckRemaining: 0, dormantHeld: 0, noWakeHeld: 0, gatedHeld: 0 }, 'one sweepDue fire: cycles 1 + lastCycleTs + the observed 0 residue + the P4 held-class summary (0/0/0; oldestPreparedTs ABSENT — no prepared row)')
+    assert.deepEqual(r.sweepState(), { cycles: 1, lastCycleTs: 5_000, preparedStuckRemaining: 0, dormantHeld: 0, noWakeHeld: 0, noWakeAwake: 0, noWakeClosing: 0, gatedHeld: 0 }, 'one sweepDue fire: cycles 1 + lastCycleTs + the observed 0 residue + the P4 held-class summary (0/0/0; oldestPreparedTs ABSENT — no prepared row) + the LANE (B) no-wake census directions (0/0 on the empty ledger)')
     // a SECOND fire advances the counters (the last-ts moves).
     await r.sweepDue(5_000 + 60_000)
     assert.equal(r.sweepState().cycles, 2, 'the second fire bumps cycles to 2')

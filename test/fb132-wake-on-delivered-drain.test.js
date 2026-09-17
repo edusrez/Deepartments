@@ -447,6 +447,11 @@ test('fb132-drain (g1): the 2nd-half criterion — a DUE gated pair of a DEAD re
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 0,
       noWakeHeld: 1,
+      // LANE (B) (2026-09-17, run token 79c9bdbb): the corrected no-wake census
+      // (ANY status) and its directions — the ONLY sealed pair here is the
+      // 'prepared' P2-held head (m-1), so the census is entirely AWAKE.
+      noWakeAwake: 1,
+      noWakeClosing: 0,
       gatedHeld: 1
     }, 'gatedHeld reports the held ALIVE pair; the dead pair (settled terminal) is not in the residue')
     // The alive queue is NOT lost — the recipient's real wake drains it:
