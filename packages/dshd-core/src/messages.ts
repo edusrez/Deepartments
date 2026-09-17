@@ -1011,14 +1011,33 @@ function isDeliverySuccess(status: DeliveryStatus): boolean {
  * one pair — its counted failures since the pair's last SUCCESSFUL delivery, at
  * ANY age, with NO window. This is the count the MAX-ATTEMPTS CAP reads.
  *
- * ★ THE UNIT IS ONE `failed` ROW PER ATTEMPT — NOT the row, and NOT `prepared`.
- * Each re-drive cycle appends a `prepared` write-ahead row and then its `failed`
- * rejection, so counting BOTH would report 2x the attempts and fire the cap at 6
- * attempts instead of 12; and counting `prepared` alone misses the failure set
- * the stop is about (a `failed` row IS the attempt that did not get through).
+ * ★ THE UNIT IS ONE ATTEMPT — the row COUNTED is whichever of the cycle's two
+ * rows exists, NEVER both. Each re-drive cycle appends a `prepared` write-ahead
+ * row and then its `failed` rejection, so counting BOTH unconditionally would
+ * report 2x the attempts and fire the cap at 6 attempts instead of 12. Counting
+ * ONE OF THEM ALONE — which is what `3f3a3eb` shipped (`failed` only) — is the
+ * mirror-image defect, and the two shapes are the two halves of this lane:
+ *   - the LEGACY shape: the LANE ② test seeds 12 `failed` rows with NO `prepared`
+ *     and requires the cap to fire — so a `failed` rejection MUST count;
+ *   - the LIVE shape: a `prepared` write-ahead whose final row is never appended
+ *     (the crash class / the re-drive that re-marks `prepared` and returns). It
+ *     is the MAJORITY. MEASURED on the live ledger (2026-09-16, 5 readings):
+ *     of the 39 pairs whose latest row still needs re-delivery, **37 carry ZERO
+ *     `failed` rows**, and **6 are at or past the cap** (m-14953 15, m-14957 16,
+ *     m-14956 18, m-14944 13, m-14959 12, m-14968 12) — for every one of which
+ *     the `failed`-only unit reads **0** — against 2 `failed` rows in the WHOLE
+ *     12 103-row ledger. `failed`-only therefore makes the DOMINANT mode of the
+ *     loop INVISIBLE: the cap reads 0 forever on exactly the pairs it exists to
+ *     stop.
+ * ⇒ THE UNIT IS THE ATTEMPT, WHICHEVER ROW REPRESENTS IT: one count per
+ * `prepared` write-ahead, plus one per `failed` rejection that does NOT have its
+ * own `prepared` write-ahead immediately before it in the same pair. A `prepared`
+ * + its `failed` is ONE attempt; 12 bare `failed` rows are TWELVE. Both shapes
+ * read the SAME number — which is the point.
  * MEASURED consequences, which fix the unit:
  *   - the legacy LANE ② test seeds 12 `failed` rows (no `prepared`) and requires
- *     the cap to fire — so the counter MUST count `failed`;
+ *     the cap to fire — preserved by the pairing rule (a `failed` with no
+ *     `prepared` above it IS an attempt);
  *   - the host's distinguishing case («fails 11 times, DELIVERS, then fails 11
  *     more ⇒ must NOT be exhausted») discriminates ONLY here — cumulative 22 vs
  *     consecutive 11 — and does NOT discriminate under the row unit (44 vs 22:
@@ -1047,26 +1066,64 @@ function isDeliverySuccess(status: DeliveryStatus): boolean {
  * the backoff keep their 1 h window BIT FOR BIT: zero regime change by
  * CONSTRUCTION, and this counter is a SEPARATE computation (the decoupling).
  *
- * ⚠️ KNOWN LIMIT, MEASURED (fb-1704, NOT repaired here). This count is only as
- * durable as the ledger's countable rows, and the G2 legacy drain REWRITES
- * `prepared` rows to `terminal` IN PLACE, keeping their `ts`
- * (`settleG2Batch`). Such a rewrite ERASES the evidence retroactively, so this
- * count can FALL for a pair that is not recovering. Measured on the live ledger:
- * of the pairs whose reconstructed history reaches the cap, 6 of 13 now carry
- * 0 countable rows. That is a SECOND, INDEPENDENT cause of the same symptom and
- * its owner is not this lane. */
+ * ⚠️ THE fb-1704 LIMIT — RE-MEASURED, AND IT DOES NOT REACH THE PAIRS THIS CAP
+ * READS (builder-414, 2026-09-16 — this SUPERSEDES the paragraph `3f3a3eb`
+ * shipped, whose premise the measurement refutes). The G2 legacy drain DOES
+ * rewrite `prepared` rows to `terminal` IN PLACE keeping their `ts`
+ * (`settleG2Batch`), so the rewrite is real — but it is NOT aimed at live
+ * attempts. MEASURED over 5 readings of the live ledger (~13 min, 12 052→12 142
+ * rows), using the PRODUCTION classifier `classifyG2LegacyRows` with the
+ * production catalog: `deadEnd = 0` and `staleDust` 21→24→11→11→11, and in
+ * EVERY reading the count of G2 candidates belonging to a pair that still needs
+ * re-delivery is **0** — `classifyG2LegacyRows` returns STALE-DUST only for a
+ * row shadowed by a later FINAL row (:1247, by construction a pair the cap no
+ * longer reads), DEAD-END only for a dead/unknown recipient (:1253), and it puts
+ * `!needsRedelivery(latest.status)` FIRST. The 18 observed `prepared`→`terminal`
+ * flips (tracked by row identity `(messageId, recipientId, ts)`) were ALL on
+ * pairs whose LATEST row was ALREADY final (`terminal,delivered` /
+ * `terminal,self`) — i.e. already out of the cap's domain. Symmetrically, the
+ * live stuck pairs' `prepared` rows did not move: m-14953/m-14957/m-14956/
+ * m-14944/m-14968 read 13/16/16/12/12 → 15/18/18/13/15 rows, **0 terminal, 0
+ * failed** at every reading. THE STRUCTURAL REASON it cannot happen in a pass:
+ * `settleG2Batch` runs AFTER the re-drive loop on purpose (:2087, so the pairs
+ * the sweep just re-drove are already shadowed dust) and `classifyG2LegacyRows`
+ * reads the pass's OWN pre-drive row snapshot, so a pair this cycle re-marks
+ * `prepared` cannot be a candidate in that cycle. Residual risk, DECLARED not
+ * hidden: it is not zero-proof across ALL G2 configurations — a `deadEnd`
+ * candidate whose recipient DIES later would erase that pair's rows, and the
+ * SEAM re-marking a shared recipient's pair in a LATER cycle could shadow them.
+ * Neither is measured live (the recipient was alive in all 5 readings). */
 export function pairConsecutiveAttemptCount(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
+  // Walk FORWARD, resetting at each success: the run is the TAIL of the pair's
+  // history, clipped at its last success (identical semantics to a backwards walk
+  // — a reset forward IS the clip backwards). ONE COUNT PER ATTEMPT: a `prepared`
+  // write-ahead counts, and its `failed` rejection — the NEXT matching row of the
+  // cycle — adds NOTHING; a `failed` with no `prepared` write-ahead above it
+  // counts on its own (the legacy LANE ② shape). `terminal` does NOT clip the run
+  // — it is the cap's own stop word, never a recovery, so the failure run
+  // continues through it (a seam re-send after a stop extends the SAME run); it
+  // does END an unpaired `prepared`, so a `failed` after a `terminal` counts
+  // alone (conservative: errs toward firing, never toward silence).
   let count = 0
-  // Walk BACKWARDS from the pair's most recent transition: the run is the TAIL of
-  // the pair's history, clipped at its last success. One countable row per
-  // attempt — the `failed` rejection (see the unit note above). `terminal` does
-  // NOT clip — it is the cap's own stop word, never a recovery, so the failure
-  // run continues through it (a seam re-send after a stop extends the SAME run).
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i]
+  let preparedAwaiting = false
+  for (const row of rows) {
     if (row.messageId !== messageId || row.recipientId !== recipientId) continue
-    if (isDeliverySuccess(row.status)) return count
-    if (row.status === 'failed') count++
+    if (isDeliverySuccess(row.status)) {
+      count = 0
+      preparedAwaiting = false
+      continue
+    }
+    if (row.status === 'prepared') {
+      count++
+      preparedAwaiting = true
+      continue
+    }
+    if (row.status === 'failed') {
+      if (!preparedAwaiting) count++
+      preparedAwaiting = false
+      continue
+    }
+    preparedAwaiting = false
   }
   return count
 }

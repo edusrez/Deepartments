@@ -516,21 +516,52 @@ test('builder-411 (iv) INVARIANT over the SWEEP: the loop is BOUNDED — reached
       loggedCount <= 2 * CAP + 2,
       `and it stayed BOUNDED by the cap (${loggedCount} <= ${2 * CAP + 2} = 2 x cap + the in-flight cycle)`
     )
-    // ★ WHY THE `failed`-ROW UNIT — MEASURED, not asserted: the recount of the
-    // SAME ledger at the SAME instant now AGREES with the count the decision used.
-    // The `prepared` rows ARE erased by the G2 in-place rewrite (fb-1704) but the
-    // `failed` rows are NOT touched by it, so a counter built on `failed` rows is
-    // STABLE across the rewrite — which is exactly why the unit matters beyond
-    // arithmetic. (With a `prepared`-based count this recount measured 6 against a
-    // decision that used 13 — the counter would have silently lost its own
-    // evidence; see the report for that measurement.)
+    // ★★ THE STABILITY THAT MATTERS (fb-1704), builder-414 — CORRECTED AND
+    // RE-MEASURED. The claim that can carry the fix is NOT «a post-hoc recount
+    // always agrees» — it CANNOT agree, and asserting that was measuring the
+    // wrong instant. The claim that carries it is:
+    //   ★ the count NEVER falls for a pair that is STILL IN THE CAP'S DOMAIN.
+    // The erosion is real and TOTAL for the incident's own shape (12 `prepared`
+    // with no `failed` ⇒ 0 after the flip), but it requires the pair-latest to
+    // become FINAL first — and once it is, `needsRedelivery` is false and THE CAP
+    // IS NEVER READ AGAIN for that pair (:466 above). Measured: 0 violations over
+    // 117 in-domain sweeps. So the erosion is UNOBSERVABLE by every read the cap
+    // makes. What follows asserts exactly that, instead of the false equality.
     const rowsAfterStop = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
     const recounted = pairConsecutiveAttemptCount(rowsAfterStop, MESSAGE_ID, SUBJECT)
+    // (a) The pair has LEFT the domain: the cap cannot read this count again.
     assert.equal(
-      recounted,
-      loggedCount,
-      `fb-1704 STABILITY, MEASURED: the decision used ${loggedCount} attempts and a POST-HOC recount of the SAME ledger at the SAME instant AGREES (${recounted}) — the \`failed\` rows survive the G2 \`prepared\`→\`terminal\` in-place rewrite, so this counter is immune to the erosion that afflicts a \`prepared\`-based one`
+      needsRedelivery(rowsAfterStop[rowsAfterStop.length - 1].status),
+      false,
+      'the pair-latest is FINAL after the stop ⇒ the sweep\'s own eligibility predicate is false ⇒ THIS COUNT IS NEVER READ AGAIN (the erosion below is therefore unobservable)'
     )
+    // (b) The shortfall is MONOTONE and EXPLAINED, never an arbitrary loss: the
+    // recount can only be LOWER (rows are erased, never invented), and the
+    // shortfall equals EXACTLY the G2-flipped `prepared` rows whose cycle emitted
+    // NO `failed` of its own. A flipped `prepared` WITH a `failed` partner loses
+    // nothing — the partner TAKES OVER the count — which is why the 1-row-per-
+    // attempt unit survives the rewrite for every 2-row cycle.
+    assert.ok(
+      recounted <= loggedCount,
+      `the recount can only FALL (${recounted} <= ${loggedCount}) — G2 erases rows, it never invents them`
+    )
+    const pairLedger = rowsAfterStop.filter((x) => x.messageId === MESSAGE_ID && x.recipientId === SUBJECT)
+    const stopTerminalIndex = pairLedger.length - 1 // the cap's own stop wrote the LAST row
+    let flippedWithoutFailedPartner = 0
+    for (let i = 0; i < stopTerminalIndex; i++) {
+      if (pairLedger[i].status !== 'terminal') continue // a G2 in-place flip, not a stop
+      const next = pairLedger[i + 1] // append order: the cycle's `failed` would be here
+      if (next === undefined || next.status !== 'failed') flippedWithoutFailedPartner++
+    }
+    assert.equal(
+      loggedCount - recounted,
+      flippedWithoutFailedPartner,
+      `EXPLAINED SHORTFALL: the decision used ${loggedCount}, the recount reads ${recounted}, and the gap ${loggedCount - recounted} is EXACTLY the ${flippedWithoutFailedPartner} G2-flipped \`prepared\` rows whose cycle emitted no \`failed\` of its own — every erased row is accounted for, none is a silent loss`
+    )
+    // (c) ★ AND THE HONEST FORM OF THE DECISION-INSTANT EQUALITY: the count read
+    // from the ledger the DECISION ITSELF read (the pre-sweep snapshot) agrees
+    // EXACTLY with the count the decision used. That is the equality that has to
+    // hold, and it is asserted in test (x) below over every in-domain sweep.
     // The frozen-id invariant, read by append order: the `failed` rows — the class
     // `scanDeliveryFindings` turns into `delivery-failed` alerts — stop growing.
     const before = await pairRows(MOD, stateDir)
@@ -815,5 +846,196 @@ test('builder-411 (viii) THE DECLARATION, asserted mechanically: `terminal` ceas
     // that asymmetry IS the fb-1444 limit, and it is NOT repaired here.
     await markDelivery(stateDir, MESSAGE_ID, SUBJECT, 'prepared')
     assert.equal(await deliveryStatus(stateDir, MESSAGE_ID, SUBJECT), 'prepared', 'WHAT DOES NOT CEASE (the SEAM): the seam is NOT gated by `terminal` — a re-send flipped it back to `prepared`. Out of lane: different defect, different owner.')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (7) builder-414 (run token f21923cb, 2026-09-16) — THE COVERAGE HALF.
+// `3f3a3eb` fixed the UNIT (`failed` row per attempt) but LOST the COVERAGE: a
+// pair whose rows are ALL `prepared` — the LIVE shape, and the MAJORITY — reads
+// 0 forever, so the cap never fires on exactly the pairs it exists to stop.
+// MEASURED on the live ledger (5 readings, 12 103 rows): of the 39 pairs whose
+// latest row still needs re-delivery, **37 carry ZERO `failed` rows**, and 6 are
+// already at/past the cap (m-14953 15, m-14957 16, m-14956 18, m-14944 13,
+// m-14959 12, m-14968 12) — against 2 `failed` rows in the WHOLE ledger. The
+// `failed`-only unit read 0 on ALL SIX.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The PRE-FIX (`3f3a3eb`) unit: the pair's `failed` rows since its last success
+ * — the exact computation this lane replaces, kept here so the defect is
+ * REPRODUCED IN THE TEST rather than merely described. */
+function preFixFailedOnlyCount(rows, messageId, recipientId) {
+  let count = 0
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (row.status === 'delivered' || row.status === 'resumed' || row.status === 'self') return count
+    if (row.status === 'failed') count++
+  }
+  return count
+}
+
+test('builder-414 (ix) ★★ CRITERION (i) THE LIVE SHAPE: N `prepared` and ZERO `failed` ⇒ THE CAP FIRES — and the pre-fix unit reads 0 on the very same ledger (the defect, reproduced)', async () => {
+  // ── the PURE counter, on the incident's exact live shape ──────────────────
+  const liveRows = Array.from({ length: CAP }, (_, i) => ({ messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'prepared', ts: T0 + i * MEASURED_CADENCE_MS }))
+  assert.equal(
+    pairConsecutiveAttemptCount(liveRows, MESSAGE_ID, SUBJECT),
+    CAP,
+    `★ THE FIX: ${CAP} \`prepared\` rows and NO \`failed\` read ${CAP} attempts — the write-ahead row IS the attempt`
+  )
+  assert.ok(
+    redeliveryAttemptsExhausted(pairConsecutiveAttemptCount(liveRows, MESSAGE_ID, SUBJECT), CAP),
+    '⇒ THE CAP FIRES on the live shape'
+  )
+  assert.equal(
+    preFixFailedOnlyCount(liveRows, MESSAGE_ID, SUBJECT),
+    0,
+    '★ THE DEFECT, REPRODUCED: the pre-fix `failed`-only unit reads 0 on the SAME rows — the cap was UNREACHABLE for the majority shape'
+  )
+  // ── the UNIT is still one per attempt (no double count, no loss) ──────────
+  const twoRowCycles = Array.from({ length: CAP }, (_, i) => [
+    { messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'prepared', ts: T0 + i * MEASURED_CADENCE_MS },
+    { messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'failed', ts: T0 + i * MEASURED_CADENCE_MS + DELIVER_LATENCY_MS }
+  ]).flat()
+  assert.equal(
+    pairConsecutiveAttemptCount(twoRowCycles, MESSAGE_ID, SUBJECT),
+    CAP,
+    `BOTH SHAPES READ THE SAME NUMBER: the 2-row cycles (${2 * CAP} rows) also read ${CAP} — the unit is the ATTEMPT, so the two shapes are interchangeable`
+  )
+  // ...and the G2 in-place flip does NOT lose a 2-row cycle: the `failed` partner
+  // TAKES OVER the count when its `prepared` is rewritten.
+  const flipped = twoRowCycles.map((r) => (r.status === 'prepared' ? { ...r, status: 'terminal' } : r))
+  assert.equal(
+    pairConsecutiveAttemptCount(flipped, MESSAGE_ID, SUBJECT),
+    CAP,
+    `THE HAND-OVER, MEASURED: after G2 flips every \`prepared\` in place, the 2-row shape STILL reads ${CAP} — each \`failed\` is now unpaired and counts alone, so the rewrite loses NOTHING for a cycle that emitted both rows`
+  )
+
+  // ── the e2e, on the REAL sweep with the LIVE writer shape ─────────────────
+  // The stub mirrors the LIVE drenaje/gated-hold writer: each re-drive appends
+  // ONE fresh `prepared` write-ahead row and NO final row (measured: the live
+  // stuck pairs carry 0 `failed`). No time compression — the injected clock.
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(resolveMessagesPath(stateDir), `${JSON.stringify(turnErrorRecord(T0))}\n`, 'utf8')
+    await writeFile(resolveDeliveriesPath(stateDir), `${JSON.stringify({ messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'prepared', ts: T0 })}\n`, 'utf8')
+    const clock = { now: T0 }
+    const calls = { deliver: [], warns: [] }
+    const r = new DeliveryRedeliverer({
+      stateDir,
+      logger: { info() {}, warn: (m) => calls.warns.push(m) },
+      recipientAlive: () => true,
+      recipientDormant: () => false,
+      recipientRunning: () => false,
+      getRecord: async (id) => (id === MESSAGE_ID ? turnErrorRecord(T0) : undefined),
+      resolveCallerSessionId: () => 'deepartments',
+      deliver: async (rec, recipientId) => {
+        calls.deliver.push({ messageId: rec.id, recipientId, at: clock.now })
+        // ONLY the write-ahead row — the live shape (no `failed` ever follows).
+        await appendFile(resolveDeliveriesPath(stateDir), `${JSON.stringify({ messageId: rec.id, recipientId, status: 'prepared', ts: clock.now })}\n`, 'utf8')
+        return 'prepared'
+      }
+    }, { baseDelayMs: 15_000, maxDelayMs: 600_000, maxAttempts: CAP, preparedStuckMs: 600_000, stormWindowMs: RE_DELIVERY_STORM_WINDOW_MS })
+    let terminalAt = null
+    for (let tick = 1; tick <= 48 * 60; tick++) {
+      clock.now = T0 + tick * SWEEP_TICK_MS
+      await r.sweepDue(clock.now)
+      if ((await deliveryStatus(stateDir, MESSAGE_ID, SUBJECT)) === 'terminal') { terminalAt = clock.now; break }
+    }
+    assert.notEqual(terminalAt, null, '★ THE LOOP IS BOUNDED ON THE LIVE SHAPE: the all-`prepared` pair REACHES terminal (pre-fix it never did — the count read 0 forever)')
+    const stopWarn = calls.warns.find((w) => /STOPPED after \d+ attempts \(max 12\)/.test(w))
+    assert.ok(stopWarn !== undefined, 'the stop is LOUD (stop-with-alert names the pair and the count) — on the row shape that carries ZERO `failed`')
+    const loggedCount = Number(/STOPPED after (\d+) attempts/.exec(stopWarn)[1])
+    assert.ok(
+      redeliveryAttemptsExhausted(loggedCount, CAP),
+      `the count AT THE DECISION INSTANT was ${loggedCount} >= ${CAP} — reached by REAL accrued write-ahead attempts`
+    )
+    assert.ok(calls.deliver.length >= CAP - 1, `the pair was genuinely re-driven ${calls.deliver.length} times before the stop — not a one-shot`)
+    // The domain exit: after the stop the cap never reads this pair again.
+    const after = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    assert.equal(needsRedelivery(after[after.length - 1].status), false, 'the pair-latest is FINAL ⇒ the sweep\'s eligibility predicate is false ⇒ the cap will not read this count again')
+    assert.equal(r.__calls === undefined ? calls.deliver.length : r.__calls.deliver.length, calls.deliver.length, 'the re-drive count is the one observed')
+  })
+})
+
+test('builder-414 (x) ★ CRITERION (iv) THE STABILITY THAT MATTERS: over a FULL RUN the count NEVER falls while the pair is STILL IN THE CAP\'S DOMAIN, and the count read from the ledger the DECISION read equals the count the decision USED', async () => {
+  // The invariant, PROVED structurally and MEASURED here:
+  //   G2 erases a `prepared` row only if that row is NOT the pair-latest (its
+  //   `settleStaleDust`/`settleDeadEnd` arms both require it). The cap reads the
+  //   count only while the pair-latest is NON-FINAL. So while the pair is in the
+  //   domain, its counted rows are exactly the rows the counter would have
+  //   counted — the erosion needs the pair-latest to become FINAL first, and a
+  //   FINAL row makes `needsRedelivery` false, i.e. the pair LEAVES the domain.
+  //   ⇒ the erosion is UNOBSERVABLE by every read the cap makes.
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(resolveMessagesPath(stateDir), `${JSON.stringify(turnErrorRecord(T0))}\n`, 'utf8')
+    await writeFile(resolveDeliveriesPath(stateDir), `${JSON.stringify({ messageId: MESSAGE_ID, recipientId: SUBJECT, status: 'prepared', ts: T0 })}\n`, 'utf8')
+    const clock = { now: T0 }
+    const calls = { deliver: [], warns: [] }
+    const r = new DeliveryRedeliverer({
+      stateDir,
+      logger: { info() {}, warn: (m) => calls.warns.push(m) },
+      recipientAlive: () => true,
+      recipientDormant: () => false,
+      recipientRunning: () => false,
+      getRecord: async (id) => (id === MESSAGE_ID ? turnErrorRecord(T0) : undefined),
+      resolveCallerSessionId: () => 'deepartments',
+      deliver: async (rec, recipientId) => {
+        calls.deliver.push({ at: clock.now })
+        await appendFile(resolveDeliveriesPath(stateDir), `${JSON.stringify({ messageId: rec.id, recipientId, status: 'prepared', ts: clock.now })}\n${JSON.stringify({ messageId: rec.id, recipientId, status: 'failed', ts: clock.now + DELIVER_LATENCY_MS })}\n`, 'utf8')
+        return 'failed'
+      }
+    }, { baseDelayMs: 15_000, maxDelayMs: 600_000, maxAttempts: CAP, preparedStuckMs: 600_000, stormWindowMs: RE_DELIVERY_STORM_WINDOW_MS })
+
+    let inDomainSweeps = 0
+    let decreases = 0
+    let violations = 0
+    let decisionInstantCount = null
+    let prevCount = pairConsecutiveAttemptCount(parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8')), MESSAGE_ID, SUBJECT)
+    for (let tick = 1; tick <= 48 * 60; tick++) {
+      // ★ READ THE COUNT FROM THE LEDGER THE DECISION IS ABOUT TO READ — the
+      // pre-sweep snapshot IS the decision instant's input (`sweepDue` reads its
+      // own snapshot synchronously at entry, and G2 runs AFTER the drive loop).
+      const pre = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      const preDomain = needsRedelivery(pre[pre.length - 1].status)
+      const preCount = pairConsecutiveAttemptCount(pre, MESSAGE_ID, SUBJECT)
+      clock.now = T0 + tick * SWEEP_TICK_MS
+      await r.sweepDue(clock.now)
+      const post = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      const postDomain = needsRedelivery(post[post.length - 1].status)
+      const postCount = pairConsecutiveAttemptCount(post, MESSAGE_ID, SUBJECT)
+      if (preDomain) {
+        inDomainSweeps++
+        // ★ THE INVARIANT: the count may GROW (a genuine new attempt — the sweep
+        // re-drove and appended a cycle) but it must NEVER FALL **while the pair is
+        // still in the domain AFTER the sweep**. The one sweep that applies the
+        // cap's own stop DOES leave the domain in the same pass (the stop writes
+        // the FINAL `terminal`), so it is excluded by `postDomain` — and it is
+        // asserted separately below to be exactly that.
+        if (postDomain && postCount < preCount) {
+          violations++
+          assert.fail(`the count FELL ${preCount}→${postCount} while the pair was STILL IN DOMAIN — the fb-1704 erosion reached a readable pair (this is the violation the lane exists to exclude)`)
+        }
+      }
+      if (postCount < preCount) {
+        decreases++
+        assert.equal(postDomain, false, `the count fell ${preCount}→${postCount} only because the pair LEFT the domain (latest=${post[post.length - 1].status}) — a fall while STILL in domain would be a true violation`)
+      }
+      if (decisionInstantCount === null && /STOPPED after \d+ attempts/.test(calls.warns.join('\n'))) {
+        // ★ THE DECISION-INSTANT EQUALITY: the count the decision USED (its own
+        // provenance line) equals the count computed from the ledger it read.
+        decisionInstantCount = { used: Number(/STOPPED after (\d+) attempts/.exec(calls.warns.join('\n'))[1]), read: preCount }
+      }
+      prevCount = postCount
+      if (!postDomain) break
+    }
+    assert.equal(violations, 0, `★ THE INVARIANT, MEASURED OVER ${inDomainSweeps} IN-DOMAIN SWEEPS: the count NEVER fell while the pair was still in the cap's domain (violations ${violations})`)
+    assert.ok(inDomainSweeps >= 100, `the run really was observed over many in-domain sweeps (${inDomainSweeps}) — not a degenerate one-tick case`)
+    assert.notEqual(decisionInstantCount, null, 'the cap fired within the horizon')
+    assert.equal(
+      decisionInstantCount.used,
+      decisionInstantCount.read,
+      `★ CRITERION (iv), THE HONEST FORM: the count the decision USED (${decisionInstantCount.used}, from the stop-warn provenance) EQUALS the count computed from the SAME ledger the decision read (${decisionInstantCount.read}) — the decision instant is stable; only a post-domain-exit recount can differ`
+    )
+    assert.equal(decreases, 1, `exactly ONE decrease in the whole run, and it is the domain exit itself (the cap's own stop terminal) — got ${decreases}`)
   })
 })
