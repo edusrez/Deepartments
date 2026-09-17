@@ -896,9 +896,18 @@ function gatingHeadOf(rows: readonly DeliveryRow[], recipientId: string, seq: nu
  * landed row is never an orphan residue; determinism: the lexicographically
  * smallest landed-elsewhere recipient wins (stable across passes).
  * MODULE-PRIVATE (see `gatingHeadOf` — no export-surface growth). */
-function landedOutsideAddressees(rows: readonly DeliveryRow[], messageId: string, addressed: readonly string[]): string | undefined {
-  const latest = new Map<string, DeliveryRow>()
-  for (const row of rows) latest.set(deliveryKey(row), row)
+function landedOutsideAddressees(rows: readonly DeliveryRow[], messageId: string, addressed: readonly string[], landedIndex?: Map<string, Set<string>>): string | undefined {
+  if (landedIndex !== undefined) {
+    const landed = landedIndex.get(messageId)
+    if (landed === undefined) return undefined
+    let indexedAt: string | undefined
+    for (const recipientId of landed) {
+      if (addressed.includes(recipientId)) continue
+      if (indexedAt === undefined || recipientId < indexedAt) indexedAt = recipientId
+    }
+    return indexedAt
+  }
+  const latest = buildLatestIndex(rows)
   let landedAt: string | undefined
   for (const row of latest.values()) {
     if (row.messageId !== messageId) continue
@@ -907,6 +916,48 @@ function landedOutsideAddressees(rows: readonly DeliveryRow[], messageId: string
     if (landedAt === undefined || row.recipientId < landedAt) landedAt = row.recipientId
   }
   return landedAt
+}
+
+/** dev-fix 2026-09-17 (perf) — the pair-LATEST view of a sidecar row set, built
+ * ONCE: `deliveryKey(row) → latest row`. The two orphan discriminators used to
+ * rebuild this fold on EVERY call (and `landedOutsideAddressees` rebuilt it once
+ * per row it inspected), which is O(rows²) over the 12k+ row ledger and was
+ * measured as 75 % of the main thread (CPU profile of the dev instance,
+ * 2026-09-17: `landedOutsideAddressees` 74.7 %, `orphanAddressEvidence` 8.8 %). */
+function buildLatestIndex(rows: readonly DeliveryRow[]): Map<string, DeliveryRow> {
+  const latest = new Map<string, DeliveryRow>()
+  for (const row of rows) latest.set(deliveryKey(row), row)
+  return latest
+}
+
+/** dev-fix 2026-09-17 (perf) — the LANDED recipients per message over the
+ * pair-latest view: the index that makes `landedOutsideAddressees` O(landed)
+ * instead of O(rows). Same rows, same statuses, same tie-break. */
+function buildLandedIndex(latest: Map<string, DeliveryRow>): Map<string, Set<string>> {
+  const landed = new Map<string, Set<string>>()
+  for (const row of latest.values()) {
+    if (!isLandedStatus(row.status)) continue
+    let recipients = landed.get(row.messageId)
+    if (recipients === undefined) {
+      recipients = new Set<string>()
+      landed.set(row.messageId, recipients)
+    }
+    recipients.add(row.recipientId)
+  }
+  return landed
+}
+
+/** dev-fix 2026-09-17 (perf) — the pair-latest rows grouped by recipient: the
+ * index that keeps `orphanAddressEvidence` from walking the whole ledger per
+ * held pair (it only ever inspects the pairs of ONE recipient). */
+function buildRecipientIndex(latest: Map<string, DeliveryRow>): Map<string, DeliveryRow[]> {
+  const byRecipient = new Map<string, DeliveryRow[]>()
+  for (const row of latest.values()) {
+    const rows = byRecipient.get(row.recipientId)
+    if (rows === undefined) byRecipient.set(row.recipientId, [row])
+    else rows.push(row)
+  }
+  return byRecipient
 }
 
 /** fb-117 (fold-in tramo 3A) — the DELIVERY-QUEUE SEQUENCE of one sidecar row
@@ -1526,6 +1577,11 @@ export interface DeliveryRedelivererDeps {
 interface PassContext {
   rows: readonly DeliveryRow[]
   records: Map<string, MessageRecord | undefined>
+  /** dev-fix 2026-09-17 (perf) — the pass's pair-latest view + the two indexes
+   * derived from it. Lazily built on first use, never mutated afterwards. */
+  latest?: Map<string, DeliveryRow>
+  landed?: Map<string, Set<string>>
+  byRecipient?: Map<string, DeliveryRow[]>
 }
 
 // ─── [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] ───────────────────────
@@ -1650,15 +1706,33 @@ export class DeliveryRedeliverer {
   private async orphanAddressEvidence(recipientId: string, passCtx?: PassContext): Promise<boolean> {
     const rows = await this.passRows(passCtx)
     if (rows.length === 0) return false
-    const latest = new Map<string, DeliveryRow>()
-    for (const row of rows) latest.set(deliveryKey(row), row)
-    for (const row of latest.values()) {
-      if (row.recipientId !== recipientId) continue
+    const latest = this.passLatest(passCtx, rows)
+    const landed = this.passLandedIndex(passCtx, latest)
+    for (const row of this.passRecipientIndex(passCtx, latest).get(recipientId) ?? []) {
       const record = await this.passRecord(row.messageId, passCtx)
       if (record === void 0) continue
-      if (landedOutsideAddressees(rows, row.messageId, record.to) !== undefined) return true
+      if (landedOutsideAddressees(rows, row.messageId, record.to, landed) !== undefined) return true
     }
     return false
+  }
+
+  /** dev-fix 2026-09-17 (perf) — the pass's pair-latest view (built once per
+   * pass; outside a pass it degrades to a local build, same semantics). */
+  private passLatest(passCtx: PassContext | undefined, rows: readonly DeliveryRow[]): Map<string, DeliveryRow> {
+    if (passCtx === undefined) return buildLatestIndex(rows)
+    return (passCtx.latest ??= buildLatestIndex(rows))
+  }
+
+  /** dev-fix 2026-09-17 (perf) — the pass's landed-recipients index (built once). */
+  private passLandedIndex(passCtx: PassContext | undefined, latest: Map<string, DeliveryRow>): Map<string, Set<string>> {
+    if (passCtx === undefined) return buildLandedIndex(latest)
+    return (passCtx.landed ??= buildLandedIndex(latest))
+  }
+
+  /** dev-fix 2026-09-17 (perf) — the pass's recipient grouping (built once). */
+  private passRecipientIndex(passCtx: PassContext | undefined, latest: Map<string, DeliveryRow>): Map<string, DeliveryRow[]> {
+    if (passCtx === undefined) return buildRecipientIndex(latest)
+    return (passCtx.byRecipient ??= buildRecipientIndex(latest))
   }
 
   /** builder-411 (2026-09-16) — the CAP's attempt count of one pair: the pair's
@@ -1722,7 +1796,7 @@ export class DeliveryRedeliverer {
       // B3 dormancy guard would otherwise park the residue FOREVER. */
       if (row.status === 'prepared') {
         const rows = await this.passRows(passCtx)
-        const landedAt = landedOutsideAddressees(rows, row.messageId, record.to)
+        const landedAt = landedOutsideAddressees(rows, row.messageId, record.to, this.passLandedIndex(passCtx, this.passLatest(passCtx, rows)))
         if (landedAt !== undefined) {
           await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
           logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was prepared) → 'terminal' — ORPHAN RESIDUE (fb-467): the record already LANDED at "${landedAt}", an address it never addressed (the retired-host re-route); a pure STATUS FLIP, never a re-delivery`)

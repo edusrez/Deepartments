@@ -1,0 +1,26 @@
+--- a/node_modules/@deepseek-ai/dsh-token-meter/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-token-meter/lib/index.js
+@@ -551,8 +551,21 @@
+ 			};
+ 			this.states.set(session, state);
+ 		}
+-		while (state.consumedEvents < session.events.length) {
+-			const event = session.events[state.consumedEvents];
++		/* LOCAL PATCH (deepartments 2026-09-17, perf): the fold reads the session's
++		   LIVE log array instead of the `session.events` getter. That getter
++		   materializes a frozen copy of the WHOLE log on the first read after every
++		   append (`eventsSnapshot ??= Object.freeze([...this.log])`), so this
++		   per-append observer copied one pointer per stored event on every single
++		   append — O(events) per append, i.e. O(events²) over a session's life. On
++		   the dev instance (heads with 100k+ events) it measured 68 % of the main
++		   thread (CPU profile 2026-09-17: `get events @ dsh-session:1401`), which
++		   starved the event loop and made the GUI unusable. The log is append-only
++		   and frozen at acceptance, and this fold only reads it, so the snapshot's
++		   copy buys nothing here. Fallback to the getter when the field is absent
++		   (a future harness that hides it) — same semantics either way. */
++		const log = session.log ?? session.events;
++		while (state.consumedEvents < log.length) {
++			const event = log[state.consumedEvents];
+ 			this._foldEvent(session, state, event);
+ 			state.consumedEvents += 1;
+ 		}
