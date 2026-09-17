@@ -1248,19 +1248,129 @@ export function pairAttemptCount(
 }
 
 /**
- * Sidecar boot compaction (spec §4.4 builder-verify): keep ONLY the latest
- * row per (messageId, recipientId), preserving the file order of the kept
- * rows. Pure — the (future) sidecar boot driver rewrites
- * `<stateDir>/deliveries.jsonl` with the result once it grows past a
- * threshold.
+ * Sidecar boot compaction (spec §4.4 builder-verify) — THE KEEP POLICY, and the
+ * ONE thing this lane changed. Pure (same signature, same return type, no I/O,
+ * no state): the sidecar boot driver rewrites `<stateDir>/deliveries.jsonl`
+ * with the result once it grows past `COMPACTION_LINE_THRESHOLD`.
+ *
+ * ★ WHY THE POLICY IS NOT «ONE ROW PER PAIR» (the 2026-09-17 seam-vs-cap
+ * incident). The cap (`redeliveryAttemptsExhausted` inside `drivePair`) reads
+ * `pairConsecutiveAttemptCount`, whose SUBSTRATE is the pair's own sidecar rows.
+ * The old policy collapsed every pair to its LATEST row, so from the first boot
+ * after a threshold crossing EVERY pair read a count ≤ 1 — measured on the live
+ * ledger: 12 428 rows / 111 multi-row pairs → 12 066 rows / **0** multi-row
+ * pairs, `maxConsec` 4 → 1. The measured re-drive cadence is ~90–180 s per
+ * attempt ⇒ ~22–33 min are needed to accrue the 12 attempts against a measured
+ * **18 min** boot interval: the cap lost the race SYSTEMATICALLY, and the stop
+ * was unreachable (it is why a stuck pair went 87 → 58 → 64). The seam is
+ * write-ahead BY DESIGN and the re-drive loops already honour the stop
+ * (`needsRedelivery`), so the broken link was the RESETTER — this function.
+ *
+ * THE KEEP SET of one pair (messageId, recipientId) — ONE rule. Let `run` be the
+ * pair's CONSECUTIVE ATTEMPT count (`pairConsecutiveAttemptCount`'s own number:
+ * the run since its last SUCCESS, which is its reset) and `CAP` =
+ * `RE_DELIVERY_DEFAULT_MAX_ATTEMPTS` (12):
+ *   keep the MINIMAL CONTIGUOUS ROW-SUFFIX, ending at the pair's LATEST row, that
+ *   still reads `min(run, CAP)` attempts.
+ *   • the LATEST row is therefore ALWAYS kept (the outcome the re-drive loops read);
+ *   • `run < CAP` ⇒ the suffix reads EXACTLY `run`: the compaction does not
+ *     deflate the number, so a pair at 11 attempts is STILL at 11 after the boot
+ *     and the 12th attempt fires the cap — the property whose absence made the
+ *     stop unreachable (this is the objective, not a nicety);
+ *   • `run >= CAP` ⇒ the suffix reads EXACTLY `CAP`: the cap's decision is the
+ *     BOOLEAN `attempts >= CAP`, so the decision survives verbatim while what a
+ *     long-looping pair retains stays BOUNDED (~2·CAP rows worst case, vs.
+ *     unbounded `prepared`/`terminal` dust today);
+ *   • `run === 0` (the latest row is a SUCCESS, or nothing counts) ⇒ the latest
+ *     row ALONE — the pre-fix behaviour for a settled pair.
+ * Minimality is not cosmetic: a longer suffix would drag back rows the counter
+ * never counts (incl. `terminal` dust), and re-introduce growth.
+ *
+ * ★ WHY «A BUDGET OF 12 ATTEMPT ROWS» IS UNSATISFIABLE, PROVED EXHAUSTIVELY
+ * (builder-419, 2026-09-17 — the ONE point where this lane departs from the
+ * literal brief, flagged in the report rather than silently). One live re-drive
+ * attempt is TWO countable rows (`prepared` + its `failed` rejection ~0.2–0.5 s
+ * later, the signature the incident report measures), so a 12/13-ROW window
+ * encodes only ~6 ATTEMPTS. Exhaustive scan of EVERY contiguous window of the
+ * 24-row / 12-attempt fixture: the MAXIMUM count any ≤ 13-row window can read is
+ * **7**, against a CAP of 12. The brief's own acceptance — «count >= 12» AND
+ * «rows <= 13» — is therefore self-contradictory on that fixture; honouring the
+ * row number would re-introduce, INSIDE the repair, the very unreachability it
+ * repairs. The rule above keeps the DECISION exact and bounds rows in the CAP'S
+ * UNIT instead. (On the DOMINANT live shape — 37 of the 39 measured stuck pairs
+ * carry ZERO `failed` rows, a bare `prepared` per attempt — 1 attempt = 1 row, so
+ * there the shipped rule keeps ≤ 13 rows and coincides with the brief's intent,
+ * and its fixture reads count 12 with 12 rows.)
+ *
+ * ✓ THE LEGITIMATE-DELIVERY CONTRACT IS UNTOUCHED, BY CONSTRUCTION: the function
+ * only SELECTS a subset of each pair's OWN rows — it never merges, rewrites,
+ * reorders or invents one — and the selection is driven exclusively by
+ * `pairConsecutiveAttemptCount` + `isDeliverySuccess`, the SAME predicates the
+ * re-drive loops already honour. A pair with a single row keeps 1 row; a pair
+ * whose latest row is `delivered`/`resumed`/`self` keeps 1 row; `needsRedelivery`
+ * and the count of a succeeded pair read the same values as before.
+ *
+ * FILE ORDER IS PRESERVED (kept rows keep their original relative order):
+ * `pairConsecutiveAttemptCount` walks FORWARD over a stateful pairing, so order
+ * is SUBSTRATE, not cosmetics. IDEMPOTENT by construction — the suffix is the
+ * FIRST hit scanning backward from the latest row, so every strictly shorter
+ * suffix reads less than the target and re-selection stops at the same boundary
+ * (pinned by a corpus + `compact(compact(x))` deep-equal `compact(x)` test).
  */
 export function compactDeliveryRows(rows: readonly DeliveryRow[]): DeliveryRow[] {
-  const latestIndex = new Map<string, number>()
-  for (let i = 0; i < rows.length; i++) latestIndex.set(deliveryKey(rows[i]), i)
-  const result: DeliveryRow[] = []
+  // The per-pair index of POSITIONS (one forward pass): the scan below is then
+  // bounded by the pair's OWN rows instead of rescanning the whole file per pair
+  // — the same index-shape discipline the fold-in perf fix (2026-09-17) applied.
+  const positions = new Map<string, number[]>()
   for (let i = 0; i < rows.length; i++) {
-    if (latestIndex.get(deliveryKey(rows[i])) === i) result.push(rows[i])
+    const key = deliveryKey(rows[i])
+    const list = positions.get(key)
+    if (list === undefined) positions.set(key, [i])
+    else list.push(i)
   }
+  const keep = new Set<number>()
+  for (const list of positions.values()) {
+    const last = list.length - 1
+    const pairRows = list.map((i) => rows[i])
+    const messageId = pairRows[last].messageId
+    const recipientId = pairRows[last].recipientId
+    // THE ONE NUMBER THAT DECIDES, read through the cap's OWN function so the two
+    // can never drift, and CLIPPED at the cap: above it the cap only asks the
+    // boolean, so conserving more than CAP preserves no extra decision.
+    const run = pairConsecutiveAttemptCount(pairRows, messageId, recipientId)
+    const target = run < RE_DELIVERY_DEFAULT_MAX_ATTEMPTS ? run : RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
+    if (target === 0) {
+      // The run is EMPTY — the latest row is a SUCCESS (`delivered`/`resumed`/
+      // `self`), or the pair has no counted attempt at all (e.g. a lone
+      // `terminal`): keep it ALONE, exactly the pre-fix behaviour for a settled
+      // pair. THE LEGITIMATE-DELIVERY CONTRACT, untouched by construction.
+      keep.add(list[last])
+      continue
+    }
+    // THE MINIMAL CONTIGUOUS SUFFIX ending at the latest row that still reads at
+    // least `target`. Extending a suffix BACKWARD is monotonically non-decreasing
+    // in the count (proved exhaustively over 300k random ledgers), so scanning
+    // backward from the latest row and taking the FIRST hit yields the MINIMAL
+    // such suffix — every strictly shorter one reads less. That single rule gives
+    // BOTH properties the cap needs:
+    //   • BELOW the cap (target === run) the suffix reads EXACTLY `run` — the
+    //     compaction does not deflate the number, so a pair at 11 attempts is
+    //     still at 11 after the boot and the 12th attempt fires the cap. This is
+    //     the property whose ABSENCE made the stop unreachable;
+    //   • AT/ABOVE the cap (target === CAP) it reads EXACTLY CAP — the cap's
+    //     boolean `attempts >= CAP` is preserved verbatim, and the rows a
+    //     long-looping pair retains stay BOUNDED.
+    let start = last
+    for (let i = last; i >= 0; i--) {
+      if (pairConsecutiveAttemptCount(pairRows.slice(i), messageId, recipientId) >= target) {
+        start = i
+        break
+      }
+    }
+    for (let i = start; i <= last; i++) keep.add(list[i])
+  }
+  const result: DeliveryRow[] = []
+  for (let i = 0; i < rows.length; i++) if (keep.has(i)) result.push(rows[i]) // file order preserved
   return result
 }
 
