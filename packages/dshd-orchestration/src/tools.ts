@@ -5788,7 +5788,30 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   } as const
 
   /** LOOP FASE 1 — the NON-blocking duplicate-candidate suggestion shape
-   * (spec §4a: `{fb-id, resumen, tipo, severidad, estado, score}`, ≤3). */
+   * (spec §4a: `{fb-id, resumen, tipo, severidad, estado, score}`, ≤3).
+   *
+   * fb-1879 (ADDITIVE — the declaration was BEHIND the emission): the spec §4a
+   * shape was the WHOLE declared schema, but `findDuplicateCandidates` of
+   * dshd-feedback ALSO emits the 6 fb-1874 fields (`admissible`, `relation`,
+   * `relation_because`, `destination`, `linked_from`, `resolved_from` — the
+   * field set its own `FeedbackDedupeCandidate` docstring declares). The two
+   * diverged silently: with ≥1 candidate the record WAS written and the harness
+   * output validator then rejected the whole answer
+   * (`"value.candidates[0].admissible" is not a declared property
+   * (additionalProperties: false)`), so the emitter believed its durable record
+   * was LOST — exactly when it needed the answer. The 6 pre-existing properties
+   * are untouched (an emitter reading `fb-id`/`resumen`/`score` keeps reading
+   * them); the additions mirror the docstring semantics, never re-write them:
+   *  - `admissible` (required boolean) — TRUE iff the id resolves to a LIVE
+   *    record (a LIVE `duplicado` IS a legal destination);
+   *  - `relation` (required enum) + `relation_because` (required string) — WHAT
+   *    the offer IS + why, a DECLARATION and never a RANKING;
+   *  - `destination` (optional object) — the destination the offer DECLARES,
+   *    with that destination's tail estado (`null` = not in the ledgers read),
+   *    whether it resolves LIVE and whether the TAIL still declares it;
+   *  - `linked_from` / `resolved_from` (optional strings) — the "consumer
+   *    canonical" that declares this offer, and the inadmissible record this
+   *    offer is the RESOLUTION OF. */
   const feedbackDedupeCandidateSchema = {
     type: 'object',
     additionalProperties: false,
@@ -5798,7 +5821,24 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       tipo: { type: 'string', required: true },
       severidad: { type: 'string', required: true },
       estado: { type: 'string', required: true },
-      score: { type: 'number', required: true }
+      score: { type: 'number', required: true },
+      admissible: { type: 'boolean', required: true },
+      relation: { type: 'string', required: true, enum: ['canonical', 'canonical-shared', 'twin', 'archived'] },
+      relation_because: { type: 'string', required: true },
+      destination: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          'fb-id': { type: 'string', required: true },
+          // `FeedbackEstado | null`: null = the declared destination is not in
+          // the ledgers read (the docstring's declared, never inferred, rule).
+          estado: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+          live: { type: 'boolean', required: true },
+          tail: { type: 'boolean', required: true }
+        }
+      },
+      linked_from: { type: 'string' },
+      resolved_from: { type: 'string' }
     }
   } as const
 

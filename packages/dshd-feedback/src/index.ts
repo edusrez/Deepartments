@@ -196,14 +196,65 @@ export function feedbackTransitionError(current: FeedbackEstado, next: FeedbackE
 
 /** A duplicate-candidate suggestion (NON-blocking, ≤3 — the GitHub/Linear
  * pattern; spec §4a). `fb-id` carries the candidate record id (the spec shape
- * `{fb-id, resumen, tipo, severidad, estado, score}`). */
+ * `{fb-id, resumen, tipo, severidad, estado, score}`) + the fb-1874 additions.
+ *
+ * IDENTITY IS THE ID, NOT THE POSITION (fb-1874, piece 2): the pool's unit is
+ * the ID — one offer per id, `estado` = that id's TAIL state. The store's live
+ * cap is counted in LINES (a different, legitimate unit — see
+ * `feedbackUnitDivergence()`); the two are declared together and are NEVER
+ * silently interchanged.
+ *
+ * ADMISIBILITY IS DECLARED PER OFFER (fb-1874, piece 1): the CREATE path
+ * validates `duplicate_of` against the LIVE index, so a candidate now carries
+ * the same guarantee instead of making the emitter burn a call to discover it.
+ * A LIVE record is ALWAYS a legal destination — including a live `duplicado`
+ * (validated by the create path) and the SAME-state tail
+ * (`feedbackTransitionError(current === next) === undefined`). */
 export interface FeedbackDedupeCandidate {
   'fb-id': string
   resumen: string
   tipo: FeedbackTipo
   severidad: FeedbackSeveridad
+  /** The TAIL estado of the offered id (never a stale line's). */
   estado: FeedbackEstado
   score: number
+  /** Whether THIS offer is a LEGAL `duplicate_of` destination right now: TRUE
+   * iff the id resolves to a LIVE record. The invariant (asserted by the
+   * tests) is exact: `admissible === (relation === 'canonical' || relation ===
+   * 'canonical-shared')`. */
+  admissible: boolean
+  /** WHAT the offer IS — a DECLARATION, never a RANKING (no ordering is added
+   * or implied; the score order is the scorer's, unchanged):
+   *  - `canonical`        — a legal destination in its own right.
+   *  - `canonical-shared` — a legal destination that ANOTHER record declares as
+   *    its destination (`linked_from` names it — the "consumer canonical").
+   *  - `twin`             — an inadmissible offer that DECLARES its own
+   *    destination; with a LIVE destination the offer CONSEQUENTLY RESOLVES TO
+   *    IT (declared in `destination`, never hidden) and it STAYS in the pool,
+   *    with its estado declared.
+   *  - `archived`         — an archive-only record declaring no destination:
+   *    never a legal destination, and STILL offered (the detector is never
+   *    narrowed — a false destination is not traded for an untraceable
+   *    false negative). */
+  relation: 'canonical' | 'canonical-shared' | 'twin' | 'archived'
+  /** Why the relation holds (the audit trail of the declaration). */
+  relation_because: string
+  /** The destination the offered id DECLARES (its `duplicate_of`) WITH that
+   * destination's tail estado, whether it resolves LIVE, and whether the
+   * current TAIL still declares it (`tail: false` = the declaration survives
+   * only on a SUPERSEDED line of the append-only ledger). DECLARED, NEVER
+   * INFERRED: a `related[]` membership is NOT used (a set is a PRESENCE, it
+   * does not IDENTIFY a destination). Absent when the record declares none;
+   * `estado: null` means the declared destination is not in the ledgers read. */
+  destination?: { 'fb-id': string; estado: FeedbackEstado | null; live: boolean; tail: boolean }
+  /** The record that DECLARES this offer as its destination (the flip side of
+   * `destination` — the "consumer canonical"). Absent when none does. */
+  linked_from?: string
+  /** The INADMISSIBLE record(s) this offer is the RESOLUTION OF: an
+   * inadmissible offer declaring a LIVE destination resolves TO it, so the
+   * legal destination is declared instead of the offer being merely marked
+   * inadmissible. Absent when no declaring record is inadmissible. */
+  resolved_from?: string
 }
 
 /** ONE normalized bridge-to-queue line (spec §4b) appended to
@@ -271,11 +322,29 @@ function dedupeTokens(text: string): string[] {
  * shared significant resumen tokens = a match; tipo/severidad equality
  * REFINES the score (score = shared + tipo-equal + severidad-equal). The
  * suggestions are NON-blocking — the create always proceeds. Deterministic:
- * score desc, then updatedAt desc, then id desc. */
+ * score desc, then updatedAt desc, then id desc — NO ranking is added here
+ * (order = the scorer's, unchanged).
+ *
+ * IDENTITY, NOT POSITION (fb-1874, piece 2): the pool is PROJECTED BY TAIL
+ * before scoring. The unit of the pool is the ID, not the line, so the same id
+ * can never occupy two of the ≤`max` slots (measured: 44 % of a day's archived
+ * offers were re-offers of an id already offered in the same batch) and the
+ * `estado` exhibited is the id's TAIL state, never a superseded line's. A
+ * candidate that is BOTH live and archived is offered ONCE: the LIVE record
+ * WINS (the live ledger is the more recent — the prune only ever appends to the
+ * archive — and it is the one the `duplicate_of` validator can resolve).
+ *
+ * ACCEPTED POOLS (backward compatible — the pre-fb-1874 shape: a bare
+ * `FeedbackRecord[]`): a record WITHOUT a `ledger` tag is LIVE. A bare record
+ * is NEVER labelled `archived` on its own (its own `duplicate_of` field is a
+ * DECLARATION by that record, not an inference about its ledger); only an
+ * entry the CALLER tagged `ledger: 'archive'` is archive-labelled, and a plain
+ * `FeedbackRecord[]` pool (a unit-test pool) therefore yields exactly the same
+ * candidates as before. */
 export function findDuplicateCandidates(
-  records: readonly FeedbackRecord[],
+  records: readonly (FeedbackRecord | FeedbackDedupePoolEntry)[],
   input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
-  opts: { max?: number } = {}
+  opts: { max?: number; liveIndex?: ReadonlyMap<string, FeedbackRecord>; declarationLines?: readonly FeedbackRecord[] } = {}
 ): FeedbackDedupeCandidate[] {
   const max = opts.max ?? 3
   const inputTokens = dedupeTokens(input.resumen)
@@ -285,17 +354,151 @@ export function findDuplicateCandidates(
     const shared = dedupeTokens(record.resumen).filter((token) => inputSet.has(token)).length
     return shared < 2 ? -1 : shared + (record.tipo === input.tipo ? 1 : 0) + (record.severidad === input.severidad ? 1 : 0)
   }
-  const matches = records.filter((record) => scoreOf(record) >= 2)
-  matches.sort((a, b) => (scoreOf(b) - scoreOf(a)) || (b.updatedAt - a.updatedAt) || b.id.localeCompare(a.id))
-  return matches.slice(0, max).map((record) => ({
-    'fb-id': record.id,
-    resumen: record.resumen,
-    tipo: record.tipo,
-    severidad: record.severidad,
-    estado: record.estado,
-    score: scoreOf(record)
-  }))
+  // --- PROJECTION BY TAIL: one entry per ID (a superseded line never offers) --
+  const projected = new Map<string, FeedbackDedupePoolEntry>()
+  for (const entry of records) {
+    const tagged = entry as Partial<FeedbackDedupePoolEntry>
+    const record = tagged.record === undefined ? (entry as FeedbackRecord) : tagged.record
+    const ledger: 'live' | 'archive' = tagged.ledger === 'archive' ? 'archive' : 'live'
+    const current = projected.get(record.id)
+    if (current === undefined) {
+      projected.set(record.id, { record, ledger })
+      continue
+    }
+    if (current.ledger !== ledger) {
+      // Same id, BOTH ledgers: the LIVE copy wins (see the docstring).
+      if (ledger === 'live') projected.set(record.id, { record, ledger })
+      continue
+    }
+    // SAME ledger: a later entry SUPERSEDES an earlier one (both ledgers are
+    // append-order); an out-of-order rewrite falls back to the byId rule —
+    // last write wins — keeping the projection FAITHFUL to the live index.
+    if (ledger === 'live' || current.ledger === 'live' || record.updatedAt >= current.record.updatedAt) projected.set(record.id, { record, ledger })
+  }
+  // --- WHAT EACH OFFER IS (a DECLARATION; the ordering is UNTOUCHED) --------
+  // `declares`: id → the destination that id DECLARES in its `duplicate_of`. A
+  // DECLARATION — `related[]` is a SET, and a membership is a PRESENCE, never
+  // the identity of a destination, so it is NOT used here.
+  //
+  // READ FROM EVERY LINE, NOT ONLY THE TAIL (measured: 3 of a day's 10 real
+  // annexes declare their destination on a SUPERSEDED line only — the emitter
+  // re-emitted the record as `abierto` right after the create path accepted
+  // `duplicate_of`, so the tail no longer carries the field while the ledger
+  // still declares it). The OFFERED `estado` stays the TAIL's (piece 2: the
+  // exhibition is the current state) and the DECLARATION is the ledger's (a
+  // relation is a FACT, and a fact is not retracted by a later line that is
+  // silent about it). PRECEDENCE: archive lines first, LIVE lines last (a live
+  // declaration supersedes an archived copy's); within a ledger the LAST
+  // declaration wins (append order).
+  const asRecord = (entry: FeedbackRecord | FeedbackDedupePoolEntry): FeedbackRecord => {
+    const tagged = entry as Partial<FeedbackDedupePoolEntry>
+    return tagged.record === undefined ? (entry as FeedbackRecord) : tagged.record
+  }
+  const archiveSources = records.filter((entry) => (entry as Partial<FeedbackDedupePoolEntry>).ledger === 'archive').map(asRecord)
+  const liveSources = opts.declarationLines ?? records.filter((entry) => (entry as Partial<FeedbackDedupePoolEntry>).ledger !== 'archive').map(asRecord)
+  const declares = new Map<string, string>()
+  for (const record of [...archiveSources, ...liveSources]) {
+    // ANY line of an id may declare for that id: the declaration belongs to the
+    // ID (the append-only ledger's fact), not to the line's position.
+    if (record.duplicate_of !== undefined) declares.set(record.id, record.duplicate_of)
+  }
+  // `declaredAtTail`: the CURRENT (tail) state still declares that destination —
+  // `destination.tail=false` is the auditable mark of a declaration that
+  // survives only on a superseded line.
+  const declaredAtTail = new Set<string>()
+  for (const [id, entry] of projected) {
+    if (entry.record.duplicate_of !== undefined) declaredAtTail.add(id)
+  }
+  // `declaredBy`: destination id → the record(s) that declare it (the "consumer
+  // canonical"). Read from the SAME declaration sources as `declares` (a
+  // superseded line declares its id's destination too). Used ONLY to LABEL an
+  // offer, never to reorder one.
+  const declaredBy = new Map<string, string[]>()
+  for (const [declaringId, target] of declares) {
+    const list = declaredBy.get(target)
+    if (list === undefined) declaredBy.set(target, [declaringId])
+    else list.push(declaringId)
+  }
+  // A destination resolves against the LIVE ledger (the create path's index) —
+  // never against the pool's membership alone (the pool omits live `duplicado`
+  // records, which are still legal destinations).
+  const resolveLive = (id: string): FeedbackRecord | undefined => opts.liveIndex?.get(id)
+  const isLive = (id: string): boolean => {
+    if (resolveLive(id) !== undefined) return true
+    const pooled = projected.get(id)
+    return pooled !== undefined && pooled.ledger === 'live'
+  }
+  const entries = [...projected.values()].filter(({ record }) => scoreOf(record) >= 2)
+  entries.sort((a, b) => (scoreOf(b.record) - scoreOf(a.record)) || (b.record.updatedAt - a.record.updatedAt) || b.record.id.localeCompare(a.record.id))
+  return entries.slice(0, max).map(({ record, ledger }) => {
+    // LIVE (the ledger tag, never the estado) = a LEGAL `duplicate_of`
+    // destination: `isTerminalEstado('duplicado')` is TRUE and yet a live
+    // `duplicado` stays a legal destination (the create path validates by ID
+    // presence, and a same-state tail is a LEGAL no-op transition).
+    const live = ledger !== 'archive'
+    const destinationId = declares.get(record.id)
+    const destinationLive = destinationId === undefined ? false : isLive(destinationId)
+    const destinationEstado: FeedbackEstado | null = destinationId === undefined
+      ? null
+      : (resolveLive(destinationId) ?? projected.get(destinationId)?.record)?.estado ?? null
+    const declaringIds = declaredBy.get(record.id) ?? []
+    // The declaring records that are INADMISSIBLE: those are the ones this
+    // offer is the RESOLUTION OF (an inadmissible offer that declares a live
+    // destination resolves TO it — it is never merely marked inadmissible).
+    const resolvedFrom = declaringIds.filter((id) => !isLive(id))
+    let relation: FeedbackDedupeCandidate['relation']
+    let relationBecause: string
+    if (live && declaringIds.length > 0) {
+      relation = 'canonical-shared'
+      relationBecause = `live record — a legal duplicate_of destination; also declared as the destination by ${declaringIds.join(', ')}`
+    } else if (live) {
+      relation = 'canonical'
+      relationBecause = 'live record — a legal duplicate_of destination (the create path validates against the live index, so a LIVE estado is never inadmissible, `duplicado` included)'
+    } else if (destinationId !== undefined) {
+      relation = 'twin'
+      relationBecause = `ARCHIVED record declaring duplicate_of=${destinationId} (${destinationLive ? 'which IS live — the offer consequently RESOLVES TO IT: the legal destination is declared, never hidden' : 'which is NOT a live record'}) — an inadmissible offer kept in the pool WITH ITS ESTADO DECLARED`
+    } else {
+      relation = 'archived'
+      relationBecause = 'ARCHIVED record declaring no destination and not live — never a legal duplicate_of destination; STILL OFFERED (the detector is never narrowed: a false destination is not traded for an untraceable false negative)'
+    }
+    const candidate: FeedbackDedupeCandidate = {
+      'fb-id': record.id,
+      resumen: record.resumen,
+      tipo: record.tipo,
+      severidad: record.severidad,
+      estado: record.estado,
+      score: scoreOf(record),
+      admissible: live,
+      relation,
+      relation_because: relationBecause
+    }
+    if (destinationId !== undefined) candidate.destination = { 'fb-id': destinationId, estado: destinationEstado, live: destinationLive, tail: declaredAtTail.has(record.id) }
+    if (declaringIds.length > 0) candidate.linked_from = declaringIds[0]
+    if (resolvedFrom.length > 0) candidate.resolved_from = resolvedFrom[0]
+    return candidate
+  })
 }
+
+/** The unit divergence of the two instruments that both say "size" of the same
+ * store (fb-1874, piece 6 — DECLARED here because nobody had written it):
+ * the LIVE CAP counts LINES (an id's transitions AND every evidence merge are
+ * new lines; `pruneToCap` evicts a terminal id's WHOLE group), while the dedupe
+ * pool counts IDS (a same-id tail is a SUPERSEDING line, never a second
+ * offer). Both cadences are legitimate and MEASURED (`live` line counts and the
+ * `prunedLines` the prune moved are logged); what was illegitimate was that the
+ * two instruments reasoned in different units WITHOUT IT BEING WRITTEN. */
+export function feedbackUnitDivergence(): string {
+  return 'the live cap is measured in LINES (a transition or an evidence merge appends a NEW tail line for the same id; pruneToCap evicts a terminal id\'s whole line group) while the dedupe pool is measured in IDS (a same-id tail SUPERSEDES its line: one offer per id). Both units are legitimate; a line bound and an id bound are never interchangeable.'
+}
+
+/** A dedupe pool entry: a RECORD in the live index OR in the archive. The
+ * `ledger` tag is REQUIRED for an archive entry — the same id can exist in BOTH
+ * ledgers (measured: 11 ids today; the artifact documents 22) and the two
+ * copies are DIFFERENT records, so "archived" is a property of the LINE's
+ * ledger, never of the id. */
+export type FeedbackDedupePoolEntry =
+  | { record: FeedbackRecord; ledger?: 'live' }
+  | { record: FeedbackRecord; ledger: 'archive' }
 
 /** Stale-review window constants (RD spec §4c — adapted from the K8s
  * stale bot to the org's scale). */
@@ -692,6 +895,20 @@ export class FeedbackStore {
    * on demand here). Lexical: ≥2 shared significant resumen tokens (tipo/
    * severidad refine the score). A missing/malformed archive degrades to the
    * live pool (dedupe is best-effort suggestions — creates never block).
+   *
+   * IDENTITY, NOT POSITION (fb-1874): the two halves are handed to the scorer
+   * TAGGED WITH THEIR LEDGER (`ledger: 'archive'`), because the SAME id can
+   * exist in BOTH files as DIFFERENT records (measured: 11 ids today; the
+   * artifact documents 22) — a BARE record array could not express "this id has
+   * an archived copy". The scorer PROJECTS BY TAIL, so the unit of the pool is
+   * the ID: the same id is never offered twice (measured: 44 % of a day's
+   * archived offers were re-offers of an id already offered in the batch) and
+   * the `estado` exhibited is the id's TAIL state, never a superseded line's.
+   * A live `duplicado` is NOT OFFERED (the filter above, kept) but IS still a
+   * legal destination: the create path validates `duplicate_of` by ID PRESENCE
+   * in this same live index, so `liveIndex` is handed over for RESOLUTION (a
+   * twin whose declared destination is a live `duplicado` resolves to it — the
+   * legal destination is never hidden).
    */
   async dedupeCandidates(
     input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
@@ -704,7 +921,11 @@ export class FeedbackStore {
     } catch {
       archived = [] // a malformed archive must never break a create
     }
-    return findDuplicateCandidates([...live, ...archived], input, opts)
+    const pool: FeedbackDedupePoolEntry[] = [
+      ...live.map((record): FeedbackDedupePoolEntry => ({ record, ledger: 'live' })),
+      ...archived.map((record): FeedbackDedupePoolEntry => ({ record, ledger: 'archive' }))
+    ]
+    return findDuplicateCandidates(pool, input, { ...opts, liveIndex: this.byId, declarationLines: this.records })
   }
 
   /** LOOP FASE 1: the duplicate-merge — append the dup's evidence to the

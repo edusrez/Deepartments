@@ -60,7 +60,15 @@ const CLOSE = "  }, 'deepartments: host-plane tools')"
 // declaring the OPT-IN wait lever). MEASURED with the same extraction this file
 // performs, from the repo root:
 //   node -e "const{createHash}=require('node:crypto');const fs=require('node:fs');const src=fs.readFileSync('packages/dshd-orchestration/src/tools.ts','utf8');const B='  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the';const C=\"  }, 'deepartments: host-plane tools')\";const f=src.indexOf(B),l=src.indexOf(C);console.log(createHash('md5').update(src.slice(f,l+C.length)+'\n','utf8').digest('hex'))"
-const FROZEN_MD5 = '6d722642f8284422ea666bab58e864e7'
+// RE-FROZE 2026-09-17 (lane fb-1879, the `dept_feedback` OUTPUT SCHEMA vs the
+// fb-1874 candidate emission / run token 38362679):
+// 6d722642f8284422ea666bab58e864e7 → 8ffce0e12fc65ade2050e54a5d084932 — ONE
+// ADDITIVE in-span change: `feedbackDedupeCandidateSchema` declares the 6 fields
+// the emission was ALREADY producing (`admissible`, `relation`,
+// `relation_because`, `destination`, `linked_from`, `resolved_from`), and the 6
+// pre-existing properties are untouched. MEASURED with the SAME command above
+// (the same extraction this file performs).
+const FROZEN_MD5 = '8ffce0e12fc65ade2050e54a5d084932'
 
 const md5 = (s) => createHash('md5').update(s, 'utf8').digest('hex')
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length
