@@ -108,12 +108,160 @@ const execFileP = promisify(execFileCb)
  * the next tick. Applies to ALL 4 daemon intervals (health / agenda scheduler /
  * parallel-monitor here; the redelivery sweep wraps inline in the tools
  * factory — the same pattern, same comment anchor). */
-function wrapDaemonTick(logger: { warn(message: string): void }, label: string, fn: () => void): () => void {
+/** The daemon-tick WATCHDOG CAP (ms) — the TIME CAP on an in-flight tick.
+ * N = 120 s = 6 × PARALLEL_MONITOR_INTERVAL_MS (20 s — the SHORTEST of the 3
+ * wrapped intervals), 4 × the agenda scheduler (30 s) and 2 × the system-health
+ * default (60 s). WHY THIS NUMBER:
+ *  - LOWER bound (why not less): the cap must NOT fire on a slow-but-PROGRESSING
+ *    tick, or it would re-open the very overlap the guard exists to prevent
+ *    (the guard deliberately trades an overlap for a cadence that follows the
+ *    tick's duration; the skip counter is the loud trace of that regime). The
+ *    two slow bodies are the agenda scheduler — which AWAITS a real dispatch
+ *    (runJobForDepartment → agents.create → bus delivery, cold-resume paths
+ *    included) — and the system-health tick, which reads multi-MB JSONL and runs
+ *    the whole watcher set. 6 × the fastest interval leaves a wide margin above
+ *    "slow"; a cap of 2–3 intervals would fire during a legitimately slow
+ *    dispatch and overlap in NORMAL operation.
+ *  - UPPER bound (why not more): a mute HEALTH daemon loses the org's vigilance,
+ *    invisibly — the host: "eso es PEOR que el doble dispatch que el guard
+ *    arregla". 120 s bounds the mute at ≤2 suppressed health ticks / ≤4 agenda
+ *    ticks, i.e. it stays in the low-minutes range instead of the 5–10-minute
+ *    silence a per-interval multiple (e.g. 10 × interval = 600 s for health)
+ *    would produce.
+ * HONESTY (fb-29): N rests on those STRUCTURAL anchors + the priority the host
+ * stated, NOT on a measured percentile of real tick durations — no observable
+ * duration datum exists in the state files this role may read (the systemd
+ * journal is out of scope). It is a declared engineering choice, not a
+ * measurement. */
+const DAEMON_TICK_WATCHDOG_MS = 120_000
+
+/** unref-if-available for a timer handle: the daemon-tick WATCHDOG must never be
+ * the only thing holding the event loop open (a dispose while a tick is wedged
+ * must not wait out the cap). Best-effort + shape-tolerant: a host without
+ * `unref` (or a test-injected fake handle) is a no-op. */
+function unrefTimerIfPossible(handle: unknown): void {
+  const unref = (handle as { unref?: () => void }).unref
+  if (typeof unref === 'function') unref.call(handle)
+}
+
+function wrapDaemonTick(logger: { warn(message: string): void }, label: string, fn: () => void | Promise<unknown>): () => void {
+  // RE-ENTRY (overlap) GUARD — added 2026-09-16 after the measured overlap class
+  // (source: research-head; independently re-verified here). The tick bodies are
+  // fire-and-forget (`void jobsService.runSchedulerTick(...)`, `void
+  // daemon.tick()`, `pending = healthService.runDaemonTick(...)`), so a tick
+  // that takes LONGER than its interval lets the NEXT setInterval fire start
+  // with the previous one STILL IN FLIGHT: two concurrent readers/writers of the
+  // SAME state file (`parallel-monitors-state.json` — the non-atomic
+  // `readFileSync`+`writeFile` at readParallelMonitorsState/writeParallelMonitorsState),
+  // the LOST UPDATE class (two ticks write their independently-read snapshot;
+  // the later write discards the earlier one's `lastFiredAt`/`seenEventIds`/
+  // `cursor`) and the DOUBLE-DISPATCH class (two ticks both see an event as
+  // net-new before either persists `seenEventIds` → the same event spawns two
+  // researchers).
+  //
+  // The guard needs the tick's COMPLETION SIGNAL, which is why `fn` may now
+  // return a promise: a flag set/cleared around a synchronous `fn()` that
+  // DETACHES its async work can never observe an in-flight tick (it would be a
+  // silent no-op guard — the exact invisible-fix class). The bodies therefore
+  // `return` the promise they already compute; the intervals and the daemon
+  // LOGIC are otherwise untouched.
+  //
+  // SKIP-WITH-LOG, NEVER SILENT: a skipped tick is ALWAYS logged, and the log
+  // carries the CONSECUTIVE-skip counter so a pathological case (a tick that
+  // ALWAYS outlives its interval ⇒ every subsequent tick is skipped) is VISIBLE
+  // as a growing count instead of the daemon going quiet. NOTE (regime, stated
+  // honestly): the guard trades an OVERLAP for a cadence that follows the tick's
+  // duration — it can LOSE a tick, and a tick that never settles would suppress
+  // every later one; the counter is what makes that loud. The follow-up that
+  // this comment used to propose (a watchdog that force-clears a never-settling
+  // tick) is IMPLEMENTED below — as a TIME cap, not a skip count (a cap is
+  // interval-independent: the same guard serves 20 s, 30 s and 60 s daemons).
+  //
+  // WATCHDOG CAP (2026-09-17 — closes the NEVER-SETTLING class the previous
+  // builder DECLARED instead of hiding). The measured regime was: a tick that
+  // never settles ⇒ 1 run / 7 skips ⇒ every LATER tick suppressed, FOREVER, with
+  // NO self-repair — a PERMANENT SILENCE, not an error. And it is reachable by
+  // code that ALREADY exists: `createMonitor`/`fetchEvents` (parallel-monitor)
+  // issue a BARE `fetch` with NO AbortSignal and NO timeout, so a hung fetch IS
+  // the stuck-tick path — for the agenda scheduler, the parallel monitor AND the
+  // system-HEALTH daemon (a mute health daemon loses the org's vigilance,
+  // invisibly).
+  // ⇒ DAEMON_TICK_WATCHDOG_MS caps the in-flight window: when the tick has NOT
+  // settled within the cap the guard is FORCE-RELEASED (auto-repair — the next
+  // tick enters) and the event is LOUD (warn, never silence), with
+  // `consecutiveSkips` RESET so the skip log never lies about a window the
+  // watchdog already closed.
+  // ⇒ LATE SETTLEMENT — the trap that would silently UNDO the guard: the
+  // original promise is STILL ALIVE when the cap fires. A blind `settled()` from
+  // it would clear an `inFlight` that ALREADY BELONGS TO A NEWER TICK → the
+  // overlap the guard exists to prevent comes back. Every tick therefore owns a
+  // GENERATION token (`myGeneration`) and a settlement only touches the guard
+  // while the generation is STILL ITS OWN; a late settlement of a timed-out tick
+  // is INERT (and logged as such — never silent).
+  let inFlight = false
+  let consecutiveSkips = 0
+  // Bumped by EVERY tick start; a settlement of an older tick can never clear a
+  // guard a newer tick owns.
+  let generation = 0
+  // How many times the cap force-released this daemon's guard (a REPEATED count
+  // is the signature of a WEDGED body — not merely a slow one — and is carried in
+  // the watchdog log so the number is never a one-shot that scrolls away).
+  let watchdogFires = 0
   return () => {
-    try {
-      fn()
-    } catch (error: unknown) {
+    if (inFlight) {
+      consecutiveSkips += 1
+      logger.warn(`[deepartments] ${label} tick SKIPPED — the previous tick is still in flight (overlap guard; ${consecutiveSkips} consecutive skip(s): the daemon does not overlap its own state writes — this is NOT a silent skip, and a persistent count means the tick outlives its interval; the guard is force-released by the ${DAEMON_TICK_WATCHDOG_MS / 1000}s watchdog if that tick NEVER settles)`)
+      return
+    }
+    inFlight = true
+    const myGeneration = ++generation
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    /** Release the guard ONLY for the tick that OWNS it (the generation token).
+     * `false` = the settlement arrived AFTER a watchdog force-release followed by
+     * a NEWER tick — the guard is deliberately LEFT ALONE (a blind release here
+     * would re-open the overlap class) and the anomaly is logged. */
+    const releaseIfMine = (): boolean => {
+      if (generation !== myGeneration) {
+        logger.warn(`[deepartments] ${label} tick settled LATE (after the ${DAEMON_TICK_WATCHDOG_MS / 1000}s watchdog already force-released it): the in-flight guard now belongs to a NEWER tick and is LEFT ALONE — releasing it here would let two ticks overlap the same state file (the class the guard prevents)`)
+        return false
+      }
+      inFlight = false
+      consecutiveSkips = 0
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog)
+        watchdog = undefined
+      }
+      return true
+    }
+    const settled = (): void => { void releaseIfMine() }
+    const failed = (error: unknown): void => {
+      releaseIfMine()
       logger.warn(`[deepartments] ${label} tick failed: ${error instanceof Error ? error.message : String(error)} (wrapped — the daemon lives)`)
+    }
+    try {
+      const result = fn()
+      // A promise-returning body owns the in-flight window until it SETTLES;
+      // a synchronous body (legacy shape) releases it immediately.
+      if (result !== undefined && typeof (result as Promise<unknown>).then === 'function') {
+        watchdog = setTimeout(() => {
+          watchdog = undefined
+          if (generation !== myGeneration) return
+          // NEVER-SETTLING TICK: release the guard so the daemon RESUMES, and say
+          // it LOUD (the skipped-tick counter is reset — the window it counted is
+          // being closed here, so keeping the count would misdate it).
+          consecutiveSkips = 0
+          inFlight = false
+          watchdogFires += 1
+          logger.warn(`[deepartments] ${label} tick WATCHDOG: the tick did NOT settle within ${DAEMON_TICK_WATCHDOG_MS} ms — the overlap guard is FORCE-RELEASED so the next tick can ENTER (auto-repair; without this the daemon would go permanently and silently quiet). The timed-out tick's promise is STILL PENDING: its late settlement is INERT unless it still owns the guard (generation-checked). consecutive skips reset to 0. Watchdog fire #${watchdogFires} for this daemon — a REPEATING count means the tick body is WEDGED (look for an unbounded fetch/await inside it), not merely slow; the root fix is a timeout/AbortSignal INSIDE that body.`)
+        }, DAEMON_TICK_WATCHDOG_MS)
+        unrefTimerIfPossible(watchdog)
+        void (result as Promise<unknown>).then(settled, failed)
+      } else {
+        settled()
+      }
+    } catch (error: unknown) {
+      // The INVARIANTE DE TICKS: a synchronous throw never escapes the interval.
+      failed(error)
     }
   }
 }
@@ -4998,25 +5146,24 @@ export function applyInvoke(ctx: Context, config: Config) {
     // INVARIANTE DE TICKS (post-incidente 2026-09-04): the interval callback
     // body is WRAPPED (wrapDaemonTick) — a synchronous throw never escapes the
     // setInterval (the daemon-liveness invariant, all 4 daemon intervals).
-    const tick = wrapDaemonTick(ctx.logger, 'agenda scheduler', (): void => {
+    const tick = wrapDaemonTick(ctx.logger, 'agenda scheduler', (): Promise<void> => {
       if (jobsService !== undefined) {
-        void jobsService.runSchedulerTick({ now: () => Date.now() })
-      } else {
-        void runAgendaSchedulerTick({
-          now: () => Date.now(),
-          departments: org.departments,
-          repoRoot,
-          calendarStateDir: stateDir,
-          jobRunsStateDir: stateDir,
-          headForDepartment: schedulerHeadForDepartment,
-          runJob: schedulerRunJob,
-          onAutoRunSkip: schedulerOnAutoRunSkip,
-          notifyHead: schedulerNotifyHead,
-          departmentForEntry: schedulerDepartmentForEntry,
-          departmentForJob: schedulerDepartmentForJob,
-          logger: ctx.logger
-        })
+        return jobsService.runSchedulerTick({ now: () => Date.now() })
       }
+      return runAgendaSchedulerTick({
+        now: () => Date.now(),
+        departments: org.departments,
+        repoRoot,
+        calendarStateDir: stateDir,
+        jobRunsStateDir: stateDir,
+        headForDepartment: schedulerHeadForDepartment,
+        runJob: schedulerRunJob,
+        onAutoRunSkip: schedulerOnAutoRunSkip,
+        notifyHead: schedulerNotifyHead,
+        departmentForEntry: schedulerDepartmentForEntry,
+        departmentForJob: schedulerDepartmentForJob,
+        logger: ctx.logger
+      })
     })
     const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
     return () => {
@@ -5140,7 +5287,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // INVARIANTE DE TICKS (post-incidente 2026-09-04): the interval callback
       // body is WRAPPED (wrapDaemonTick) — a synchronous throw never escapes
       // the setInterval (the daemon-liveness invariant, all 4 daemon intervals).
-      const interval = setInterval(wrapDaemonTick(ctx.logger, 'parallel-monitor', () => { void daemon.tick() }), PARALLEL_MONITOR_INTERVAL_MS)
+      const interval = setInterval(wrapDaemonTick(ctx.logger, 'parallel-monitor', () => daemon.tick()), PARALLEL_MONITOR_INTERVAL_MS)
       return () => { clearInterval(interval) }
     }, 'deepartments: parallel-monitor daemon')
   }
@@ -5351,7 +5498,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // body → a builder throw escaped the setInterval → exit 7 x 609 restarts.
       // The callback is now NOEXCEPT: the body's throw is logged and the daemon
       // lives for the next tick.
-      const tick = wrapDaemonTick(ctx.logger, 'system-health', (): void => {
+      const tick = wrapDaemonTick(ctx.logger, 'system-health', (): Promise<void> => {
         // POST-INCIDENTE 2026-09-04 — the per-tick session-surface probe (the
         // heartbeat datum — decision 2). Computed per tick (cheap) so the
         // heartbeat always reports the CURRENT runtime surface.
@@ -5524,7 +5671,13 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Chain the in-flight run for the ordered dispose drain: an overlapping
         // tick (a slow run vs a fast interval) is ALSO awaited — allSettled
         // never rejects, so a tick failure can never wedge the shutdown.
+        // POST 2026-09-16: the SAME promise is RETURNED to wrapDaemonTick — the
+        // overlap guard needs it to know when the tick SETTLED (a synchronous
+        // window around a detached `pending` could never observe the in-flight
+        // tick, so the guard would be a silent no-op). Behavior unchanged: the
+        // chain is still allSettled (never rejects) and the drain is untouched.
         inFlight = Promise.allSettled(inFlight !== undefined ? [inFlight, pending] : [pending]).then(() => undefined)
+        return inFlight
       })
       const interval = setInterval(tick, healthIntervalMs)
       return async () => {
