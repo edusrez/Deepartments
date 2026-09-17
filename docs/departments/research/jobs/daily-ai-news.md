@@ -55,6 +55,32 @@ last ~**48h** and explain **why it matters** per item.
   "extend, never duplicate" pattern (fb-94/113/141) — never attempt `edit`;
   it fails with "unknown tool edit".
 
+### ROLLING SURFACES — the de-dup unit is the ITEM, not the URL
+(head's call, 2026-09-17; fixes a rule that silently ate releases)
+
+**A FIXED URL WHOSE CONTENT ROLLS is de-duplicated by ITEM (version + date),
+NEVER by URL.** The URL value is CONSTANT for such a surface, so a URL-based
+rule suppresses it **forever after its first citation** — the item is lost even
+though it is fresh and in-window. This is not hypothetical: it cost **THREE
+consecutive rounds** of Claude Code releases under the old rule, including
+2.1.274 (Sept 17), the day's most harness-relevant release.
+
+- **The rolling surfaces (check these EVERY round, even when their URL is
+  already in `seenUrls`):** `code.claude.com/docs/en/changelog`,
+  `github.blog/changelog`, `developers.openai.com/api/docs/changelog`,
+  `mistral.ai/news`, `anthropic.com/news`.
+- **How to apply it:** for one of these surfaces, look for items NEWER than the
+  one already recorded. A newer version/date ⇒ **REPORT IT** (it is a new item),
+  and record the specific item (e.g. `code.claude.com/docs/en/changelog` @
+  2.1.274 / 2026-09-17) so the next round can tell which items are already
+  covered. If nothing is newer, nothing is reported — say so.
+- **The URL may still be appended to `seenUrls`** (it is harmless): on a rolling
+  surface it simply no longer suppresses anything. The **item** is the unit of
+  de-dup, and the item record is what prevents re-reporting the same release.
+- **Bound with it:** an item that is **in-window** and was never covered is
+  reportable even if its URL is old. Do not drop a release merely because the
+  domain appears in the ledger; ask *"is this ITEM new?"*
+
 ### Ledger counts (report the TRUE lengths — q-i-93, discipline of count)
 
 - **Count from the FILE, never from memory or arithmetic on prior reports.**
@@ -94,6 +120,10 @@ last ~**48h** and explain **why it matters** per item.
   403 (do not attempt; capture via search-provider + dated secondaries),
   `www.ainvest.com` = 403 (one attempt max, then search snippet). Table
   normally grows with each round — check it every time.
+- **POSITIVE row worth knowing (round 09-17):** `alignment.openai.com` answers
+  **200 with full text** even though the `openai.com` apex is 403 ⇒ use it as a
+  **direct primary** for OpenAI's disclosures (e.g. `/misalignment-reports/`);
+  do not confuse the two hosts.
 
 ## Report
 
@@ -181,5 +211,8 @@ hole).
   this job definition live in the repo and are curated by the head, not by the
   worker.)
 - Freshness and de-duplication are hard constraints; when in doubt, exclude.
+  **Exception, and it is the one that matters: the rolling-surface rule above
+  WINS over exclusion** — for a fixed-URL rolling surface, a NEW item is
+  reportable even though the URL is already known.
 - Reference prior report paths you build on (≤ 3 per category), e.g. the
   previous brief `reports/daily-news/<YYYY-MM-DD>.md` and the ledger.

@@ -90,6 +90,11 @@ presupuesto para dominios 403). **Updated 2026-09-10** (fb-329 + fb-330 + fb-333
 2026-09-16 (2ª edición)** (fb-1527 → PLEGADA al canónico **fb-177** por dictamen
 QH: cuarta clase de fallo + `36kr.com` + el negativo del feed de modelos de HF
 + la regla de «mismo dominio registrable» en la propuesta de arreglo).
+**Updated 2026-09-17** (fb-1779 → PLEGADA al canónico vivo **fb-442** por
+dictamen QH — «un dominio bloqueado que no tiene fila en la tabla»; edición
+documental RD, curación del head: **2 filas nuevas**, una NEGATIVA y una
+POSITIVA — `www.axios.com` = 403 anti-bot, y **`alignment.openai.com`** =
+fila POSITIVA: subdominio del MISMO publicador cuyo apex está bloqueado).
 
 **Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
 per domain per round — a single HTTP 403 confirms the state and exhausts the
@@ -125,11 +130,13 @@ en el error** (y acotar la URL de destino).
 | `tmcnet.com` | **BLOCKED** | HTTP 403 anti-bot (fb-97/103) | do not attempt; use mirror list |
 | `zexprwire.com` | **BLOCKED** | HTTP 403 anti-bot (fb-98) | do not attempt; use mirror list |
 | `openai.com` (openai.com/index/*) | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08, 09-10; fb-211) | do not attempt; capture via search-provider content + dated secondaries |
+| `alignment.openai.com` | **OK (POSITIVA)** | **HTTP 200 con texto COMPLETO** (round 09-17; fb-1779) — **subdominio fetchable del MISMO publicador cuyo apex (`openai.com`) es 403** | **usar como primaria DIRECTA** para las divulgaciones de OpenAI (p. ej. `/misalignment-reports/`); **NO confundir con el apex bloqueado** — son hosts distintos |
 | `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
 | `es.dataconomy.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-08, fb-236; corroboración GPT-6 Astra) | do not attempt; use dated secondaries (e.g. gadgetsnow/digitaltrends) |
 | `pricepertoken.com/model-releases` | **UNRELIABLE** | HTTP 404 URL drift (round 09-08; fb-236) | do not attempt; use ThursdAI / aireleasetracker for release-gap checks |
 | `media.defense.gov` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-286) — gov advisories (e.g. CSA) not fetch-able | one attempt max; capture via search-provider + dated secondaries |
 | `www.ainvest.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-297) | one attempt max; capture via search-provider snippet |
+| `www.axios.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-17; fb-1779 → PLEGADA a fb-442) — **reproducido por el QD horas después, verbatim ⇒ determinista, no un fallo de una sola llamada** | **one attempt max** (regla de presupuesto `fb-286`); capturar por snippet del search-provider o **secundaria fechada** |
 | `linux.do` | **BLOCKED** | HTTP 403 (round 09-10; fb-329) — 1 intento, abandonado | do not attempt; su contenido (comunidad CN) ES legible por el **mirror `locdd.com`** (Discourse JSON, HTTP 200) |
 | `status.opencode.ai` | **UNREACHABLE** | fetch failed desde este entorno; **sin status page verificable**, y no distinguible como DNS vs anti-bot (round 09-10; fb-330) | do not attempt; usar el patrón del status-page-repo (p. ej. Upptime en GitHub) o el releases API |
 | `www.investing.com` | **BLOCKED** | **403 anti-bot plano** vs datacenter IP (round 09-10; fb-333) | do not attempt; snippet del search-provider o mirror fechado |
