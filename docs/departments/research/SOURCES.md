@@ -139,10 +139,30 @@ presupuesto para dominios 403). **Updated 2026-09-10** (fb-329 + fb-330 + fb-333
 QH: cuarta clase de fallo + `36kr.com` + el negativo del feed de modelos de HF
 + la regla de «mismo dominio registrable» en la propuesta de arreglo).
 **Updated 2026-09-17** (fb-1779 → PLEGADA al canónico vivo **fb-442** por
-dictamen QH — «un dominio bloqueado que no tiene fila en la tabla»; edición
-documental RD, curación del head: **2 filas nuevas**, una NEGATIVA y una
-POSITIVA — `www.axios.com` = 403 anti-bot, y **`alignment.openai.com`** =
-fila POSITIVA: subdominio del MISMO publicador cuyo apex está bloqueado).
+dictamen QH; edición documental RD, curación del head: **3 filas nuevas y 1
+regla de alcance** — `www.axios.com` = 403 anti-bot (reproducido por el QD ⇒
+determinista), `community.cloudflare.com` = 403 anti-bot (**la fila que `fb-442`
+pedía desde el 09-08**), **`alignment.openai.com` = fila POSITIVA**, y la
+**regla de ALCANCE POR SUBDOMINIO** que las tres comparten).
+
+### ⚠️ SCOPING RULE — a row is scoped by SUBDOMAIN/PREFIX, NEVER by registrable domain
+**(head's rule, 2026-09-17; two independently measured instances)**
+
+**A `BLOCKED` row for one prefix does NOT extend to its sibling hosts.** Reading
+a blocked row as "the whole publisher is unreachable" is an **error of scope**,
+and it costs real primary sources. Two measured instances:
+
+| Apex / one prefix | Sibling host | Consequence |
+|---|---|---|
+| `openai.com` (index/*) → **403** | `alignment.openai.com` → **200, full text** | the subdomain is a **valid DIRECT primary** for OpenAI's disclosures |
+| `investor.salesforce.com` → **403** | `www.salesforce.com` → **200** | a blanket "salesforce.com = OK" or "= blocked" row would **mislead** either way |
+
+**⇒ Before declaring a publisher unreachable: GREP THIS TABLE FOR A POSITIVE ROW
+ON A SIBLING HOST.** An apex being blocked is **NOT** evidence that its
+subdomains are. Where a row is scoped to a prefix, the row SAYS SO (`(index/*)`,
+`investor.*`) — and that qualifier is **load-bearing, not decoration**.
+*(Third instance of the same asymmetry, carried in a source record rather than
+here: `sources/salesforce-aiforce-interface-layer.md` § Fetch reliability.)*
 
 **Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
 per domain per round — a single HTTP 403 confirms the state and exhausts the
@@ -177,7 +197,7 @@ en el error** (y acotar la URL de destino).
 | `businesswire.com` (www + secure) | **UNRELIABLE** | systematic 30 s timeout (fb-96/102/104) | one attempt max, then vendor primary |
 | `tmcnet.com` | **BLOCKED** | HTTP 403 anti-bot (fb-97/103) | do not attempt; use mirror list |
 | `zexprwire.com` | **BLOCKED** | HTTP 403 anti-bot (fb-98) | do not attempt; use mirror list |
-| `openai.com` (openai.com/index/*) | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08, 09-10; fb-211) | do not attempt; capture via search-provider content + dated secondaries |
+| `openai.com` (**scoped: `openai.com/index/*`**) | **BLOCKED — SCOPE, read the row** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08, 09-10; fb-211) — ⚠️ **the block is recorded for the `index/*` prefix, NOT for every subdomain**: see `alignment.openai.com` below | do not attempt; capture via search-provider content + dated secondaries — **and check for a POSITIVE sibling row first (scoping rule above)** |
 | `alignment.openai.com` | **OK (POSITIVA)** | **HTTP 200 con texto COMPLETO** (round 09-17; fb-1779) — **subdominio fetchable del MISMO publicador cuyo apex (`openai.com`) es 403** | **usar como primaria DIRECTA** para las divulgaciones de OpenAI (p. ej. `/misalignment-reports/`); **NO confundir con el apex bloqueado** — son hosts distintos |
 | `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
 | `es.dataconomy.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-08, fb-236; corroboración GPT-6 Astra) | do not attempt; use dated secondaries (e.g. gadgetsnow/digitaltrends) |
@@ -185,6 +205,7 @@ en el error** (y acotar la URL de destino).
 | `media.defense.gov` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-286) — gov advisories (e.g. CSA) not fetch-able | one attempt max; capture via search-provider + dated secondaries |
 | `www.ainvest.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-297) | one attempt max; capture via search-provider snippet |
 | `www.axios.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-17; fb-1779 → PLEGADA a fb-442) — **reproducido por el QD horas después, verbatim ⇒ determinista, no un fallo de una sola llamada** | **one attempt max** (regla de presupuesto `fb-286`); capturar por snippet del search-provider o **secundaria fechada** |
+| `community.cloudflare.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (**fb-442**, filed 2026-09-08 against THIS table and open until this row existed) — **el endpoint `.json` de Discourse (`.json`) TAMBIÉN da 403**, mientras OTROS mirrors Discourse (p. ej. `locdd.com`) sí devuelven 200 con JSON ⇒ **bloquea el DOMINIO, no el hilo**: el contenido existe y es alcanzable por snippet | **one attempt max**; snippet del search-provider o **mirror Discourse** (`locdd.com`); no concluir «el hilo no existe» |
 | `linux.do` | **BLOCKED** | HTTP 403 (round 09-10; fb-329) — 1 intento, abandonado | do not attempt; su contenido (comunidad CN) ES legible por el **mirror `locdd.com`** (Discourse JSON, HTTP 200) |
 | `status.opencode.ai` | **UNREACHABLE** | fetch failed desde este entorno; **sin status page verificable**, y no distinguible como DNS vs anti-bot (round 09-10; fb-330) | do not attempt; usar el patrón del status-page-repo (p. ej. Upptime en GitHub) o el releases API |
 | `www.investing.com` | **BLOCKED** | **403 anti-bot plano** vs datacenter IP (round 09-10; fb-333) | do not attempt; snippet del search-provider o mirror fechado |
