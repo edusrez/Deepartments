@@ -55,31 +55,64 @@ last ~**48h** and explain **why it matters** per item.
   "extend, never duplicate" pattern (fb-94/113/141) — never attempt `edit`;
   it fails with "unknown tool edit".
 
-### ROLLING SURFACES — the de-dup unit is the ITEM, not the URL
-(head's call, 2026-09-17; fixes a rule that silently ate releases)
+### THE DE-DUP UNIT IS THE ITEM — on BOTH axes (head's call, 2026-09-17)
+**(fixes two rules that were each silently eating fresh material)**
 
-**A FIXED URL WHOSE CONTENT ROLLS is de-duplicated by ITEM (version + date),
-NEVER by URL.** The URL value is CONSTANT for such a surface, so a URL-based
-rule suppresses it **forever after its first citation** — the item is lost even
-though it is fresh and in-window. This is not hypothetical: it cost **THREE
-consecutive rounds** of Claude Code releases under the old rule, including
-2.1.274 (Sept 17), the day's most harness-relevant release.
+**Read this whole subsection before excluding anything.** The ledger has TWO
+arrays and each one, applied literally, suppresses material that is genuinely
+new. Both failures have the same shape: **the ledger stores a CONSTANT (a fixed
+URL, a subject name) and the rule treats that constant as if it were the ITEM.**
+
+#### Axis 1 — a FIXED URL whose content ROLLS
+**A fixed URL whose content rolls is de-duplicated by ITEM (version + date),
+NEVER by URL.** The URL value is CONSTANT for such a surface, so a URL rule
+suppresses it **forever after its first citation**. This is not hypothetical: it
+cost **THREE consecutive rounds** of Claude Code releases, including 2.1.274
+(Sept 17), the day's most harness-relevant release.
 
 - **The rolling surfaces (check these EVERY round, even when their URL is
   already in `seenUrls`):** `code.claude.com/docs/en/changelog`,
   `github.blog/changelog`, `developers.openai.com/api/docs/changelog`,
   `mistral.ai/news`, `anthropic.com/news`.
-- **How to apply it:** for one of these surfaces, look for items NEWER than the
-  one already recorded. A newer version/date ⇒ **REPORT IT** (it is a new item),
-  and record the specific item (e.g. `code.claude.com/docs/en/changelog` @
-  2.1.274 / 2026-09-17) so the next round can tell which items are already
-  covered. If nothing is newer, nothing is reported — say so.
-- **The URL may still be appended to `seenUrls`** (it is harmless): on a rolling
-  surface it simply no longer suppresses anything. The **item** is the unit of
-  de-dup, and the item record is what prevents re-reporting the same release.
-- **Bound with it:** an item that is **in-window** and was never covered is
-  reportable even if its URL is old. Do not drop a release merely because the
-  domain appears in the ledger; ask *"is this ITEM new?"*
+- **How to apply it:** look for items NEWER than the one already recorded. A
+  newer version/date ⇒ **REPORT IT**, and record the specific item (e.g.
+  `code.claude.com/docs/en/changelog` @ 2.1.274 / 2026-09-17) so the next round
+  can tell which items are already covered. If nothing is newer, say so.
+- **The URL may still be appended to `seenUrls`** (harmless there): on a rolling
+  surface it simply no longer suppresses anything.
+
+#### Axis 2 — a TOPIC SLUG is a SUBJECT, not an item
+**A topic slug in `seenTopics` suppresses the ITEM that was reported under it —
+it does NOT suppress every FUTURE artifact belonging to that same subject.**
+A slug such as `typesafe-system-one-jev` or `openai-misalignment-reports-index`
+names a **subject**, and a healthy subject keeps producing new, separately
+reportable artifacts (a vendor failure-mode page; a third-party open harness;
+a new notice; a new release of the same product).
+
+- **The question to ask is per-ARTIFACT, not per-subject:** *is this specific
+  artifact — this page, repo, notice, version — already reported?* A **new URL
+  that is not in `seenUrls` is presumptively NEW**, even when `seenTopics`
+  already carries its subject. **Absence from `seenUrls` is the operative test;
+  presence in `seenTopics` is NOT a veto.**
+- **When you report such an item, append a NEW, MORE SPECIFIC slug** rather than
+  leaning on the broad existing one (e.g. `typesafe-jev-post-launch-deltas`
+  alongside `typesafe-system-one-jev`) — that is what keeps the record honest
+  for the next round.
+- **The settled/unswept boundary, stated so it is not over-read:** this does NOT
+  reopen the *clauses of an already-covered launch* (a launch's price, dates and
+  capability list, once covered, stay covered — do not re-report them as news).
+  What it DOES keep open is **material that is new in its own right**: a new
+  artifact, a new third-party build, a new disclosure, a new version. If the
+  monitor item re-serves an old subject, **say plainly that its clauses are NULO
+  as news and report only the genuinely new artifacts.**
+
+#### Why both clauses live together
+Exclusion is the default for anything already covered, and both axes are
+**exceptions that WIN over it**. Historic case that proves the need for the
+second one: the 2026-09-17 brief excluded a vendor's brand-new failure-mode page
+and a real third-party harness build that called the live API. **Neither URL was
+in `seenUrls` — the old URL rule would have admitted both. They were excluded by
+the subject slug.** Same failure, other axis.
 
 ### Ledger counts (report the TRUE lengths — q-i-93, discipline of count)
 
@@ -211,8 +244,8 @@ hole).
   this job definition live in the repo and are curated by the head, not by the
   worker.)
 - Freshness and de-duplication are hard constraints; when in doubt, exclude.
-  **Exception, and it is the one that matters: the rolling-surface rule above
-  WINS over exclusion** — for a fixed-URL rolling surface, a NEW item is
-  reportable even though the URL is already known.
+  **Exception, and it is the one that matters: the two de-dup axes above WIN
+  over exclusion** — for a fixed-URL rolling surface or a new artifact under an
+  already-seen subject, a NEW item is reportable.
 - Reference prior report paths you build on (≤ 3 per category), e.g. the
   previous brief `reports/daily-news/<YYYY-MM-DD>.md` and the ledger.
