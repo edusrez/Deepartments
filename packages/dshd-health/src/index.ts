@@ -7733,10 +7733,72 @@ function buildHeadContinuationWaitFrame(wait: HeadContinuationWait): string {
   return `[From deepartments] system-wait: ${wait.postId} — ${wait.count} item(s) next: ${wait.postId}: ${wait.labels.join('; ')}`
 }
 
+/** ACTUADOR — the ACTION NOTICE of a `context-threshold` finding, derived from the
+ * finding's OWN published frame, or `undefined` when the row is below the acting
+ * rungs. MODULE-PRIVATE (no export-surface growth — the frozen export-parity pin
+ * holds by construction).
+ *
+ * WHY THIS EXISTS (fb-1895, MEASURED — the hole it closes is the ACTOR, not the
+ * arithmetic). The advisory token `rotate-before-death` has exactly ONE producer
+ * (`planContextActions`) and travels to a frame through exactly ONE call
+ * (`buildContextActionFrame`, invoked ONLY on the `notifyPost` escalation to the
+ * post's MANAGER). THAT ESCALATION NEEDS A MANAGER, and `managerByPost` is built
+ * exclusively from `deps.posts` (`postId → managerId`). A subject that carries no
+ * `managerId` therefore ALWAYS resolves `no-actor` and receives NO escalation
+ * delivery. MEASURED, by execution over the real source: the subject classes are
+ *   - the HOST (`{ hostId }`, no postId — the M4 host-not-a-pseudo-post rule),
+ *   - every HEAD (`quality-head` / `research-head` / `internal-programming-head`),
+ *   - a self-referential manager;
+ * and the ONLY subject class that ever gets the escalation is a WORKER WITH A
+ * MANAGER. ⇒ For a manager-less subject the token existed in the durable marker
+ * and in NO frame any actor ever read: the host that crossed its own window
+ * received the ALERT below, whose bullet carries the threshold line and NOT the
+ * action — it had to decide BLIND, which is exactly the reported symptom.
+ *
+ * THE FIX IS AT THE ACTOR, AND IT REUSES THE SAME ALGEBRA: the host ALERT is the
+ * one channel that ALREADY addresses the live host on EVERY tick, and the host IS
+ * the actor for its own crossing. So the notice is rendered INTO that frame. The
+ * tier decision is NOT re-derived: it reads the finding's PUBLISHED frame
+ * (`contextWindow` / `contextProjectedTokens` / `contextReserveTokens` — the LANE
+ * HEALTH invariant: the denominator travels with the figure) and compares against
+ * the actuator's OWN `CONTEXT_ACTION_ADVISORY_FRACTION`, so the frame and the
+ * marker can never name different rungs. The tokens are the SAME constants
+ * (`CONTEXT_ACTION_ADVISORY_TOKEN`; the beyond-window tier consumes the
+ * instrument's own `contextAction` verbatim) — never a second literal.
+ *
+ * ADDITIVE BY CONSTRUCTION (R6): the finding's frozen `error` literal is NOT
+ * touched; the notice is an APPENDED suffix, and a row below the acting rungs (or
+ * a legacy row with no published frame) renders BYTE-IDENTICAL to before. */
+function contextActionNotice(finding: HealthFinding): string | undefined {
+  const contextWindow = finding.contextWindow
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined
+  const projected = typeof finding.contextProjectedTokens === 'number' && Number.isFinite(finding.contextProjectedTokens) ? finding.contextProjectedTokens : 0
+  const reserve = typeof finding.contextReserveTokens === 'number' && Number.isFinite(finding.contextReserveTokens) ? finding.contextReserveTokens : 0
+  const effectiveTokens = projected + reserve
+  // THE TIER — the scan's own boolean is the authority on «already impossible»
+  // (it is what makes the token the INSTRUMENT's); otherwise the published
+  // fraction decides the last rung that still fits.
+  if (finding.beyondUsableWindow === true) {
+    const action = typeof finding.contextAction === 'string' && finding.contextAction !== '' ? finding.contextAction : 'compact-or-rotate'
+    return ` ⇒ ACCIÓN ${action} (beyond-usable-window: el próximo request de ESTA sesión YA no cabe)`
+  }
+  if (effectiveTokens / contextWindow >= CONTEXT_ACTION_ADVISORY_FRACTION) {
+    const runwayMin = Math.round(CONTEXT_ACTION_ADVISORY_HEADROOM_TOKENS / CONTEXT_ACTION_MEASURED_ACTIVE_RATE)
+    return ` ⇒ ACCIÓN ${CONTEXT_ACTION_ADVISORY_TOKEN} (advisory: el próximo request TODAVÍA cabe, ~${runwayMin} min de margen a la tasa medida)`
+  }
+  return undefined
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
- * double-brace template token — the ALERT is a prompt-facing bus message). */
+ * double-brace template token — the ALERT is a prompt-facing bus message).
+ *
+ * fb-1895: the `context-threshold` bullet APPENDS the ACTUATOR's action notice
+ * (`contextActionNotice`) when the row sits on an acting rung. This is the frame
+ * that reaches the actor of a MANAGER-LESS subject — see that helper's block for
+ * the measured hole (the host's own crossing named no action, so it decided
+ * blind). The bullet's frozen `error` literal is untouched (additive suffix). */
 export function buildHealthAlertFrame(findings: HealthFinding[]): string {
   const lines = findings.map((finding) => {
     if (finding.kind === 'post-error') {
@@ -7811,7 +7873,12 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // line so every crossing/emergency re-alert stays informative; the fb-50
     // RE calibration made same-tier repeats silent).
     if (finding.kind === 'context-threshold') {
-      return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}`
+      // fb-1895 — the ACTOR is named in the frame that actually reaches it: a
+      // manager-less subject (the HOST's own row, a HEAD) never receives the
+      // `notifyPost` escalation, so the ALERT is its ONLY channel. Appended
+      // suffix; the frozen `error` literal stays byte-identical.
+      const notice = contextActionNotice(finding)
+      return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}${notice ?? ''}`
     }
     // M-5 — the mission-stalled branch (NEVER let it reach the stale-post
     // fallback). The owner-facing wording is the mission's own line (misión
