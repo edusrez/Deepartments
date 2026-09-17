@@ -766,14 +766,21 @@ test('builder-411 (vii) DECLARED LIMIT — what ceases: the fix ceases THE SWEEP
       seenAfterSeam.newAfterTerminal > 0,
       'DECLARED LIMIT: a fresh SEAM send appends transitions AFTER the terminal — `terminal` is NOT final at the seam (fb-1444: a DIFFERENT defect/owner, NOT fixed by this lane)'
     )
-    // ★ WHY THE `failed`-ROW UNIT PAYS OFF — MEASURED: the consecutive count did
-    // NOT reset across the stop. This pair's 40 `failed` rows SURVIVE the G2
-    // in-place rewrite (which rewrites `prepared` rows only), so the cap's
-    // evidence is intact and the next due sweep re-stops the pair IMMEDIATELY —
-    // not after a fresh 12-failure run. (Measured with a `prepared`-based count,
-    // this same scenario RESET to a count of 1 and the loop resumed for ~2 h
-    // before the cap could re-fire: fb-1704's second cause, avoided here by the
-    // unit choice.)
+    // ★ WHY THE EVIDENCE SURVIVES HERE — the unit is the ATTEMPT, NOT the row:
+    // `pairConsecutiveAttemptCount` counts a `prepared` (=1 per attempt) and its
+    // `failed` partner adds NOTHING. The G2 in-place rewrite (`prepared` ->
+    // `terminal`, ts kept) DOES erase a `prepared` from the count, but this
+    // test's 2-row shape is stable EITHER WAY: untouched, the `prepared` counts 1
+    // and its `failed` partner adds nothing; rewritten, the surviving `failed`
+    // counts alone (a `failed` with no `prepared` write-ahead above it counts on
+    // its own — `messages.ts`:1096-1126). So the streak survives the stop and the
+    // next due sweep re-stops the pair IMMEDIATELY, not after a fresh 12-attempt
+    // run.
+    // ⚠️ DECLARED RESIDUAL RISK (fb-1444, accepted by the host as NON-BLOCKING): a
+    // LIVE-shape pair (a `prepared` with NO `failed` — fb-1704's erasure) DOES lose
+    // its streak, so after a stop + seam re-send it needs up to 12 NEW attempts
+    // (≈2.2 h at the measured 663 s cadence) before the cap can re-fire: what
+    // changes is the LATENCY of the re-stop, the bound stays 12 per stop.
     const consAfterSeam = pairConsecutiveAttemptCount(
       parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8')), MESSAGE_ID, SUBJECT
     )
