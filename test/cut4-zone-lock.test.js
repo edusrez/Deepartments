@@ -22,6 +22,13 @@
 // scripts/zone-md5-manifest.json (zone cut4-tools-zone) carry: the three MUST move
 // in the SAME commit (a re-freeze updates all of them together).
 //
+// NOTE: the literal below is a THIRD copy of the SAME movement identity (the
+// freeze lock test/tools-factory.test.js and the manifest are the other two);
+// test/r6-tree-integrity.test.js byte-syncs the manifest ↔ the freeze lock but
+// does NOT read THIS file, so this copy is kept in step by hand — the SAME
+// commit that re-freezes an in-span change MUST update all three, and the
+// re-freeze comment above carries the command that MEASURED the value.
+//
 // NOTE: test/tools-factory.test.js already asserts this exact md5 against the same
 // source file, and test/r6-tree-integrity.test.js already proves the manifest is
 // byte-synced with it. This test is the explicit, SELF-DOCUMENTING two-sided
@@ -43,9 +50,17 @@ const TOOLS_TS = path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', '
 const BANNER = "  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the"
 const CLOSE = "  }, 'deepartments: host-plane tools')"
 
-// The FROZEN movement identity (all-hex, 32 chars). MUST equal
-// test/tools-factory.test.js:501 and zone-md5-manifest.json cut4-tools-zone.md5.
-const FROZEN_MD5 = 'c61523c4fa5a71b772441da05b2bcf58'
+// The FROZEN movement identity (all-hex, 32 chars). MUST equal the
+// `assert.equal(md5, ...)` literal of test/tools-factory.test.js (cited by FORM,
+// never by line number — the bare `:501` rotted exactly the way the manifest
+// header warns) and zone-md5-manifest.json cut4-tools-zone.md5.
+// RE-FROZE 2026-09-17 (LANE DEL BLOCKER / run token 7c46298f):
+// c61523c4fa5a71b772441da05b2bcf58 → 6d722642f8284422ea666bab58e864e7 — ONE
+// TEXT-ONLY in-span change (the RUNNING refusal error string of dept_head_rotate
+// declaring the OPT-IN wait lever). MEASURED with the same extraction this file
+// performs, from the repo root:
+//   node -e "const{createHash}=require('node:crypto');const fs=require('node:fs');const src=fs.readFileSync('packages/dshd-orchestration/src/tools.ts','utf8');const B='  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the';const C=\"  }, 'deepartments: host-plane tools')\";const f=src.indexOf(B),l=src.indexOf(C);console.log(createHash('md5').update(src.slice(f,l+C.length)+'\n','utf8').digest('hex'))"
+const FROZEN_MD5 = '6d722642f8284422ea666bab58e864e7'
 
 const md5 = (s) => createHash('md5').update(s, 'utf8').digest('hex')
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length

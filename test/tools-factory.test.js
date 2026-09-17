@@ -498,7 +498,29 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // dept_job_list) live OUTSIDE this span and did NOT move this hash. md5
     // 8c82d814bd9bbad309688174564fc5d1 → c61523c4fa5a71b772441da05b2bcf58;
     // byte-synced with scripts/zone-md5-manifest.json:11 in the SAME change.
-    assert.equal(md5, 'c61523c4fa5a71b772441da05b2bcf58', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator + the LANE DEL SELLO reasonProvenance declared-origin contract (parameter schema + call-site threading + the ADDITIVE reasonReferenceScope/reasonVerifiedToken/declaredReferenceSessionId outputs) + the fb-831 dept_who declared-field render tail (the REQUIRED sessionId + departmentId/role/jobId, absent keys declared as `-`) (md5 c61523c4fa5a71b772441da05b2bcf58)')
+    // Zone md5 RE-FROZE (2026-09-17, LANE DEL BLOCKER / run token 7c46298f):
+    // ONE INTENTIONAL in-span change, and it is TEXT-ONLY — the RUNNING refusal
+    // error string of the `dept_head_rotate` body gained one trailing sentence
+    // declaring the OPT-IN LEVER (`wait:true` / `waitMaxMs`) that the SAME body
+    // already implements. WHY it belongs in the REFUSAL: the refusal is the ONE
+    // place a caller MEETS this wall, and it used to name the wall ("rotate only
+    // in a free window … ONE action, on an observable signal") WITHOUT naming
+    // the lever that defers that very decision — so the caller read a closed
+    // door where the tool offers a bounded wait. NOTHING ELSE MOVED: no branch,
+    // no parameter schema, no output field, no render, no verdict is touched by
+    // this sentence; a caller that passes NO `wait` gets the byte-identical
+    // string as before this line's prefix, and the fb-735 deferral semantics are
+    // unchanged. (The fb-737 doctrine sentence is byte-identical; the sentence
+    // is APPENDED inside the same template literal, never re-wrapped.) md5
+    // c61523c4fa5a71b772441da05b2bcf58 → 6d722642f8284422ea666bab58e864e7;
+    // M E A S U R E D (not invented) with the SAME extraction this block performs
+    // (banner → host-plane effect close), from the repo root:
+    //   node -e "const{createHash}=require('node:crypto');const fs=require('node:fs');const src=fs.readFileSync('packages/dshd-orchestration/src/tools.ts','utf8');const B='  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the';const C=\"  }, 'deepartments: host-plane tools')\";const f=src.indexOf(B),l=src.indexOf(C);console.log(createHash('md5').update(src.slice(f,l+C.length)+'\n','utf8').digest('hex'))"
+    // (an INDEPENDENT python extraction of the same span returned the same
+    // value — the measurement is reproducible by two instruments), and
+    // byte-synced with scripts/zone-md5-manifest.json cut4-tools-zone in the
+    // SAME change (the header rule).
+    assert.equal(md5, '6d722642f8284422ea666bab58e864e7', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator + the LANE DEL SELLO reasonProvenance declared-origin contract (parameter schema + call-site threading + the ADDITIVE reasonReferenceScope/reasonVerifiedToken/declaredReferenceSessionId outputs) + the fb-831 dept_who declared-field render tail (the REQUIRED sessionId + departmentId/role/jobId, absent keys declared as `-`) + the 2026-09-17 BLOCKER lane (the `dept_head_rotate` RUNNING refusal error string declaring the OPT-IN LEVER — text only) (md5 6d722642f8284422ea666bab58e864e7)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
