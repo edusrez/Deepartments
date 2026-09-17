@@ -51,6 +51,51 @@ passes, the entry must be re-verified and its `date`/`verified` bumped.
   decisions for the Research Head; the organizer may list candidates but never
   deletes on its own judgment.
 
+### CONCURRENT EXTENSION — the same item CAN reach two workers at once
+**(head's rule, 2026-09-17; measured, and it survived on luck, not on mechanism)**
+
+**The monitor dispatches the SAME item to MORE THAN ONE worker, and they write
+the SAME archive file.** Measured on 2026-09-17: one item (MLPerf v6.1) produced
+**six dispatches**, and two of them went **to the same worker** (Δ5.2 s and
+Δ35.1 s apart) — so two workers on one topic is a NORMAL case, not an anomaly.
+This is not a worker error: the monitor de-duplicates by **emission id**, not by
+item identity (an item re-emitted with new wording is a new event).
+
+**Why that is dangerous HERE and not elsewhere:** the researcher toolset has NO
+`edit` (deliberate, fb-63/66), so EXTEND = **FULL REWRITE via `write`**. Two
+workers doing a full rewrite of one file is **LAST-WRITE-WINS: the loser's
+section disappears SILENTLY** — no error, no conflict, no trace.
+
+**The rule — four steps, and they are cheap:**
+
+1. **RE-READ the entry IMMEDIATELY BEFORE the `write`**, not only at the start of
+   the round. A read taken minutes earlier is a stale base.
+2. **ADD a section; NEVER rewrite the whole entry.** Append your own clearly
+   delimited block (`## [N] …`) and carry the existing content forward verbatim.
+3. **STAMP your section with your run token** (e.g. `run token d90c7ef9`) and with
+   whose content it extends. A section that is lost or superseded must be
+   **attributable** afterwards — otherwise a later reader cannot tell whether
+   material was never found, or found and clobbered.
+4. **If the file changed between your read and your write, RECOMPOSE on the FRESH
+   content** — never write your stale copy over it. Losing your own delta costs a
+   round; overwriting a sibling's costs THEIR round too.
+
+**★ Control (this worked, and it is the model to copy):** `sources/nvidia-deepseek-v41-flash-nvfp4.md`
+— worker `5f9bdaba` filed §[1]–§[6], then worker `d90c7ef9` reached the same
+verdict by an independent path and **appended §[7]** carrying five things the
+first lacked. Both sections survived intact and both workers' claims agree. **The
+same pattern was applied the same day on the Jev companion entry (§6 curator
+correction + §7 fourth-pass additions).**
+**⚠️ BUT BE HONEST ABOUT WHY IT WORKED: it worked because the two writes happened
+to be ORDERED (one read after the other wrote). Nothing in the tool enforced it.
+The four steps above are what turns that luck into a mechanism.**
+
+**Note on the duplicate DEPLOYMENT itself:** de-duplicating the monitor's
+re-dispatch is **not the department's layer** (it lives in the monitor/daemon
+config) — it is escalated, filed as `fb-1837` → folded into canonical `fb-1713`.
+What IS the department's layer is the four steps above: they make a duplicate
+dispatch **harmless** instead of destructive.
+
 ## Archival scope by job (head standing policy, 2026-09-16)
 
 **Not every job archives.** The researcher persona's archive step is the
@@ -64,6 +109,9 @@ differ:
   topic to the head, who decides.
 - **`daily-ai-news` — DOES archive** (this job carries explicit archive steps):
   extend an existing topic file, or create one for a genuinely new topic.
+- **The monitor jobs (`deepseek-dsh-news`, `ai-industry-news`) DO archive** — and
+  they are the ones subject to the CONCURRENT case above, because the monitor can
+  dispatch the same item to two workers. Follow the four steps.
 
 This clause resolves a job-vs-persona conflict that had been re-asked for three
 rounds; it is delivered through the head's memo, which both jobs read at the
