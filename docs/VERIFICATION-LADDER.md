@@ -28,6 +28,46 @@ Regla: `node --test` plano sobre `lib/` es el único default; `--loader` es
 solo la auto-registración de los tests lane-② (`test/r6-ladder-flat.test.js`
 blinda esto: ningún script de package.json puede contener `--loader`).
 
+### 1.1 El criterio de la familia lane-② es una PROPIEDAD, no una FOTO (fb-1063/#1095 — resuelto 2026-09-17)
+
+El test 3 de `test/r6-ladder-flat.test.js` blindaba la convención comparando
+`registerers` (derivados del árbol) contra `laneFamily`, un `Set` CONGELADO de 19
+entradas con su sello `LANE2_FAMILY_PHOTO_AT`: el rojo lo disparaba la FECHA DE
+NACIMIENTO de un fichero, no una propiedad del producto (medido: 9
+auto-registradores posteriores a la foto, ninguno de ellos defectuoso ⇒ fb-1063
+NO-FALLO del producto / DEFECTO DEL INSTRUMENTO). Re-declarar una foto nueva
+habría re-armado el mismo rojo con la lane siguiente: lo que cambió es EL
+CRITERIO.
+
+**Criterio vigente (símbolos del mismo test):**
+
+- `builtLibSpecifiersOf(fichero)` — **la propiedad**: un auto-registrador cuyos
+  specifiers de import (`from`, `import(…)`, `require(…)`) alcanzan un árbol
+  `lib/` CONSTRUIDO no es lane-② src-native ⇒ **ROJO**, salvo que el fichero
+  esté nombrado en `LANE2_BUILT_LIB_EXCEPTIONS`.
+- `LANE2_BUILT_LIB_EXCEPTIONS` — **las excepciones van NOMBRADAS Y CON RAZÓN**:
+  cada entrada declara POR QUÉ su helper tiene que ser el artefacto construido
+  (hoy 4: `fb957-settle-cause`, `lane2-retire-grace-zombie`, `o1ext-lane`,
+  `ipd-orphan-quiescent-reap-8deea5ac`) — una entrada sin razón es ROJA, y una
+  excepción que ya no describe el árbol (fichero ausente, o que dejó de importar
+  el `lib/`) también.
+- `reachesSrc(fichero)` — **la mitad positiva del nombre**: el fichero debe
+  alcanzar la FUENTE (un specifier a un árbol `src/`, o el bundle
+  `src/index.ts` nombrado en el fichero).
+- `LANE2_SRC_NATIVE_BASELINE` (+ `LANE2_SRC_NATIVE_BASELINE_AT`) — la lista pasa
+  a ser **BASELINE DECLARADA Y REPORTADA** (una línea de diagnóstico que el
+  propio test imprime) y **NUNCA el criterio**: un fichero nuevo src-native NO
+  pone el guard rojo.
+
+**Dientes demostrados, no prometidos.** Un auto-registrador que importe el
+`lib/` construido sin estar en las excepciones ⇒ RED + exit 1 (prueba de
+inyección, retirada después); y un fichero NUEVO src-native del mismo porte deja
+el guard en exit 0, sólo REPORTADO como posterior a la baseline.
+
+**Ampliar la familia — lo que ya NO hay que hacer:** un test nuevo src-native no
+obliga a tocar ninguna lista; si importa el `lib/` construido, la decisión es de
+su autor — rutear el import a `src` o declarar la excepción CON su razón.
+
 ## 2. Guard de integridad de suite (fb-91)
 
 fb-91 (2026-09-04): la suite se auto-mutó `packages/dshd-orchestration/src/tools.ts`

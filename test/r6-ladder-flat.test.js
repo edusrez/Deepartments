@@ -46,73 +46,163 @@ test('r6-ladder-flat (fb-95): every repo reference to ts-src-loader.mjs in test/
   }
 })
 
-// ⚠️ THE LIST BELOW IS A *PHOTO*, NOT A RULE (fb-1063, instance #1095 — the
-// same class as fb-1053: a guard PHOTOGRAPHS a set and then compares it with a
-// world that keeps MOVING ⇒ what it can honestly report is drift AGAINST A
-// PHOTO, so it must name WHAT the set is, WHICH world it covers and WHEN the
-// photo was taken). This family was last written on the date below: every
-// self-registering test created AFTER it legitimately lands outside the photo,
-// and that is not a defect of the product — it is the instrument comparing the
-// present against a frozen past (fb-1063: NO-FALLO del producto / SÍ-DEFECTO
-// DEL INSTRUMENTO). Substantiating command, from the repo root:
-//   git log --reverse -S 'p2-snapshot-anchor.test.js' --format=%cs -- test/r6-ladder-flat.test.js | head -1
-// The assertion below keeps its TEETH (it still fails) and declares the
-// contract instead of pretending the world froze with the photo.
-const LANE2_FAMILY_PHOTO_AT = '2026-09-07'
+// ─── THE CRITERION IS A PROPERTY, NOT A PHOTO (fb-1063/#1095, resolved
+// 2026-09-17 by the lane `r6-ladder-flat-criterio`) ───────────────────────────
+//
+// WHAT WAS WRONG. The first form of the assertion below compared the
+// self-registering files found in the tree against a FROZEN set
+// (`laneFamily`, 19 entries, stamped `LANE2_FAMILY_PHOTO_AT = '2026-09-07'`).
+// Its red was therefore triggered by a file's DATE OF BIRTH, not by any
+// property of the product: nine self-registering files written after that date
+// went red without one of them being a defect (fb-1063: NO-FALLO of the
+// product / DEFECT OF THE INSTRUMENT). Re-dating the photo would have re-armed
+// the same red on the next lane — what changed here is the CRITERION.
+//
+// WHAT THE TEST NAME DECLARES, AND WHAT IS NOW COMPUTED FROM IT. «their
+// imports resolve into src, not the built lib» is TWO halves, and both are
+// derived from each file's OWN import specifiers:
+//   (1) NEGATIVE half — `builtLibSpecifiersOf(file)`: a self-registering test
+//       whose specifier reaches a BUILT `lib/` tree is NOT lane-② src-native ⇒
+//       RED, unless the file is NAMED in `LANE2_BUILT_LIB_EXCEPTIONS` **with
+//       its reason**. A bare list is not a declaration: every entry of that Map
+//       says WHY its helper is taken from the built artifact.
+//   (2) POSITIVE half — `reachesSrc(file)`: the file must actually reach the
+//       SOURCE (a specifier into a `src/` tree, or the `src/index.ts` bundle
+//       named in the file). A hook self-registration that reaches nothing in
+//       `src` would be an instrument with no object ⇒ RED.
+//
+// WHAT THE BASELINE IS NOW. `LANE2_SRC_NATIVE_BASELINE` (+ `…_AT`) is a
+// DECLARED BASELINE, printed by this test as a diagnostic and NEVER the
+// criterion: a src-native self-registering file written AFTER it does NOT turn
+// this guard red — that is the whole point of the change — its drift is
+// REPORTED, so it stays visible without becoming a false defect.
+//
+// THE TEETH ARE DEMONSTRATED, NOT PROMISED. A temporary self-registering file
+// importing `../lib/…` while unnamed in the exceptions turns (1) RED with exit
+// 1 (injection proof in the lane report; the injection was deleted afterwards).
+const LANE2_SRC_NATIVE_BASELINE_AT = '2026-09-17'
 
-test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native (their imports resolve into src, not the built lib)', () => {
+/** DECLARED baseline (report-only, never the criterion): the self-registering
+ * lane-② tests that take NO built-lib import, as declared on the date above. */
+const LANE2_SRC_NATIVE_BASELINE = new Set([
+  'batch-drain.test.js', 'contexto-gate-admision-7cf42c47.test.js',
+  'dual-surface-session.test.js', 'fb132-retired-flavor.test.js',
+  'fb132-wake-on-delivered-drain.test.js', 'fb1proc-abort-provenance-effect.test.js',
+  'fb467-gate-fifo-huerfano.test.js', 'foldins-batchA.test.js',
+  'foldins-tramo3A.test.js', 'ghostguard-retire-dispose-dispatch.test.js',
+  'lane2-g2-settle-nowake.test.js', 'lane2-gate-agecheck.test.js',
+  'lane2-redrive-backoff.test.js', 'lane2-settle-rotatedto.test.js',
+  'monitorredo1-storm-guard-consumption.test.js', 'p2-snapshot-anchor.test.js',
+  'r10-workspace-clobber.test.js', 'r4-abort-intents.test.js',
+  'sello-unidad-tres-piezas-e5c92faa.test.js', 'sweep-observability.test.js',
+  'w7-fb132-gate-settle.test.js', 'w9-b255-reroute-orphan-settle.test.js',
+  'wake-seam-mitigation.test.js', 'wakeseam-lane.test.js',
+])
+
+/** THE NAMED EXCEPTIONS, EACH WITH ITS REASON: the self-registering lane-②
+ * tests that DO import a BUILT `lib/` specifier. Being on this list is not a
+ * loophole — it is the declaration the negative half above demands, and the
+ * reason is asserted to be present (a filename with no reason is RED). */
+const LANE2_BUILT_LIB_EXCEPTIONS = new Map([
+  [
+    'fb957-settle-cause.test.js',
+    'imports `deptExecDenyReason` from the BUILT `lib/invoke.js`: it is the LIVE dept_exec scope-guard function the tool body itself calls (the r5-dx-guards convention, declared in that file own header comment), so the assertion is made against the bridge the runtime uses rather than against a src copy of it. `src/invoke.ts` exports the same function — the BUILT one is taken on purpose.',
+  ],
+  [
+    'lane2-retire-grace-zombie.test.js',
+    'imports the stateDir row readers (`deliveryStatus`, `parseDeliveryRows`, `resolveDeliveriesPath`, `resolveMessagesPath`) from the BUILT `lib/messages-store.js`: they are the row readers of the deployed artifact, used to read the stateDir rows the assertions speak about. `src/messages-store.ts` is a pure RE-EXPORT BRIDGE over `src/core/messages.js` (declared in its own header), so the same names are reachable from src as well — this exception is a DECLARED choice of the built reader, not a missing src export.',
+  ],
+  [
+    'o1ext-lane.test.js',
+    'imports the stateDir row readers (`deliveryStatus`, `parseDeliveryRows`, `resolveDeliveriesPath`, `resolveMessagesPath`) from the BUILT `lib/messages-store.js` — the same declared choice as `lane2-retire-grace-zombie.test.js` (the built reader for the rows, while the bundle under test is still booted from `src/index.ts`).',
+  ],
+  [
+    'ipd-orphan-quiescent-reap-8deea5ac.test.js',
+    'imports the stateDir row readers (`deliveryStatus`, `parseDeliveryRows`, `resolveDeliveriesPath`, `resolveMessagesPath`) from the BUILT `lib/messages-store.js` — the same declared choice as `lane2-retire-grace-zombie.test.js` (the built reader for the rows, while the bundle under test is still booted from `src/index.ts`).',
+  ],
+])
+
+/** The import seams NAMED IN A FILE'S OWN TEXT: static `from`, dynamic
+ * `import(…)`, `require(…)`. These are the DIRECT specifiers — never the
+ * transitive graph behind them. */
+const IMPORT_SPECIFIER_PATTERNS = [
+  /from\s+['"]([^'"]+)['"]/g,
+  /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+  /require\(\s*['"]([^'"]+)['"]\s*\)/g,
+]
+
+function importSpecifiersOf(file) {
+  const src = readFileSync(path.join(REPO_ROOT, 'test', file), 'utf8')
+  const out = new Set()
+  for (const re of IMPORT_SPECIFIER_PATTERNS) for (const m of src.matchAll(re)) out.add(m[1])
+  return out
+}
+
+/** The specifiers that reach a BUILT `lib/` tree — the repo's own `lib/` or a
+ * workspace package's `packages/<pkg>/lib/`. */
+function builtLibSpecifiersOf(file) {
+  return [...importSpecifiersOf(file)].filter((s) => /(^|\/)lib\//.test(s))
+}
+
+/** The POSITIVE half of the name: the file reaches the SOURCE — a specifier
+ * into a `src/` tree, or the `src/index.ts` bundle named in the file. */
+function reachesSrc(file) {
+  if ([...importSpecifiersOf(file)].some((s) => /(^|\/)src\//.test(s))) return true
+  const src = readFileSync(path.join(REPO_ROOT, 'test', file), 'utf8')
+  return /['"]src['"][^)]*?['"]index\.ts['"]/.test(src)
+}
+
+test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native (their imports resolve into src, not the built lib)', (t) => {
   const testsDir = path.join(REPO_ROOT, 'test')
   const registerers = readdirSync(testsDir)
     .filter((f) => f.endsWith('.js'))
     .filter((f) => f !== 'r6-ladder-flat.test.js' && readFileSync(path.join(testsDir, f), 'utf8').includes("register(new URL('./ts-src-loader.mjs'"))
   assert.ok(registerers.length >= 4, 'the lane-② src-native family self-registers the hook (unexpectedly small set — the ladder convention drifted?)')
-  const laneFamily = new Set([
-    'lane2-g2-settle-nowake.test.js', 'lane2-gate-agecheck.test.js', 'lane2-redrive-backoff.test.js',
-    'lane2-retire-grace-zombie.test.js', 'lane2-settle-rotatedto.test.js',
-    'wakeseam-lane.test.js', 'dual-surface-session.test.js', 'foldins-tramo3A.test.js',
-    'foldins-batchA.test.js', 'sweep-observability.test.js', 'o1ext-lane.test.js',
-    // LANE R4 (2026-09-05): the abort-intents lane is src-native (the R4
-    // write-ahead sidecar + listeners) and self-registers the hook — the same
-    // lane-② family (the o1ext-lane pattern).
-    'r4-abort-intents.test.js',
-    // LANE R10 (2026-09-05): the workspace-clobber lane is src-native (the R10
-    // hide-set merge guard + the real-Loader E2E) and self-registers the hook.
-    'r10-workspace-clobber.test.js',
-    // WAVE 7 LANE 4/4 (fb-132, 2026-09-05): the gate/wake-seam re-drive
-    // settle lane is src-native (the DeliveryRedeliverer FIFO-gate settle over
-    // the dshd-core src) and self-registers the hook (the lane2 pattern).
-    'w7-fb132-gate-settle.test.js',
-    // FB-132 WAKE-ON-DELIVERED (2026-09-06, the 2nd-half drain-on-wake lane):
-    // the drainRecipientQueue primitive + the composed-wake fire test are
-    // src-native (the DeliveryRedeliverer drain over the dshd-core src + the
-    // bundle-src composed harness) — the same lane2 self-register pattern.
-    'fb132-wake-on-delivered-drain.test.js',
-    // FB-132 2nd-half DELTA (2026-09-06 — the reviewers addendum GAP MENOR):
-    // the retired-target flavor (isDormantRecipient excludes retired entries)
-    // is src-native (the REAL delivery factory predicate + the lane2-style
-    // DeliveryRedeliverer sweep over the dshd-core src) — the same pattern.
-    'fb132-retired-flavor.test.js',
-// WAKE-SEAM mitigation suite (6fe390a, 2026-09-06): the engine-dormancy +
-    // discriminador no-wake-head tests are src-native (the composed dshd-core
-    // gate engine + the settle re-driver over the src) and self-register the
-    // hook (the wakeseam-lane pattern).
-    'wake-seam-mitigation.test.js',
-    // VALLE 09-07 (BATCH-DRAIN, 2026-09-07): the drain-on-settle lane is
-    // src-native (the composed bundle over the crate engine + the settle event)
-    // and self-registers the hook (the wake-seam-mitigation pattern).
-    'batch-drain.test.js',
-    // P2 HYGIENE A (m-423 snapshot anchor, 2026-09-06): the pre-rotation
-    // snapshot-anchor lane is src-native (the session-rotation graph) and
-    // self-registers the hook (the lane2 pattern).
-    'p2-snapshot-anchor.test.js',
-  ])
-  // ONE assertion, over the WHOLE difference, with the set shape declared: the
-  // per-file `assert.ok(laneFamily.has(f))` loop this replaces failed on the
-  // FIRST unexpected file and hid the rest (the radius was invisible).
-  const unexpected = registerers.filter((f) => !laneFamily.has(f))
+
+  // (1) THE CRITERION — the property, over the WHOLE radius (the per-file loop
+  // this replaces failed on the FIRST offending file and hid the rest).
+  const undeclaredBuiltLib = registerers
+    .map((f) => ({ file: f, specifiers: builtLibSpecifiersOf(f) }))
+    .filter((e) => e.specifiers.length > 0 && !LANE2_BUILT_LIB_EXCEPTIONS.has(e.file))
   assert.deepEqual(
-    unexpected,
+    undeclaredBuiltLib.map((e) => e.file),
     [],
-    `${unexpected.length} self-registering file(s) are NOT in the lane-② src-native family PHOTO of ${LANE2_FAMILY_PHOTO_AT} (${laneFamily.size} entries, last written that day) — the hook is self-registered by ${registerers.length} test files TODAY: what the set IS = the lane-② src-native tests that self-register the hook; what the contract IS = a self-registering file must be lane-②, and adding it to the laneFamily list IS the declaration (there is no other declaration site); what this RED does NOT mean = that the ladder convention drifted or that the product is broken (a file created AFTER the photo simply is not in it — fb-1063/#1095); next action = if the file(s) below are genuine lane-② src-native tests, add them to laneFamily and move the photo date to today, otherwise the assertion is doing its job. Rows: ${unexpected.join(', ')}`,
+    `${undeclaredBuiltLib.length} self-registering file(s) import the BUILT lib and are NOT named in LANE2_BUILT_LIB_EXCEPTIONS — what the PROPERTY is = a lane-② src-native test's own imports resolve into src and NOT into the built lib (${registerers.length} file(s) self-register the hook TODAY); what the contract IS = either route the import to the source, or DECLARE the exception in LANE2_BUILT_LIB_EXCEPTIONS with the reason WHY that helper has to be the built one (the Map is the declaration site, the reason is part of it); what this RED does NOT mean = that the ladder convention drifted or that a file is defective because it is NEW — the criterion is the property, never the date of birth of a file (fb-1063/#1095: NO-FALLO of the product / DEFECT OF THE INSTRUMENT is now impossible here, because the baseline is not asserted); rows = ${undeclaredBuiltLib.map((e) => `${e.file} -> ${e.specifiers.join(' , ')}`).join(' | ')}`,
+  )
+
+  // (2) An exception must still EARN its place: it must self-register TODAY and
+  // still take a built-lib specifier — a stale name is a dead declaration.
+  const staleExceptions = [...LANE2_BUILT_LIB_EXCEPTIONS.keys()].filter(
+    (f) => !registerers.includes(f) || builtLibSpecifiersOf(f).length === 0,
+  )
+  assert.deepEqual(
+    staleExceptions,
+    [],
+    `${staleExceptions.length} name(s) in LANE2_BUILT_LIB_EXCEPTIONS no longer describe the tree (not a self-registering file, or it no longer imports the built lib) — remove the stale entry: an exception list that survives its object stops declaring anything. Rows: ${staleExceptions.join(', ')}`,
+  )
+
+  // (3) Every exception DECLARES ITS REASON (naming a file is not declaring).
+  const reasonless = [...LANE2_BUILT_LIB_EXCEPTIONS.entries()].filter(
+    ([, reason]) => typeof reason !== 'string' || reason.trim().length < 40,
+  )
+  assert.deepEqual(
+    reasonless.map(([f]) => f),
+    [],
+    `${reasonless.length} exception(s) carry no usable reason — each entry of LANE2_BUILT_LIB_EXCEPTIONS must say WHY its helper is taken from the built artifact (not merely list the filename). Rows: ${reasonless.map(([f]) => f).join(', ')}`,
+  )
+
+  // (4) THE POSITIVE HALF of the name: the hook must have an object in src.
+  const noSrcSeam = registerers.filter((f) => !reachesSrc(f))
+  assert.deepEqual(
+    noSrcSeam,
+    [],
+    `${noSrcSeam.length} self-registering file(s) reach NOTHING in src (no specifier into a src/ tree and no src/index.ts bundle named in the file) — self-registering the hook is only meaningful for a test whose object under test comes from the SOURCE. Rows: ${noSrcSeam.join(', ')}`,
+  )
+
+  // (5) THE BASELINE — declared and REPORTED, never the criterion (this is a
+  // diagnostic of the run, not an assertion: see the header of this block).
+  const notInBaseline = registerers.filter((f) => !LANE2_SRC_NATIVE_BASELINE.has(f) && !LANE2_BUILT_LIB_EXCEPTIONS.has(f))
+  t.diagnostic(
+    `r6-ladder-flat baseline (declared ${LANE2_SRC_NATIVE_BASELINE_AT}, ${LANE2_SRC_NATIVE_BASELINE.size} src-native entries): ${registerers.length} self-registering file(s) TODAY; ${notInBaseline.length} newer than the baseline — REPORTED, not a failure (the criterion is the property checked above): ${notInBaseline.join(', ') || '-'}`,
   )
 })
