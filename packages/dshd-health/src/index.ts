@@ -7878,7 +7878,34 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
       // `notifyPost` escalation, so the ALERT is its ONLY channel. Appended
       // suffix; the frozen `error` literal stays byte-identical.
       const notice = contextActionNotice(finding)
-      return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}${notice ?? ''}`
+      // ANCLA DE SESIÓN (2026-09-17, builder-432 / cabf519f) — DE QUÉ
+      // ENCARNACIÓN HABLA LA ALERTA. The measured defect: the finding key is
+      // `context-threshold:<agentId>:b<band>` (`:5488`) — per POST and BAND,
+      // with NO session — so the SAME key is re-crossed by a DIFFERENT
+      // incarnation and the two bullets are INDISTINGUISHABLE except by the
+      // token figure (MEASURED in the live ledger: `m-16238` 22:32:51
+      // `91% (696459+262144/1048576)` — the PREDECESSOR's session — and
+      // `m-16432` 23:22:55 `91% (690137+262144/1048576)` — the LIVE one: same
+      // key, same band b9, same postId `research-head`). The reader's only
+      // defense was comparing figures BY HAND.
+      //
+      // The anchor ALREADY EXISTED and is not invented here: the scan publishes
+      // `sessionId` (`:5612`, the incarnation that PRODUCED the figure) and the
+      // render pattern is PROVEN 45 lines above for `post-error` (fb-25 (b) /
+      // fb-466). This branch simply stops ignoring it.
+      //
+      // ADDITIVE (the fb-1895 / fb-50 rule): the frozen `error` literal stays
+      // BYTE-IDENTICAL and the anchor is an APPENDED SUFFIX — and it is
+      // appended AFTER the action notice, so fb-1895's own contiguous
+      // assertions (`— cruce b9 ⇒ ACCIÓN rotate-before-death`) stay intact.
+      // A finding with NO `sessionId` (a legacy wiring that does not publish
+      // one) renders BYTE-IDENTICAL to before: there is no session to name and
+      // fabricating a fallback would assert provenance the row never carried.
+      const sessionAnchor =
+        typeof finding.sessionId === 'string' && finding.sessionId !== ''
+          ? ` [session ${finding.sessionId} (${new Date(finding.ts).toISOString().slice(11, 16)}Z)]`
+          : ''
+      return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}${notice ?? ''}${sessionAnchor}`
     }
     // M-5 — the mission-stalled branch (NEVER let it reach the stale-post
     // fallback). The owner-facing wording is the mission's own line (misión

@@ -148,19 +148,40 @@ test('fb-1895 (2) the BEYOND-WINDOW rung: the frame names the INSTRUMENT\'s own 
 })
 
 // ---------------------------------------------------------------------------
-// (3) ADDITIVE (R6): a row BELOW the acting rungs renders BYTE-IDENTICAL.
+// (3) ADDITIVE (R6): a row BELOW the acting rungs renders NO action notice —
+//     its frozen `error` literal is intact and no ACCIÓN is fabricated.
+//
+//     ⚠️ AMENDED 2026-09-17 (builder-432 / cabf519f — ANCLA DE SESIÓN). This
+//     assertion pinned the WHOLE bullet byte-identical, because at the time the
+//     bullet's ONLY possible addition was the action notice. The session anchor
+//     (`[session <id> (HH:MMZ)]`) is a SECOND, INDEPENDENT additive suffix that
+//     applies to every rung — its purpose is provenance, not action — so the
+//     whole-bullet equality had to move. The GATE THIS TEST EXISTS FOR is
+//     PRESERVED EXACTLY and is still asserted twice: the frozen `error` literal
+//     is a byte-intact PREFIX and `ACCIÓN` is absent below the acting rungs.
+//     The precedent is fb-466 (commit 69e104a), which added the same class of
+//     session anchor to `post-error` and amended the frozen frame assertions of
+//     test/invoke.test.js in the SAME commit.
 // ---------------------------------------------------------------------------
-test('fb-1895 (3) ADDITIVE: a row with real runway (b8, below the advisory rung) renders the bullet BYTE-IDENTICAL — no notice, no reworded literal', async () => {
+test('fb-1895 (3) ADDITIVE: a row with real runway (b8, below the advisory rung) renders NO action notice — the frozen `error` literal stays byte-intact and no ACCIÓN is fabricated (the session anchor is a SECOND, independent additive suffix)', async () => {
   await withTempDir(async (stateDir) => {
     const alerts = await hostTickFor(stateDir, BELOW)
     assert.equal(alerts.length, 1, 'the host still gets its ALERT (the monitor is untouched)')
     const bullet = alerts[0].frame.split('\n').find((l) => l.startsWith('- context-threshold:'))
-    assert.equal(
-      bullet,
-      `- context-threshold: ${HOST_ID} 85% (629146+262144/1048576) — cruce b8`,
-      'BYTE-IDENTICAL: below the acting rungs the frame is exactly the pre-fb-1895 bullet (additive suffix only, and only on an acting rung)'
+    // THE FROZEN `error` LITERAL — byte-intact as a PREFIX (never reworded).
+    const FROZEN_ERROR = `${HOST_ID} 85% (629146+262144/1048576) — cruce b8`
+    assert.ok(
+      bullet.startsWith(`- context-threshold: ${FROZEN_ERROR}`),
+      'the frozen `error` literal is a byte-intact PREFIX of the bullet (the additions are suffixes only)'
     )
     assert.ok(!alerts[0].frame.includes('ACCIÓN'), 'and no action notice is fabricated for a rung that has runway')
+    // The SESSION ANCHOR (builder-432) — the independent second suffix: the
+    // alert now says WHICH incarnation the figure came from.
+    assert.equal(
+      bullet,
+      `- context-threshold: ${FROZEN_ERROR} [session ${HOST_SESSION} (${new Date(T0).toISOString().slice(11, 16)}Z)]`,
+      'and the bullet names the session that produced the figure (the ANCLA DE SESIÓN, additive)'
+    )
   })
 })
 
