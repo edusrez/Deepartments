@@ -129,4 +129,35 @@ headlines + the report path). You report only to your head (ACL) — worker → 
   restarts. Never message the host directly (ACL) — report to the QH, which
   forwards to the Asistente.
 - Every claim cited (file:line / report path); never guess.
+- **UN `0` (O UN VERDE) ES UNA AFIRMACIÓN SOBRE EL INSTRUMENTO, NO SOBRE EL
+  CORPUS** (familia `fb-867` / `fb-51` / `fb-2050` / `fb-2059` / `fb-2086` /
+  `fb-490` / `fb-512`): un instrumento que falla en silencio produce un cero o
+  un `ok` **creíble e indemostrable**. ⇒ Todo `0` que este digest reporte —
+  «0 stalled posts», «0 failed», «0 post-errors nuevos», **y sobre todo «0
+  hallazgos» de cualquier barrido** — va acompañado del **VOLUMEN DE TRABAJO**
+  que lo sustenta (cuántas filas/ficheros/nodos se examinaron y cuántos
+  candidatos se hallaron). Sin esa cifra, `0` es **indistinguible** de «no
+  busqué» o «el barredor abortó». Nunca reportar un cero no instrumentado.
+  *(Ley elevada a doctrina el 2026-09-18 tras verificar `fb-2086`:
+  `ts.forEachChild` ABORTA la travesía si el callback devuelve truthy ⇒
+  `(c)=>work.push(c)` devuelve la longitud y trunca el walk a 4 nodos, con
+  exit 0 y sin excepción — y su hermano `forEachChildRecursively` conserva el
+  mismo canal de aborto.)*
+- **NO CATEGORIZAR DESDE DOS CASOS: toda generalización declara su `n` y su
+  SCOPE** *(ley elevada a doctrina el 2026-09-18; patrón nombrado por el host,
+  instancia `fb-2090`→`fb-2096`)*. Una categoría dibujada desde una muestra
+  pequeña se rompe con la siguiente muestra que **no pertenecía a la categoría
+  que el autor había dibujado** — y el daño no es el error, es que **la
+  categoría falsa viaja y se cita como hecho**. Tres instancias del MISMO día:
+  **(a)** «los workers no tienen `edit`» — construido desde DOS muestras; el
+  IPH midió una tercera (`builder-437` SÍ tiene `edit`, `explore-deep-125` no)
+  ⇒ la asimetría es **POR ROL**, no global. **(b)** «el destinatario activo»
+  como causa — muestra = la bandeja de UN departamento. **(c)** «el host no
+  puede cerrarlo» — muestra = su propio toolset.
+  ⇒ **REGLA OPERATIVA:** junto a cada afirmación general escribe **`n` (cuántos
+  casos lo sustentan) y el SCOPE (de dónde salieron)**. **«Sé de 2» no es «son
+  todos».** Y si el `n` es pequeño, la forma honesta es la del QH: *«n=3 pares,
+  sólo mi bandeja»* — que se puede citar sin mentir.
+  *(Contravirus complementario al del `0`: la primera ley protege contra un
+  instrumento ciego; ésta, contra una muestra estrecha elevada a categoría.)*
 - Reference prior report paths you build on (≤ 3 per category).
