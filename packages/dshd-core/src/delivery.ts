@@ -59,6 +59,61 @@ import type { DeliveryStatus, MessageRecord } from './messages.js'
 // with and without it).
 const FB467_INSTRUMENTATION_STAMP = 'fb467-i1'
 // ─── [end fb-467 INSTRUMENTATION header] ──────────────────────────────────────
+// ─── GATE LEDGER (2026-09-17, run token 5f015e56) ─────────────────────────────
+// THE SINK the fb-467 gate-decision / gate-verdict families never had. The trace
+// (`reports/explore-deep/2026-09-17-gate-fifo-sin-despertador-479e9953.md` §4B)
+// measured that BOTH lines are `deps.logger.info` and land in NO ledger: the 21
+// hits of the two families in `/.deepartments/` are agent TRANSCRIPTIONS quoting
+// the source, and `grep appendFile|writeFileSync` over THIS file returned 0.
+// Every family that really lands does so through an EXPLICIT appendFile
+// (`retire-dice` ← registry.ts:1744, `deliveries` ← messages.ts:701).
+//
+// ⇒ NO READER WAS MISSING — A SINK WAS. This const is that sink: one append-only
+// JSONL beside the other stateDir ledgers, written by `appendGateLedgerRow`.
+// BOTH families land (routing only one would leave the ledger counting half),
+// and the row carries the RESOLVED discriminator, so a legitimate
+// `headNoWake=false` (correct crash-class retention, fb-117) is finally
+// DISTINGUISHABLE from a silent-failure `undefined` (ENOENT / read error / dep
+// absent — a LOST WAKER), which the legacy ledger wrote identically.
+const GATE_DECISION_LEDGER_FILE = 'gate-decisions.jsonl'
+// ─── [end GATE LEDGER header] ─────────────────────────────────────────────────
+// ─── GATE WAKE (2026-09-17, run token 5f015e56) ───────────────────────────────
+// THE PROGRAMMED WAKE. The hold branch used to retain the row and RETURN —
+// programming NOTHING. The only real waker of a retained queue is `onDelivered`
+// (:763), which fires ONLY on a landed delivery: i.e. when ANOTHER message lands
+// at that recipient. An IDLE recipient never gets that event, so the release
+// depended on third-party traffic or on the 10-min prepared-stuck clock
+// (messages.ts:1185/:2208). Measured over the 233 retained pairs: median 162,2 s
+// and 215/233 released BEFORE the 600 s clock ⇒ the release was an EXTERNAL
+// EVENT, never a scheduled wake (explore-deep-123 §4C).
+//
+// The delay: ONE sweep cadence (RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS = 60 s).
+// It is deliberately WELL BELOW the 600 s prepared-stuck clock (so the release
+// stops depending on it), and ABOVE the +37 s reroute window of the DRENAJE
+// terminalization (so the armed drain never races the orphan closure and
+// duplicates a reroute's content). The timer is `unref()`d — the repo's own
+// pattern (tools.ts:3981/:6784) — so it can never hold the process open.
+const GATE_WAKE_DEFAULT_DELAY_MS = 60_000
+/** GATE WAKE — the FIFO bound of the armed-head set (the once-per-head guard).
+ * A process-lifetime engine never forgets an armed head, so the set is capped;
+ * evicting the oldest can at worst re-arm a wake for a very long-pending head —
+ * the bounded and CORRECT direction (it re-arms a genuinely stuck queue). */
+const GATE_WAKE_ARMED_CAP = 1024
+// ─── [end GATE WAKE header] ───────────────────────────────────────────────────
+
+/** THE GATE LEDGER SINK (2026-09-17, run token 5f015e56): append ONE row to
+ * `<stateDir>/gate-decisions.jsonl`. NON-FATAL BY CONSTRUCTION — a ledger that
+ * cannot be written must NEVER break a delivery (the same fail-soft discipline
+ * as every other observation seam of this module): any error only warns. */
+async function appendGateLedgerRow(deps: DeliveryEngineDeps, row: Record<string, unknown>): Promise<void> {
+  try {
+    const filePath = path.join(deps.stateDir, GATE_DECISION_LEDGER_FILE)
+    await mkdir(path.dirname(filePath), { recursive: true })
+    await appendFile(filePath, `${JSON.stringify(row)}\n`, 'utf8')
+  } catch (error: unknown) {
+    deps.logger.warn(`[deepartments] gate-decision ledger append failed (non-fatal — the delivery is unaffected): ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
 // DRENAJE (2026-09-10): the reroute terminalization reads the SUCCESSOR's pair
 // status before closing the retired id's pair (never close what did not land).
 // fb-467 (2026-09-10): the ORPHAN-HEAD discriminator of the FIFO gate reads the
@@ -69,7 +124,7 @@ const FB467_INSTRUMENTATION_STAMP = 'fb467-i1'
 // `export-parity` pin of the `lib/invoke.js` superset must not grow).
 import { deliveryStatus, parseDeliveryRows, resolveDeliveriesPath } from './messages.js'
 import type { DeliveryRow } from './messages.js'
-import { readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PostEntry, HostEntry } from './registry.js'
 // FASE 2 step (d): the messaging ACL is a PURE module (./acl.js — busProfileFor /
@@ -442,6 +497,39 @@ export interface DeliveryEngineDeps {
    * closure to hold). Fail-soft both ways: the flip is already done when this
    * fires; an absent dep or a THROW → warn only. */
   onRerouted?: (retiredRecipientId: string, successorId: string) => void
+  /** GATE WAKE (2026-09-17, run token 5f015e56) — OPTIONAL: the DELAY of the
+   * wake the FIFO-gate hold PROGRAMS for itself. The hold branch retains the
+   * pair and returns; before this, that return programmed NOTHING, so the
+   * retained ALWAYS-WAKE waited for a LANDED delivery to the same recipient
+   * (`onDelivered`, fired only on delivered/resumed) or for the 10-min
+   * prepared-stuck clock. An IDLE recipient receives neither: the release
+   * depended on third-party traffic (measured: median 162,2 s over 233 retained
+   * pairs, 215/233 released before the 600 s clock — an EXTERNAL EVENT).
+   *
+   * When set, the hold branch arms ONE `setTimeout(delay)` that re-drives the
+   * recipient through `onDelivered` — the SAME production drain transport
+   * (`fireQueueDrain` → `drainRecipientQueue`), so the release is the drain the
+   * contract already names, merely SCHEDULED instead of merely hoped for. The
+   * timer is `unref()`d (it never holds the process) and is ONCE per gating
+   * head: a second retention behind the same head does not re-arm (no 60 s
+   * retry storm — the fb-150 spool class stays closed).
+   *
+   * ABSENT → the timer seam is INERT: the hold keeps its pre-fix behavior
+   * byte-identically (a minimal composition — e.g. a test harness with no drain
+   * transport — is unaffected). The DEFAULT is `GATE_WAKE_DEFAULT_DELAY_MS`
+   * (60 s = one sweep cadence) at the production wiring. */
+  gateWakeDelayMs?: number
+  /** GATE WAKE (2026-09-17, run token 5f015e56) — OPTIONAL: the PROGRAMMED WAKE
+   * itself. Fired ONCE per gating head when a hold armed its timer: the
+   * recipient's retained queue is re-driven NOW instead of waiting for
+   * third-party traffic. The production wiring passes the SAME transport
+   * `onDelivered` fires (`fireQueueDrain` → `drainRecipientQueue`), so the
+   * programmed release and the landed-delivery release are the SAME drain, not
+   * a second, parallel one. ABSENT → the hold still arms NOTHING and warns ONCE
+   * (a composition that asked for a wake it cannot deliver is a LOUD
+   * misconfiguration, never a silent no-op) — and the ledger records
+   * `wakeArmed:false` with the reason. */
+  gateWake?: (recipientId: string, gatingHeadMessageId: string) => void
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -480,6 +568,15 @@ export function frameBusRecord(record: MessageRecord): string {
  * primitives once, so the engine is a single reusable seam per apply.
  */
 export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
+  /** GATE WAKE (2026-09-17, run token 5f015e56): the ARMED heads of this engine
+   * — the gating-head ids whose programmed wake is already pending. ONCE per
+   * head: a second retention behind the SAME head does NOT re-arm (the guard
+   * that keeps the fix from becoming a 60 s retry storm — the fb-150 spool
+   * class). An entry is released when the timer fires, and it is BOUNDED (a
+   * fired head is removed; a long-lived engine cannot grow it without bound).
+   * Per-apply state on the closure — AGENTS.md rule 4 (no module-global mutable
+   * state). */
+  const armedGateWakes = new Set<string>()
   return {
     async deliverOrQueue(recipientId, record, opts = {}): Promise<DeliveryStatus> {
       const framed = frameBusRecord(record)
@@ -601,11 +698,29 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             // (fb-117). `undefined` (dep absent / throw) → the gate applies
             // (the safe default — the discriminator is opt-in via the dep).
             let headNoWake: boolean | undefined
-            try {
-              headNoWake = await deps.earlierHeadIsNoWake?.(recipientId, record.seq)
-            } catch (error: unknown) {
-              deps.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+            // GATE LEDGER (2026-09-17, run token 5f015e56): WHY the discriminator
+            // ended up undefined — the asymmetry the trace measured as invisible.
+            // A resolved `false` is a CORRECT crash-class retention (fb-117); an
+            // `undefined` is a SILENT FAILURE (a lost waker) and it matters WHICH:
+            // a composition without the dep (`dep-absent`) is a wiring gap, while
+            // a THROW is the concurrent-unreadable-sidecar class (the G2 settle
+            // rewrites that same file with a NON-atomic `writeFileSync`,
+            // messages.ts:2599, while this reader is an async `readFile`). The
+            // ENGINE can separate exactly these: the dep's own absence, a caught
+            // throw, and a resolved value.
+            let headNoWakeSource: 'resolved' | 'dep-absent' | 'throw' = 'dep-absent'
+            if (deps.earlierHeadIsNoWake !== void 0) {
+              headNoWakeSource = 'resolved'
+              try {
+                headNoWake = await deps.earlierHeadIsNoWake(recipientId, record.seq)
+              } catch (error: unknown) {
+                headNoWakeSource = 'throw'
+                deps.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+              }
             }
+            /** The RESOLVED discriminator as ONE traceable token — the field the
+             * ledger needs to tell a legitimate retention from a lost waker. */
+            const headNoWakeToken = headNoWakeSource === 'resolved' ? String(headNoWake) : headNoWakeSource
             // fb-467 — the ORPHAN-HEAD discriminator's resolved successor (the
             // address the gating head ALREADY landed at — undefined = no orphan
             // head: the gate applies exactly as today).
@@ -615,8 +730,54 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             // (host liveness) + the batch verdict, emitted ONCE per gated
             // delivery, before any branch (log-only — no delivery can observe it).
             deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-decision id=${record.id} recipient=${recipientId} seq=${record.seq} gated=true materialized=${String(materialized)} runningLive=${String(batchRunning)} batchEligible=${String(opts.batchEligible === true)} noWake=${String(opts.noWake === true)} interrupt=${String(opts.interrupt ?? false)}`)
+            // GATE LEDGER (2026-09-17, run token 5f015e56): the SAME decision,
+            // landed in a durable sink. `headNoWake` is the RESOLVED
+            // discriminator, read from the RESOLUTION (never re-derived) — the
+            // field that makes a legitimate `false` distinguishable from a
+            // silent-failure `undefined`. AWAITED (not fire-and-forget): the sink
+            // is an INSTRUMENT, and an instrument whose rows race the assertions
+            // that read them measures nothing on demand. It is non-fatal by
+            // construction (any write error only warns inside the helper), so
+            // awaiting it can never fail a delivery — and the ledger is then
+            // DETERMINISTIC at the retention instant: the row is on disk BEFORE
+            // the return.
+            await appendGateLedgerRow(deps, {
+              kind: 'gate-decision',
+              at: Date.now(),
+              id: record.id,
+              recipient: recipientId,
+              seq: record.seq,
+              gated: true,
+              materialized: String(materialized),
+              runningLive: String(batchRunning),
+              batchEligible: opts.batchEligible === true,
+              noWake: opts.noWake === true,
+              // `?? false` form on purpose: at this point TS has already narrowed
+              // `opts.interrupt` to `false | undefined` (the gate's own condition
+              // above short-circuits on `interrupt !== true`), so `=== true` is a
+              // TS2367 no-overlap error — and the narrowing is the very proof that
+              // this branch is reached only with interrupt unset.
+              interrupt: opts.interrupt ?? false,
+              headNoWake: headNoWakeToken,
+              awaited: true
+            })
             if (headNoWake === true) {
               deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: the gating head is a NO-WAKE row (noWake:true) — the ALWAYS-WAKE is the real wake and the no-wake head drains with it in seq order (m-2415 — it never blocks)`)
+              // GATE LEDGER (2026-09-17, run token 5f015e56): the SKIP-THEN-WAKE
+              // verdict lands too. m-2415's skip is a GATE DECISION like the other
+              // two, and the ledger that recorded only the holds would report this
+              // delivery as «never gated» — the half-counted ledger §3 forbids.
+              await appendGateLedgerRow(deps, {
+                kind: 'gate-verdict',
+                at: Date.now(),
+                id: record.id,
+                recipient: recipientId,
+                verdict: 'skip-nowake-head',
+                materialized: String(materialized),
+                runningLive: String(batchRunning),
+                headNoWake: headNoWakeToken,
+                awaited: true
+              })
             } else if ((orphanHeadAt = await orphanHeadLandedAtSuccessor(deps, recipientId, record.seq)) !== undefined) {
               // fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane, run token
               // f76ac64b): WHERE THE HEAD CLOSED. The gating head's pair at THIS
@@ -643,6 +804,22 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
               // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the skip verdict
               // with the CATALOG route that produced it + the probes (log-only).
               deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-verdict id=${record.id} recipient=${recipientId} verdict=skip-orphan-head route=reroute successor=${orphanHeadAt} materialized=${String(materialized)} runningLive=${String(batchRunning)}`)
+              // GATE LEDGER (2026-09-17, run token 5f015e56): the SKIP verdict
+              // lands too — routing only the hold would leave the ledger
+              // counting half the gate's decisions (the §3 criterion).
+              await appendGateLedgerRow(deps, {
+                kind: 'gate-verdict',
+                at: Date.now(),
+                id: record.id,
+                recipient: recipientId,
+                verdict: 'skip-orphan-head',
+                route: 'reroute',
+                successor: orphanHeadAt,
+                materialized: String(materialized),
+                runningLive: String(batchRunning),
+                headNoWake: headNoWakeToken,
+                awaited: true
+              })
             } else {
               // P1 (fb-131 — Candidate B observability): resolve the gating seq
               // best-effort (the 'tras m-<seq>' detail of the tool result) + fire
@@ -667,6 +844,116 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
                 fb467CatalogKind = 'probe-failed'
               }
               deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-verdict id=${record.id} recipient=${recipientId} verdict=hold-gated bySeq=${bySeq !== undefined ? `m-${bySeq}` : 'unknown'} route=${fb467CatalogKind} materialized=${String(materialized)} runningLive=${String(batchRunning)}`)
+              // ─── THE FIX (2026-09-17, run token 5f015e56) ───────────────────
+              // THE RETAINER PROGRAMS THE WAKE ITS RELEASE DEPENDS ON. Before
+              // this, the branch retained the row and RETURNED, programming
+              // NOTHING: the release waited for a LANDED delivery to the SAME
+              // recipient (`onDelivered`, fired only on delivered/resumed) or for
+              // the 10-min prepared-stuck clock. An IDLE recipient receives
+              // neither — measured over 233 retained pairs: median 162,2 s with
+              // 215/233 released BEFORE the 600 s clock, i.e. by an EXTERNAL
+              // event, never by a scheduled wake (explore-deep-123 §4C).
+              //
+              // THE ORDERING IS UNTOUCHED — THIS IS NOT «STOP RETAINING». The
+              // pair is still marked 'prepared' and still returns without
+              // splicing: nothing is delivered ahead of the gating head (the
+              // fb-117 guarantee, asserted by the guard half of the lane). What
+              // changes is that the WAKE the head's own drain needs is now
+              // SCHEDULED instead of merely hoped for: the timer fires the SAME
+              // production drain transport `onDelivered` fires, which re-drives
+              // the queue HEAD-FIRST — the head lands first, the followers then,
+              // in seq order.
+              //
+              // NOT ARMED in three cases, each recorded in the ledger with its
+              // reason (never a silent no-op):
+              //   - a DELIBERATE no-wake send: its drain is the recipient's next
+              //     REAL wake (the no-wake-until-wake contract) — arming it would
+              //     silently convert a deliberate noWake into a wake;
+              //   - already armed for this gating head: ONCE per head (no 60 s
+              //     retry storm — the fb-150 spool class stays closed);
+              //   - no transport configured (`gateWake` absent): the engine warns
+              //     ONCE per head instead of pretending it programmed a wake.
+              const gatingHeadKey = bySeq !== undefined ? `m-${bySeq}` : `seq<${record.seq}`
+              const wakeDelayMs = deps.gateWakeDelayMs ?? GATE_WAKE_DEFAULT_DELAY_MS
+              // THE TRANSPORT: the drain the contract already names. `gateWake`
+              // is the explicit override; ABSENT it falls back to the ALREADY
+              // WIRED `onDelivered` — the production drain transport
+              // (`fireQueueDrain` → `drainRecipientQueue`, wired by the bundle
+              // into this very engine). That fallback is what makes this fix
+              // ZERO-WIRING: the transport the landed-delivery path already uses
+              // is simply SCHEDULED instead of only awaited. Nothing new is
+              // configured, and no composition that wired one of the two is
+              // left without a wake.
+              const wakeTransport: ((recipientId: string, gatingHeadMessageId: string) => void) | undefined =
+                deps.gateWake ?? (deps.onDelivered !== void 0 ? (wakeRecipientId: string) => { deps.onDelivered?.(wakeRecipientId) } : undefined)
+              let wakeArmed = false
+              let wakeReason: string
+              if (opts.noWake === true) {
+                wakeReason = 'no-wake-send'
+              } else if (armedGateWakes.has(gatingHeadKey)) {
+                wakeReason = 'already-armed'
+              } else if (wakeTransport === void 0) {
+                wakeReason = 'no-transport'
+                deps.logger.warn(`[deepartments] bus delivery FIFO gate armed NO wake for ${record.id} → ${recipientId} (gating head ${gatingHeadKey}): no drain transport is wired (neither gateWake nor onDelivered) — the retained pair keeps waiting for a landed delivery or the prepared-stuck clock (fb-117 hold unchanged)`)
+              } else {
+                wakeArmed = true
+                wakeReason = 'armed'
+                armedGateWakes.add(gatingHeadKey)
+                // BOUNDED: the set is a process-lifetime memory, so it is capped
+                // FIFO (a Set preserves insertion order). Evicting the OLDEST head
+                // can at worst re-arm a wake for a head that has been pending for
+                // a very long time — the bounded, correct direction (it re-arms a
+                // genuinely stuck queue; it never grows without bound).
+                if (armedGateWakes.size > GATE_WAKE_ARMED_CAP) {
+                  const oldest = armedGateWakes.values().next().value
+                  if (oldest !== undefined) armedGateWakes.delete(oldest)
+                }
+                const fireWake = wakeTransport
+                const timer = setTimeout(() => {
+                  // THE HEAD IS NOT RELEASED HERE — DELIBERATELY. Releasing it
+                  // would let the drain's OWN re-drive re-arm behind the same
+                  // still-pending head, and that is a SELF-FEEDING LOOP: the
+                  // drain re-drives the follower head-first; the follower is
+                  // re-gated behind the unresolved head and arms ANOTHER wake;
+                  // that wake drains again… forever at the wake cadence. The
+                  // guard is therefore ONCE PER GATING HEAD, PERIOD: a head that
+                  // never lands keeps the pre-fix recovery (the 10-min
+                  // prepared-stuck sweep) — the SAME bounded clock as before —
+                  // and the fix only ever converts the TYPICAL case (the head
+                  // lands once the drain reaches it) from «waits for third-party
+                  // traffic» to «scheduled».
+                  try {
+                    fireWake(recipientId, gatingHeadKey)
+                  } catch (error: unknown) {
+                    deps.logger.warn(`[deepartments] programmed gate wake for ${recipientId} threw (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+                  }
+                }, wakeDelayMs)
+                // Never hold the process open (the repo's own pattern:
+                // tools.ts:3981/:6784) — a daemon timer must not block exit.
+                if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
+                deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} retained 'prepared' AND the wake it depends on is PROGRAMMED (gating head ${gatingHeadKey}, in ${wakeDelayMs} ms — the drain re-drives head-first, fb-117 order preserved)`)
+              }
+              // GATE LEDGER (2026-09-17, run token 5f015e56): the HOLD verdict,
+              // landed. `headNoWake` separates a legitimate crash-class retention
+              // from a lost waker; `wakeArmed`/`wakeReason` say whether the
+              // release was SCHEDULED — so the next retained pair is EXPLICABLE
+              // from the ledger instead of inferred after the fact.
+              await appendGateLedgerRow(deps, {
+                kind: 'gate-verdict',
+                at: Date.now(),
+                id: record.id,
+                recipient: recipientId,
+                verdict: 'hold-gated',
+                bySeq: bySeq !== undefined ? `m-${bySeq}` : 'unknown',
+                route: fb467CatalogKind,
+                materialized: String(materialized),
+                runningLive: String(batchRunning),
+                headNoWake: headNoWakeToken,
+                wakeArmed,
+                wakeReason,
+                ...(wakeArmed ? { wakeDelayMs, wakeKey: gatingHeadKey } : {}),
+                awaited: true
+              })
               // DRENAJE (2026-09-10): the gate branch is the SECOND row of a
               // FIFO-gated delivery — the pair-LATEST the re-drive
               // discriminator reads (`latestPerPair` → hasEarlierPendingPair /
