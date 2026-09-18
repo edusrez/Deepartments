@@ -1193,6 +1193,67 @@ export const RE_DELIVERY_PREPARED_STUCK_MS = 10 * 60_000
  * this). A design constant (the lane design §3.1.3 names the default cap 25). */
 export const DRAIN_RECIPIENT_QUEUE_DEFAULT_CAP = 25
 
+// ─── GATE WAKE (2026-09-18, run token b7d562b3) — THE TWIN OF THE delivery.ts
+// FIX (run token 5f015e56) ───────────────────────────────────────────────────
+// THE MEASURED DEFECT: the sweep's `drivePair` gatedHeld branch RETAINED a pair
+// and RETURNED, programming NOTHING. Its own comment declared the intent («the
+// record stays durable 'prepared' and drains at the recipient's next REAL
+// wake») — but nothing ever PROGRAMMED that wake. The release therefore waited
+// for a LANDED delivery to the SAME recipient (an `onDelivered` fire: only
+// third-party traffic) or for the 10-min prepared-stuck clock. A pair retired
+// behind an earlier pending head whose recipient then went IDLE received
+// NEITHER: it stayed varada indefinitely.
+//
+// MEASURED, not inferred (host datapoint, fb-2042/fb-2043): 19 pairs to
+// `internal-programming-head` were retained 2 h 48 min 49,036 s; what released
+// them was NOT the sweep but the LANDING of an unrelated later message
+// (m-16943, delivered @1789704473306) whose `onDelivered` fired the drain — the
+// first re-drive entered +164 ms later and the 19 fell in 11,1 s. That is the
+// proof the sweep SUSTAINS a pair without scheduling its release.
+//
+// THE ORDERING IS UNTOUCHED — this is NOT «stop retaining»: the pair keeps its
+// 'prepared' state and the branch still returns without splicing (nothing is
+// delivered ahead of the gating head — the fb-117 guarantee). What changes is
+// that the wake the release depends on is SCHEDULED instead of hoped for.
+//
+// THE TRANSPORT IS SELF-OWNED HERE — and that is the one deliberate deviation
+// from the engine's shape, grounded in this class's own structure rather than
+// in preference. The engine had to reach for `deps.gateWake ?? deps.onDelivered`
+// because it does not own a drain; `DeliveryRedeliverer` DOES — the retainer and
+// the drain are the SAME object (`drainRecipientQueue`, :2151). So the default
+// transport needs NO wiring at all: the fix is live in every composition that
+// builds this class, including both production paths (the composed core shell
+// and the bundle fallback). `deps.gateWake` stays as an OPTIONAL OVERRIDE for a
+// composition that wants to inject its own transport (the engine's precedence,
+// mirrored); ABSENT it, the fallback is `this.drainRecipientQueue`.
+
+/** GATE WAKE — the bounded delay before the programmed wake fires (60 s, the
+ * engine's own `GATE_WAKE_DEFAULT_DELAY_MS`): long enough that the gating head
+ * has already had its own chance to land (the typical case, where the drain
+ * finds the head resolved and unwinds the whole FIFO behind it), short enough
+ * that a genuinely varada pair is released inside one sweep cadence. */
+const GATE_WAKE_DEFAULT_DELAY_MS = 60_000
+
+/** GATE WAKE — the FIFO cap of the per-instance armed-head set (the engine's
+ * own `GATE_WAKE_ARMED_CAP`): the set is a process-lifetime memory, so it is
+ * capped FIFO (a Set preserves insertion order). Evicting the OLDEST head can at
+ * worst re-arm a wake for a head pending a very long time — the bounded, correct
+ * direction (it re-arms a genuinely stuck queue; it never grows without bound). */
+const GATE_WAKE_ARMED_CAP = 1024
+
+/** GATE WAKE — the `drivePair` wake-programming log token: ONE machine-greppable
+ * family for «the retainer programmed/did not program the wake its release
+ * depends on», with the REASON always named (never a silent no-op). */
+const GATE_WAKE_STAMP = 'gate-wake'
+
+/** GATE WAKE — the reason codes a `drivePair` arm decision records (the
+ * engine's own three, mirrored): `armed` / `no-wake-send` / `already-armed`.
+ * (The engine's fourth, `no-transport`, is UNREACHABLE here by construction: the
+ * fallback transport is this class's OWN drain method, so there is always one —
+ * see the block comment above. Declared rather than dropped: a future move of
+ * the retainer into a drain-less seam would reintroduce it.) */
+type GateWakeReason = 'armed' | 'no-wake-send' | 'already-armed'
+
 /** LANE ②-bis (G2 — the LEGACY 'prepared' residue, host decision 2026-09-03:
  * NO manual drain — the runtime settle covers the batch) — the per-cycle cap
  * of the G2 drain seed: at most this many legacy 'prepared' dust rows are
@@ -1620,6 +1681,32 @@ export interface DeliveryRedelivererDeps {
    * authorized splice) — the engine/orchestration contract decision this lane
    * reports rather than takes. */
   deliver(record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus>
+  /** GATE WAKE (2026-09-18, run token b7d562b3) — OPTIONAL: the DRAIN TRANSPORT
+   * the gatedHeld retainer SCHEDULES (the twin of the engine's `gateWake`,
+   * delivery.ts:847-935). When `drivePair` retains a pair behind an earlier
+   * pending head, the wake that pair's release DEPENDS ON is programmed: the
+   * transport fires the SAME drain the fire points fire, which re-drives the
+   * queue HEAD-FIRST (the head lands, the followers then, in seq order).
+   *
+   * ABSENT IS THE PRODUCTION CASE — and it is NOT a no-op: the fallback is this
+   * class's OWN `drainRecipientQueue` (`this.drainRecipientQueue`), which is
+   * exactly the primitive the production fire points call
+   * (`onDelivered` → `fireQueueDrain` → `drainRecipientQueue`, tools.ts:7574 /
+   * orchestration/delivery.ts:1057). The retainer and the drain are the same
+   * object here, so — unlike the engine, which had to fall back to a
+   * bundle-wired `onDelivered` — this fix is live with ZERO new wiring. A
+   * composition may OVERRIDE the transport via this dep (the engine's
+   * precedence, mirrored: explicit dep wins over the fallback). Fail-soft: a
+   * throw inside the transport is caught and warns (the next wake/sweep
+   * re-evaluates) — a transport bug can never break the re-drive pass. */
+  gateWake?(recipientId: string, gatingHeadMessageId: string): void
+  /** GATE WAKE — OPTIONAL: the delay (ms) before the programmed wake fires
+   * (default `GATE_WAKE_DEFAULT_DELAY_MS`, 60 s — the engine's own default). A
+   * test knob: the same role `DeliveryEngineDeps.gateWakeDelayMs` plays in the
+   * sync fix's acceptance, so the armed wake can be observed INSIDE the test
+   * window instead of sleeping a real minute. Absent → the 60 s production
+   * default (byte-identical for every composition that does not set it). */
+  gateWakeDelayMs?: number
 }
 
 /**
@@ -1755,6 +1842,14 @@ export class DeliveryRedeliverer {
   // drain again) is a NO-OP (returns 0) instead of recursing. Instance state
   // (AGENTS.md rule 4 — no module-global mutable state; one guard per apply).
   private drainingQueues = new Set<string>()
+  // GATE WAKE (2026-09-18, run token b7d562b3) — the ARMED gating heads of this
+  // instance: the head ids whose programmed wake is already pending. ONCE per
+  // head (a second `gatedHeld` retention behind the SAME head does NOT re-arm —
+  // the guard that keeps this fix from becoming a 60 s retry storm, the fb-150
+  // spool class). Bounded FIFO (see GATE_WAKE_ARMED_CAP). INSTANCE state on
+  // purpose — AGENTS.md rule 4: no module-global mutable state (the engine's own
+  // set is per-apply on the closure; its twin belongs to the instance).
+  private readonly armedGateWakes = new Set<string>()
 
   constructor(
     deps: DeliveryRedelivererDeps,
@@ -2062,6 +2157,16 @@ export class DeliveryRedeliverer {
             // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the hold by ID +
             // class + the liveness probes the guard read (log-only).
             logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] drive-hold ${source} id=${row.messageId} recipient=${row.recipientId} class=gatedHeld dormant=${String(this.deps.recipientDormant?.(row.recipientId) === true)} running=${String(this.deps.recipientRunning?.(row.recipientId) === true)} orphanAddress=false`)
+            // ★ THE TWIN FIX (2026-09-18, run token b7d562b3) — THE RETAINER
+            // PROGRAMS THE WAKE ITS RELEASE DEPENDS ON. Everything above this
+            // line is UNCHANGED (the pair is still retained 'prepared', nothing
+            // is spliced ahead of the gating head — the fb-117 order guarantee);
+            // what the line below adds is that the «next REAL wake» the comment
+            // above INVOKES is now SCHEDULED instead of merely hoped for. See
+            // the GATE WAKE block comment (top of this module) for the measured
+            // defect this closes and for the one deliberate deviation from the
+            // engine's shape (the transport here is SELF-OWNED).
+            await this.armGateWakeOnHold(row, record, passCtx, source)
             return
           }
         }
@@ -2096,6 +2201,114 @@ export class DeliveryRedeliverer {
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] ${source} re-delivery ${pairLabel} failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * ★ GATE WAKE (2026-09-18, run token b7d562b3) — THE TWIN OF THE delivery.ts
+   * FIX (run token 5f015e56): the `gatedHeld` retainer PROGRAMS the wake its
+   * release depends on. Called from the ONE branch that used to retain and
+   * return programming nothing; see the GATE WAKE block comment at the top of
+   * this module for the measured defect, the evidence and the transport
+   * decision. This method is the arm DECISION only — it never retains, never
+   * settles and never delivers (the caller's `return` is untouched).
+   *
+   * THE ORDER, mirrored from the engine (delivery.ts:876-935):
+   *   1. derive the GATING-HEAD KEY — arm ONCE PER HEAD (the guard that keeps
+   *      this fix from becoming a 60 s retry storm, the fb-150 spool class);
+   *   2. resolve the TRANSPORT (explicit `deps.gateWake` override, else this
+   *      class's OWN `drainRecipientQueue` — see the dep's doc for why the
+   *      self-owned default is what makes this fix zero-wiring);
+   *   3. name the REASON of every non-arm (never a silent no-op):
+   *      `no-wake-send` (the row is a deliberate noWake — arming it would
+   *      silently convert the no-wake-until-wake contract into a wake) or
+   *      `already-armed` (once per head, period);
+   *   4. `setTimeout(..., wakeDelayMs)` + `unref()`.
+   *
+   * THE HEAD IS NOT RELEASED HERE — DELIBERATELY (the engine's own reasoning,
+   * adopted verbatim because the loop it prevents is structural, not specific
+   * to the engine): releasing the head would let the drain's OWN re-drive
+   * re-arm behind the same still-pending head, and the drain re-drives the
+   * follower head-first — so the follower is re-gated, arms ANOTHER wake, that
+   * wake drains again, forever at the wake cadence. The guard is therefore
+   * ONCE PER GATING HEAD, PERIOD: a head that never lands keeps the pre-fix
+   * recovery (the 10-min prepared-stuck sweep) — the SAME bounded clock as
+   * before — and the fix only converts the TYPICAL case (the head lands once
+   * the drain reaches it) from «waits for third-party traffic» to «scheduled».
+   *
+   * RE-ENTRANCY (the one place the sweep's context differs from the engine's):
+   * this method is called from INSIDE `drivePair`, which `sweepDue` awaits in a
+   * loop, while the armed wake fires a FIRE-AND-FORGET drain 60 s later — long
+   * after the pass returned. It therefore cannot re-enter the pass. If it ever
+   * did, `drainRecipientQueue`'s own per-recipient guard (R1) makes the
+   * re-entrant fire a NO-OP, and the once-per-head key bounds the arming.
+   *
+   * FAIL-SOFT THROUGHOUT: a transport throw warns and returns (the next
+   * wake/sweep re-evaluates); a missing `gateWakeDelayMs` degrades to the 60 s
+   * production default. This method never throws — a re-drive pass must not be
+   * broken by the wake it programs.
+   */
+  private async armGateWakeOnHold(row: DeliveryRow, record: MessageRecord, passCtx: PassContext | undefined, source: string): Promise<void> {
+    const { logger } = this.deps
+    const pairLabel = `${row.messageId} → ${row.recipientId}`
+    try {
+      // 1. THE GATING-HEAD KEY — the SAME derivation the engine uses
+      // (`m-<bySeq>`, delivery.ts:876), resolved through the module's OWN
+      // fb-467 helper `gatingHeadOf` (the EARLIEST strictly-earlier seq whose
+      // pair-latest row is still 'prepared' — exactly the pair the gate
+      // predicate fired on). Read from the pass's OWN row snapshot, so the sweep
+      // needs NO new dep for it. Undefined head (a legacy/non-parseable id)
+      // degrades to a per-pair key: armed once, still bounded, never a no-arm.
+      const rows = await this.passRows(passCtx)
+      const gatingHeadKey = gatingHeadOf(rows, row.recipientId, record.seq)?.messageId ?? `${row.messageId}`
+      // 2. THE TRANSPORT — the explicit override, else this class's OWN drain.
+      const transport: (recipientId: string, gatingHeadMessageId: string) => void = this.deps.gateWake ?? ((recipientId: string, gatingHeadMessageId: string): void => {
+        void this.drainRecipientQueue(recipientId).catch((error: unknown) => {
+          logger.warn(`[deepartments] programmed gate wake drain for "${recipientId}" (gating head ${gatingHeadMessageId}) failed (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+        })
+      })
+      const wakeDelayMs = this.deps.gateWakeDelayMs ?? GATE_WAKE_DEFAULT_DELAY_MS
+      let wakeArmed = false
+      let wakeReason: GateWakeReason
+      if (row.noWake === true) {
+        // A DELIBERATE no-wake send: its drain IS the recipient's next real wake
+        // (the no-wake-until-wake contract) — arming would silently convert a
+        // deliberate noWake into a wake. MIRRORS THE ENGINE'S `no-wake-send`.
+        wakeReason = 'no-wake-send'
+      } else if (this.armedGateWakes.has(gatingHeadKey)) {
+        wakeReason = 'already-armed'
+      } else {
+        wakeArmed = true
+        wakeReason = 'armed'
+        this.armedGateWakes.add(gatingHeadKey)
+        // BOUNDED: the set is a process-lifetime memory (the instance's, per
+        // AGENTS.md rule 4 — never module-global), so it is capped FIFO (a Set
+        // preserves insertion order). See GATE_WAKE_ARMED_CAP.
+        if (this.armedGateWakes.size > GATE_WAKE_ARMED_CAP) {
+          const oldest = this.armedGateWakes.values().next().value
+          if (oldest !== undefined) this.armedGateWakes.delete(oldest)
+        }
+        const fireWake = transport
+        const timer = setTimeout(() => {
+          try {
+            fireWake(row.recipientId, gatingHeadKey)
+          } catch (error: unknown) {
+            logger.warn(`[deepartments] programmed gate wake for ${row.recipientId} threw (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }, wakeDelayMs)
+        // Never hold the process open (the repo's own pattern: tools.ts:3981,
+        // the sweep interval itself) — a daemon timer must not block exit.
+        if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
+      }
+      // 3. THE DECISION, LANDED — one greppable line naming the verdict AND the
+      // reason (a non-arm is EXPLICABLE, never a silent no-op).
+      logger.info(`[deepartments] [${GATE_WAKE_STAMP}] drive-arm ${source} id=${row.messageId} recipient=${row.recipientId} class=gatedHeld wakeArmed=${String(wakeArmed)} wakeReason=${wakeReason} wakeKey=${gatingHeadKey}${wakeArmed ? ` wakeDelayMs=${wakeDelayMs}` : ''}`)
+      if (wakeArmed) {
+        logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} retained 'prepared' AND the wake it depends on is PROGRAMMED (gating head ${gatingHeadKey}, in ${wakeDelayMs} ms — the drain re-drives head-first, fb-117 order preserved)`)
+      }
+    } catch (error: unknown) {
+      // FAIL-SOFT TERMINAL: the arm decision must never break the re-drive pass.
+      logger.warn(`[deepartments] ${source} re-delivery gate-wake arm for ${pairLabel} failed (non-fatal — the pair keeps the pre-fix recovery: the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
