@@ -593,6 +593,12 @@ test('fb132-drain (c1): a REAL wake through the bundle fires the drain — a noW
     ]
   }
   const env = await bootPluginFromSrc(stateDir, org)
+  // The BODY outcome is CAPTURED here and RE-THROWN after the cleanup (below).
+  // A `return` executed inside a `finally` OVERRIDES the pending completion of
+  // its `try`, so the pre-fix shape (two `return`s in the `finally`) silently
+  // swallowed EVERY assertion failure in this body and the test reported `ok`
+  // regardless of its verdict (measured 2026-09-18, run token d4c54a00).
+  let thrown
   try {
     await waitFor(() => env.agents.store.has('head-research-head'), 8000, 'research head materialized')
     const head = env.agents.store.get('head-research-head')
@@ -650,26 +656,37 @@ test('fb132-drain (c1): a REAL wake through the bundle fires the drain — a noW
     // The parked noWake message itself landed (the drain drives noWake:false —
     // the recipient is ALREADY live, zero new materialization):
     assert.ok(splicedTexts.includes('drain probe {"noWake":true}'), 'the parked noWake message text is in the worker inbox (the no-wake-until-wake contract fulfilled at the wake)')
-  } finally {
+  } catch (error) {
+    thrown = error
+  }
+  // CLEANUP — deliberately OUTSIDE a `finally` and with NO `return`: the author's
+  // intent is KEPT (a cleanup residue only WARNS, it never fails the test), while
+  // the BODY throw captured above is ALWAYS re-thrown at the very end, so no
+  // assertion failure in this test can be eaten again. (Reference shape:
+  // test/gate-wake-sweep-gemelo-b7d562b3.test.js:68-92.)
+  try {
     await env.dispose()
-    // The fire-and-forget drain + the bundle's boot continuations may still
-    // hold a writer for a few ms AFTER the loader dispose — a plain rm races
-    // them (ENOTEMPTY). Settle + retry so the cleanup is deterministic; a
-    // final residue warns instead of failing the (already-green) assertions.
-    await new Promise((resolve) => setTimeout(resolve, 150))
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await rm(stateDir, { recursive: true, force: true })
-        return
-      } catch (error) {
-        if (attempt === 4) {
-          console.warn(`[fb132-drain c1] temp stateDir cleanup left a residue (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
-          return
-        }
-        await new Promise((resolve) => setTimeout(resolve, 150))
+  } catch (error) {
+    console.warn(`[fb132-drain c1] loader dispose left an error (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+  }
+  // The fire-and-forget drain + the bundle's boot continuations may still
+  // hold a writer for a few ms AFTER the loader dispose — a plain rm races
+  // them (ENOTEMPTY). Settle + retry so the cleanup is deterministic; a
+  // final residue warns instead of failing the assertions.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(stateDir, { recursive: true, force: true })
+      break
+    } catch (error) {
+      if (attempt === 4) {
+        console.warn(`[fb132-drain c1] temp stateDir cleanup left a residue (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+        break
       }
+      await new Promise((resolve) => setTimeout(resolve, 150))
     }
   }
+  if (thrown !== undefined) throw thrown
 })
 
 // The lane-design constant is reachable (a smoke of the public surface):
