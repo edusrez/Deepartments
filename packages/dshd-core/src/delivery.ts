@@ -1381,9 +1381,56 @@ async function catalogRoute(
   // 'host' ONLY. A 'reroute' is EXCLUDED by construction: its entry is the LIVE
   // SUCCESSOR (a different, sane session), so deferring on the marker of the
   // retired addressed id would park a delivery whose real target is healthy.
+  //
+  // ─── D1 (2026-09-18, run token 1b1ca54c): THE PHASE DISCRIMINATOR ──────────
+  // THE DEFECT THIS CLOSES (measured: 19 pairs retained 2 h 48 min 49,036 s
+  // with the head ALIVE). The deferral's PREMISE is «the next request ALREADY
+  // does not fit» — and the actuator declares TWO tiers with DIFFERENT
+  // consequences (`dshd-health`, `ContextActionMark.phase`, VERBATIM):
+  //   - `'beyond-usable-window'` (band b10, `effective > contextWindow`): «the
+  //     next request is ALREADY REJECTED» ⇒ the premise is TRUE ⇒ DEFER;
+  //   - `'advisory'` (band b9, `effective ≥ 90%` while NOT beyond): «the next
+  //     request STILL FITS but the runway is thin … This is the ONLY tier whose
+  //     act can still save the session» ⇒ the premise is FALSE ⇒ the session
+  //     CAN serve the turn ⇒ materialize it.
+  // The gate used to read `phase` ONLY to log it: it deferred on BOTH tiers. The
+  // measured incident is exactly that — the actuator wrote an `advisory` mark at
+  // 01:10:28.883Z, the gate matched the session, deferred, and sealed `noWake`
+  // (`:1043`); the FIFO gate then read the head as `noWake` ⇒ `skip-nowake-head`
+  // ⇒ NO wake armed, and the re-drive sweep SKIPS every sealed pair whose
+  // recipient is not running (`messages.ts:1983`) ⇒ NOTHING could release them
+  // (a 24 h-lived, never-re-evaluated deferral). They drained only when a later
+  // UNSEALED landing happened to fire the drain, after the head rotated.
+  //
+  // WHY GATING ON `phase` IS THE RIGHT DISCRIMINATOR (and not a heuristic): the
+  // premise that justifies parking a live session's turn is a statement about
+  // the NEXT REQUEST, and `phase` is precisely the actuator's own declared
+  // answer to that question. An `advisory` deferral is premise-FALSE FROM THE
+  // INSTANT IT IS WRITTEN, so no amount of re-evaluation could ever make it
+  // right — it can only delay a turn the session was still able to serve.
+  //
+  // WHAT IS NOT CHANGED: the probe (`contextAdmissionProbe`, the marker reader
+  // with its documented fail-open contract), the `sessionId` comparison itself
+  // (`:1159` — the successor protection), the `sealNoWake` seam (`:1043`), the
+  // FIFO gate branch, and `messages.ts`. Only the DOOR is narrowed.
+  //
+  // FAIL-OPEN, still: an absent `phase` reads as `beyond-usable-window` in the
+  // probe's return (`:1165`) — a legacy/partial marker keeps the PRE-FIX
+  // behavior (defer), so this change can never turn a «cannot serve» marker
+  // into a materialization into a dead session.
   if (route.kind === 'post' || route.kind === 'host') {
     const deferred = await contextAdmissionProbe(deps, recipientId, route.entry.sessionId)
-    if (deferred !== undefined) {
+    if (deferred !== undefined && deferred.phase !== 'beyond-usable-window') {
+      // THE ADVISORY PASS-THROUGH (D1): the premise of a deferral is FALSE in
+      // this tier (the next request STILL FITS). The marker is still READ and
+      // still matched — the probe ran, the session comparison held — but the
+      // turn is MATERIALIZED normally: no `routeOut.deferred`, hence no
+      // `noWake` seal, hence no unsealed-waker class. This log is the lane's
+      // observability (the ledger does NOT record this class —
+      // `appendGateLedgerRow` is only called on the FIFO-gate branch); the
+      // EFFECT evidence is the SIDECAR (`deliveries.jsonl`).
+      deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] context-admission gate: NOT DEFERRING ${record.id} → ${recipientId} — the LIVE session ${deferred.sessionId} matched the marker, but its phase=${deferred.phase} (=${Math.round(deferred.pct * 100)}%) is the tier whose NEXT REQUEST STILL FITS (advisory/b9): deferring here would arm a premise that is false from the instant it is written, and the existing noWake seal + the sealed-pair sweep skip would leave the pair with NO waker (the D1 class: 19 pairs / 2 h 48 min with the recipient ALIVE). The turn is materialized normally.`)
+    } else if (deferred !== undefined) {
       opts.contextDeferred?.({
         recipientId,
         sessionId: deferred.sessionId,
