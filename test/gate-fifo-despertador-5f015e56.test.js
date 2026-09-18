@@ -29,6 +29,14 @@
 // FIXTURE: deterministic (fixture ids only: H is a SANE live post), a temp
 // stateDir per test, the REAL `createDeliveryEngine` + the REAL pure gates from
 // messages.ts, stub wake primitives (0 builds, 0 real APIs).
+//
+// MEASURED COUNT (a measurement, not a memory): THIS FILE CONTAINS **8** TESTS
+// (`grep -c '^test('` = 8, blob `2117798` — identical in `34a7558` and `HEAD`).
+// Any prose that says this file reports «7/7 green» is OFF BY ONE; the same
+// `7-vs-8` drift is the one that let a green of this file be read as coverage of
+// a test that was not being counted. The sibling
+// `test/gate-wake-sweep-gemelo-b7d562b3.test.js:64` carries that «7/7 green»
+// sentence about THIS file and is the place to correct it (not touched here).
 import { register } from 'node:module'
 register(new URL('./ts-src-loader.mjs', import.meta.url), { parentURL: import.meta.url })
 
@@ -58,24 +66,38 @@ const GATE_LEDGER = 'gate-decisions.jsonl'
 
 async function withTempStateDir(fn) {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'gatewake-'))
+  let outcome
+  let thrown
   try {
-    return await fn(stateDir)
-  } finally {
-    // QUIESCE BEFORE teardown: the programmed wake fires a FIRE-AND-FORGET drain
-    // (the production transport's own contract), so a landed pair can still be
-    // appending rows when the assertions finish. Removing the tree under an
-    // in-flight write is an ENOTEMPTY race in the FIXTURE, not a product defect —
-    // so the teardown waits for the writes to settle and retries.
-    for (let attempt = 0; ; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 60))
-      try {
-        await rm(stateDir, { recursive: true, force: true })
-        return
-      } catch (error) {
-        if (attempt >= 5) throw error
+    outcome = await fn(stateDir)
+  } catch (error) {
+    thrown = error
+  }
+  // QUIESCE + CLEANUP — OUTSIDE a `finally`, so a failure can never be eaten: a
+  // `return` executed in a `finally` OVERRIDES any pending throw from the `try`,
+  // which would silently swallow EVERY assertion failure in `fn` and report
+  // `ok`. The outcome (or the throw) is CAPTURED here and re-thrown below, so
+  // the teardown can never mask a verdict.
+  //
+  // The retry STAYS: the programmed wake fires a FIRE-AND-FORGET drain (the
+  // production transport's own contract), so a landed pair can still be
+  // appending rows when the assertions finish. Removing the tree under an
+  // in-flight write is an ENOTEMPTY race in the FIXTURE, not a product defect —
+  // so the teardown waits for the writes to settle and retries.
+  for (let attempt = 0; ; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    try {
+      await rm(stateDir, { recursive: true, force: true })
+      break
+    } catch (error) {
+      if (attempt >= 5) {
+        if (thrown === undefined) thrown = error
+        break
       }
     }
   }
+  if (thrown !== undefined) throw thrown
+  return outcome
 }
 
 function row(messageId, recipientId, status, ts, noWake) {
@@ -549,6 +571,17 @@ test('race (§5a): a THROWING discriminator reader (the concurrent-truncating-wr
 
     const fired = await waitUntil(() => fires.length >= 1, 2000)
     assert.ok(fired, 'the programmed wake FIRED despite the throwing reader (a silent failure can no longer park the pair)')
+    // WAIT ON THE OBSERVABLE, NOT ON A CLOCK. `onDelivered` pushes to `fires`
+    // SYNCHRONOUSLY and only then hands the drain to the void (fire-and-forget,
+    // the production transport's own contract), so the `fires` count is reachable
+    // WHILE the drain is still in flight: asserting the ROUTES at that instant
+    // races the drain that fills them (`[]` vs `['m-780']` vs the full pair) and
+    // made this test flaky. The pair is released ONLY by that drain, so its
+    // settlement is the last observable the assertion below depends on; waiting
+    // for the follower's own delivered row is DETERMINISTIC, and the bounded
+    // timeout keeps the test from hanging (it FAILS with its own message instead).
+    const released = await waitUntil(async () => (await deliveryStatus(stateDir, 'm-781', H)) === 'delivered', 2000)
+    assert.ok(released, 'the thrown-reader pair was RELEASED by the programmed wake (the follower m-781 reached its delivered row), so the FIFO assertion below reads a settled exchange, not a race')
     assert.deepEqual(calls.routes, ['m-780', 'm-781'], 'and the FIFO unwound head-first: the order the gate defends, preserved through the failure')
   })
 })
