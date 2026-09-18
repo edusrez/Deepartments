@@ -11,7 +11,7 @@
 // marker's `sessionId` against the live session (MATCHED), DEFERRED and SEALED
 // `noWake` (`:1043`); the seal made the FIFO gate read the head as `noWake`
 // (`skip-nowake-head`) so NO wake was ever armed; and the re-drive sweep SKIPS
-// every sealed pair whose recipient is not running (`messages.ts:1983`) — so
+// every sealed pair whose recipient is not running — `messages.ts` (2834-line file), the sealed-pair sweep's skip: `if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return` — so
 // nobody could release them. They drained only when a later UNSEALED landing
 // fired the drain, after the head rotated.
 //
@@ -222,7 +222,7 @@ test('D1 FACE (a): `phase:\'advisory\'` + MATCHED marker session ⇒ the deliver
   // the row the sweep/drain/health read must be UNSEALED. A sealed row here is
   // exactly the D1 class — it makes the FIFO gate read `noWake`
   // (`skip-nowake-head`, no wake armed) while the re-drive sweep skips every
-  // sealed pair of a non-running recipient (`messages.ts:1983`).
+  // sealed pair of a non-running recipient — `messages.ts` (2834-line file), the sealed-pair sweep's skip: `if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return`.
   assert.equal(r.latest.noWake, undefined, '(a) THE EFFECT: the pair-latest carries NO `noWake` seal — the D1 waker-starvation class is structurally closed for this tier')
   const pair = r.rows.filter((row) => row.messageId === 'm-400' && row.recipientId === POST)
   assert.equal(pair[0].noWake, undefined, '(a) the write-ahead row is unsealed too (no seal anywhere on the pair)')
@@ -243,7 +243,7 @@ test('D1 FACE (a): `phase:\'advisory\'` + MATCHED marker session ⇒ the deliver
 //      narrated. The incident's chain was: the deferral seals `noWake`
 //      (`delivery.ts:1043`) ⇒ the FIFO gate reads the retained pair as a noWake
 //      HEAD (`gatingHeadIsNoWake`, `messages.ts:812`) ⇒ `skip-nowake-head` ⇒ NO
-//      wake is armed ⇒ the sealed-pair sweep skip (`messages.ts:1983`) leaves
+//      wake is armed ⇒ the sealed-pair sweep skip — `messages.ts` (2834-line file): `if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return` — leaves
 //      nobody to release it.
 //
 //      This test walks that seam with the REAL production predicate: after the

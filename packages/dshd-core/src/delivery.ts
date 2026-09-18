@@ -1398,7 +1398,7 @@ async function catalogRoute(
   // 01:10:28.883Z, the gate matched the session, deferred, and sealed `noWake`
   // (`:1043`); the FIFO gate then read the head as `noWake` ⇒ `skip-nowake-head`
   // ⇒ NO wake armed, and the re-drive sweep SKIPS every sealed pair whose
-  // recipient is not running (`messages.ts:1983`) ⇒ NOTHING could release them
+  // recipient is not running — `messages.ts` (2834-line file), the sealed-pair sweep's skip: `if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return` ⇒ NOTHING could release them
   // (a 24 h-lived, never-re-evaluated deferral). They drained only when a later
   // UNSEALED landing happened to fire the drain, after the head rotated.
   //
