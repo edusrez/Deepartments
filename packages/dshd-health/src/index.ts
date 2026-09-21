@@ -67,6 +67,12 @@ import {
   readDurableRetiredHostIds,
   pickLiveHostEntry,
   BOUND_TEMPLATE_VARS,
+  // ★ THE TWO MISSING AXES (2026-09-21): the house's OWN re-deliverability
+  // predicate — the SAME one the sweep's `noWakeAwake`/`noWakeClosing` split
+  // reads (messages.ts summarizePreparedState), so the starvation axis can
+  // never drift from the census it interrogates (TWO different predicates for
+  // «still winnable» would be a third face of the same class).
+  needsRedelivery,
   // LANE fb-134 F2(b): the STALE-READ CAP helper (the M1 stateStaleMs
   // pattern on store-file reads, opt-in, non-destructive).
   checkStoreFileStale
@@ -524,6 +530,11 @@ export interface HealthHeartbeat {
    * (the fb-27 closure criterion — "0 prepared-stuck > 10 min"). ABSENT → the
    * composition has no sweep (the tick never guesses). */
   sweep?: SweepHealthState
+  /** ★ EJE (i)+(ii) (2026-09-21) — the per-tick STARVATION datum: what the
+   * two missing axes measured THIS tick, in the digest's own units. ABSENT when
+   * the scan did not run (a composition with the axis disabled — never
+   * synthesized). */
+  starvation?: StarvationHealthState
 }
 
 /** FINISHER (2026-09-04, addendum 4 — m-812): the redelivery-sweep health
@@ -581,6 +592,35 @@ export interface SweepHealthState {
   gatedIdleHeld?: number
 }
 
+/** ★ EJE (i)+(ii) (2026-09-21) — THE TWO AXES THE DIGEST WAS MISSING, as the
+ * heartbeat datum: `heldRecipients` (eje i — live recipients carrying ≥1 pair
+ * that never arrived and is over the held-duration bar), `starvedRecipients`
+ * (BOTH thresholds crossed → the tick emitted the `recipient-starved` finding +
+ * host alert) and, when ≥1 subject exists, the MAXIMA of the two clocks
+ * (`oldestAbsenceMs` = eje ii — the largest silence by ABSENCE of arrivals;
+ * `oldestHeldMs` = eje i — the largest age of an undelivered pair). 0 is a REAL
+ * value (the scan observed the ledger and found none) — the field is ABSENT only
+ * when the scan did not run. WHY THE DIGEST NEEDS IT: on 2026-09-18 the same
+ * tick machinery MEASURED the 137-min cut (15 pairs, oldest 92 min,
+ * independently verified) and reported `PASS` because the DECISION read a ~8 h
+ * prose bar and discounted the whole `noWakeHeld` class before looking at its
+ * duration (`.dsh/reports/host/2026-09-18-instrumento-prepared-y-cola-real.md`
+ * §§28/31/36). These four numbers are the missing axis, computed in code. */
+export interface StarvationHealthState {
+  /** Eje (i) — live recipients with ≥1 held (never-arrived, unresolved) pair
+   * over the duration bar, measured in THIS tick. */
+  heldRecipients: number
+  /** Eje (ii) — recipients crossing BOTH thresholds (held pair ∧ arrival
+   * absence) → a finding + host ALERT was emitted this tick. */
+  starvedRecipients: number
+  /** Eje (ii) — the largest measured absence among the subjects (ms). ABSENT
+   * when there were no subjects. */
+  oldestAbsenceMs?: number
+  /** Eje (i) — the largest measured held-pair age among the subjects (ms).
+   * ABSENT when there were no subjects. */
+  oldestHeldMs?: number
+}
+
 /** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
 export function readHealthHeartbeatFile(stateDir: string, opts?: StoreFileReadOpts): HealthHeartbeat | undefined {
   // LANE fb-134 F2(b) — STALE-READ CAP (the M1 stateStaleMs pattern): when the
@@ -619,6 +659,17 @@ export function readHealthHeartbeatFile(stateDir: string, opts?: StoreFileReadOp
           // value — the CURRENT tick observed no stuck worker).
           if (typeof sweep.gatedIdleHeld === 'number') state.gatedIdleHeld = sweep.gatedIdleHeld
           heartbeat.sweep = state
+        }
+      }
+      // ★ EJE (i)+(ii) — the starvation datum read back verbatim (0 is a real
+      // value; the field round-trips only when BOTH counts are finite numbers).
+      if (parsed.starvation !== undefined && typeof parsed.starvation === 'object' && parsed.starvation !== null) {
+        const star = parsed.starvation as Record<string, unknown>
+        if (typeof star.heldRecipients === 'number' && typeof star.starvedRecipients === 'number') {
+          const starState: StarvationHealthState = { heldRecipients: star.heldRecipients, starvedRecipients: star.starvedRecipients }
+          if (typeof star.oldestAbsenceMs === 'number') starState.oldestAbsenceMs = star.oldestAbsenceMs
+          if (typeof star.oldestHeldMs === 'number') starState.oldestHeldMs = star.oldestHeldMs
+          heartbeat.starvation = starState
         }
       }
       return heartbeat
@@ -1127,8 +1178,20 @@ export interface HealthFinding {
      * a re-alert cadence independent of the 30-min L1 key; the L2/L3 findings
      * ALSO ride `recipients` (the census `next:` actors) so the tick can wake
      * the ACTORS via notifyPost — ALERTS only, the actors decide (never
-     * dispatches)). */
-  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait' | 'manager-delivery-stuck' | 'ghost-store' | 'work-register-idle:l2' | 'work-register-idle:l3'
+     * dispatches)). ★ EJE (i)+(ii) (2026-09-21) adds `recipient-starved` (+ its
+   * `:l2` / `:l3` ladder tiers) — THE TWO AXES THE DIGEST WAS MISSING (evidence
+   * §28/§31/§36 of .dsh/reports/host/2026-09-18-instrumento-prepared-y-cola-real.md):
+   * a LIVE catalog recipient carrying ≥1 pair that NEVER ARRIVED and is over the
+   * held-duration bar (eje i — the `noWakeHeld` class the digest discounted, in
+   * its AWAKE direction) AND no `delivered`/`resumed` row addressed to it inside
+   * the absence window (eje ii — absence of arrivals PER RECIPIENT, the axis that
+   * did not exist: on 2026-09-18 the post was `idle` and looked PERFECT while its
+   * supply was cut for 137 min). The ladder's clock is the ABSENCE clock (30 min
+   * L1 → 60 min L2 → 120 min L3, own per-recipient keys in the SHARED ledger);
+   * the L2/L3 findings ALSO carry `recipients` = the starved recipient itself so
+   * the tick can RE-SUPPLY it (notifyPost, QUEUE semantics — never interrupt on a
+   * duration clock). */
+  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait' | 'manager-delivery-stuck' | 'ghost-store' | 'work-register-idle:l2' | 'work-register-idle:l3' | 'recipient-starved' | 'recipient-starved:l2' | 'recipient-starved:l3'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -3128,6 +3191,27 @@ export interface HealthConfigLike {
      * host decision — never hardcoded). An explicit non-empty array
      * overrides. */
     workRegisterIdleL3Heads?: string[]
+    /** ★ EJE (i)+(ii) (2026-09-21) — the per-recipient STARVATION watchdog gate
+     * (default ON; an explicit false disables BOTH axes — no scan, no heartbeat
+     * datum, no finding). */
+    starvationEnabled?: boolean
+    /** EJE (i) — the HELD-DURATION bar in ms (default 1800000 = 30 min): a pair
+     * that never arrived and is still unresolved must be at least this old for
+     * its DURATION to weigh in the decision. Replaces, for the CLASS the digest
+     * discounted, the ~8 h prose bar the digest read on 2026-09-18 (§28).
+     * Absent/invalid → 1800000. */
+    starvationHeldMs?: number
+    /** EJE (ii) — the ARRIVAL-ABSENCE bar in ms (default 1800000 = 30 min): no
+     * `delivered`/`resumed` row addressed to the recipient inside this window.
+     * THIS is the axis that did not exist; it is what fires at ~53 min of a
+     * supply cut, when the system used to write `PASS`. Absent/invalid →
+     * 1800000. */
+    starvationAbsenceMs?: number
+    /** The starvation ladder (default 3600000 = 60 min → the `:l2` finding +
+     * the recipient re-supply wake; 7200000 = 120 min → the `:l3` finding).
+     * The clock is the ABSENCE clock (eje ii). Absent/invalid → code defaults. */
+    starvationEscalT2Ms?: number
+    starvationEscalT3Ms?: number
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -3204,6 +3288,17 @@ export interface HealthDaemonDeps {
    * way (the scan filter pipeline is unchanged) — only the per-tick work
    * shrinks. */
   deliveryRowsReader?: DeliveryRowsReader
+  /** ★ EJE (i)+(ii) (2026-09-21) — the FULL-file delivery-row reader of the
+   * starvation scan. WHY A SECOND SEAM: `deliveryRowsReader` (above) may be a
+   * TAIL reader whose cursor only returns the rows appended since the previous
+   * 60 s tick — and a DURATION axis is precisely the axis a delta cannot serve
+   * (the pairs that make a cut visible were written 92 min ago; the 09-18 digest
+   * saw them only because the JOB read the whole sidecar). ABSENT → the legacy
+   * FULL read (`readDeliveryRowsFull`), which is the CORRECT default here: the
+   * O(ledger) parse per tick is the price of measuring duration at all
+   * (declared in the lane's report; the axis is off with
+   * `health.starvationEnabled === false`). Hermetic tests inject a snapshot. */
+  deliveryRowsFullReader?: DeliveryRowsReader
   /** M1 — the absolute path of the pooler's `keyPooler-state.json` the
    * pooler-capacity watchdog READS (READ-ONLY — the pooler owns every write;
    * the scan never writes it). Absent → the pooler-capacity scan is a no-op
@@ -3920,6 +4015,315 @@ export function scanGatedManagerDeliveryStuck(
     }
   }
   return findings
+}
+
+// ---------------------------------------------------------------------------
+// ★★ EJE (i) + EJE (ii) — LAS DOS DIMENSIONES QUE LE FALTABAN AL DIGEST
+// (petición del host vía el IPH, 2026-09-21; objeto nº1 del valle).
+//
+// EVIDENCIA CITADA — NO re-investigada aquí (`.dsh/reports/host/
+// 2026-09-18-instrumento-prepared-y-cola-real.md`):
+//   - §28: el digest de salud `06d9d605` MIDIÓ BIEN el corte del Research Head
+//     y reportó `PASS`. Verbatim: «`preparedStuckRemaining = 15` —
+//     INDEPENDENTLY VERIFIED … all 15 pairs are addressed to `research-head`, a
+//     LIVE post … ⇒ inside the discounted `noWakeHeld` class. Oldest age 92 min
+//     << the ~8 h (1 digest cycle) escalation bar. NOT escalated; WATCH item» ·
+//     «VERDICT: criterion HOLDS». **No faltaba instrumento: sobraba una regla de
+//     descuento.**
+//   - §31: el corte REAL duró **137 minutos** (última entrega al RD 05:27:14 →
+//     primera entrega tras el reinicio, 07:44:26). El sistema escribió `PASS`
+//     cuando el corte llevaba ~53 min.
+//   - §36: «EL OBJETO Nº1 TIENE DOS EJES, NO UNO — (i) DURACIÓN del par que el
+//     digest DESCUENTA (`noWakeHeld`) · (ii) AUSENCIA DE LLEGADAS POR
+//     DESTINATARIO — el eje que NO EXISTE (los predicados miran AL POST: un post
+//     `idle` con el suministro cortado se ve PERFECTO) … un par sellado tiene
+//     DOS vías de rescate — el barrido (cerrado por CÓDIGO) y una llegada
+//     posterior no sellada (cerrada por el HECHO) ⇒ LA ÚNICA VÍA VIVA ERA LA
+//     LLEGADA, Y LA LLEGADA ES LO QUE SE CORTÓ».
+//
+// POR QUÉ LA DURACIÓN SOLA NO BASTA (medido, 2026-09-21T12:23Z, sobre el ledger
+// vivo `/.deepartments/deliveries.jsonl` — 14792 pares / 1399 destinatarios; ver
+// `probe-starve-c0e965db.mjs` + `probe-sealed-c0e965db.mjs` del workspace IPD):
+// `quality-head` acumula **547 pares sellados** `noWake`, el más antiguo de
+// **16 días** — y son TODOS `self` (`needsRedelivery('self') === false`: la
+// dirección CIERRE del censo, sellado POR DISEÑO). Su última llegada es de hace
+// 0 min. ⇒ La DURACIÓN NO discrimina por sí sola (16 días by-design vs los 92
+// min del corte del RD): **lo que discrimina es la AUSENCIA (eje ii)**. Medido,
+// no supuesto: aplicar `hungry ∧ ausencia ≥ 30 min` sobre el ledger vivo dispara
+// en 3 destinatarios — 2 sesiones host MUERTAS (excluidas por el conjunto de
+// retirados) y `research-head` (2 pares `failed` de la dirección DESPIERTA,
+// **4593 min sin ninguna llegada**).
+//
+// LA DECISIÓN (los DOS umbrales EN CÓDIGO, conjunción — nunca prosa):
+//   EJE (i) — TÉRMINO DE DURACIÓN: el destinatario tiene ≥1 par *hambriento*
+//     (nunca llegó ∧ sin resolver) cuya edad ≥ `starvationHeldMs` (def. 30 min).
+//     «Hambriento» = `!delivered/resumed` ∧ `neverArrived` ∧ (`needsRedelivery`
+//     — la dirección DESPIERTA del censo, `noWakeAwake` — ∨ el asentamiento
+//     enmascarado `terminal` sin entrega previa, el refinamiento fb-132). El
+//     sello `self` by-design NUNCA entra (needsRedelivery false). La SEMÁNTICA DE
+//     FILA que hace esto correcto: un envío `noWake` jamás escribe `delivered`
+//     (delivery.ts:1317 → `prepared`), así que el reloj de llegadas no se
+//     contamina con los sellos.
+//   EJE (ii) — TÉRMINO DE AUSENCIA, POR DESTINATARIO: `now − max(ts de TODA fila
+//     delivered|resumed DE ESE destinatario)` ≥ `starvationAbsenceMs` (def.
+//     30 min). NUNCA mira el estado del post: 0 lecturas de `running`/`sleeping`
+//     (la guarda `running === true` NO explicaba el silencio del RD — estaba
+//     `idle` cuando se le cortó el suministro: §36 + la corrección de la QD); el
+//     sujeto del eje es la PERTENENCIA al catálogo vivo (para no alertar jamás
+//     sobre las ~1400 direcciones muertas del ledger), no su liveness.
+//   ESCALERA EN CÓDIGO (el patrón fb-184 L1/L2/L3, claves propias POR
+//     DESTINATARIO): el reloj es el de AUSENCIA — ≥ T1 (30 min) →
+//     `recipient-starved:<postId>`; ≥ T2 (60 min) → `:l2:<postId>`; ≥ T3
+//     (120 min) → `:l3:<postId>` (el L3 SUPERSEDE al L2, como en el fb-184).
+//     Todas las variantes entran al MISMO pipeline del tick (dedupe 30 min →
+//     `notifyHost` ALERTA + auditoría `health-alerts.jsonl`) y el conteo viaja
+//     además en el heartbeat (`starvation.*`) — el digest NO puede dejar de verlo
+//     (hallazgo computado en código, nunca un juicio a ojo).
+//   UN SOLO ACTUADOR (L2/L3): el tick despierta al destinatario desabastecido
+//     vía `notifyPost` con semántica QUEUE (`interrupt:false`) — «el wake ES el
+//     suministro» en el único sentido legítimo: RE-SUMINISTRAR tras ≥60 min de
+//     silencio medido. NUNCA `interrupt` por un reloj de duración (anti-fb-163/171:
+//     un turno largo legítimo no se aborta por antigüedad).
+//
+// QUÉ **NO** MIDE / LÍMITES DECLARADOS (sin adornos):
+//   - el reloj de llegadas se lee del sidecar `deliveries.jsonl`, que es
+//     COMPACTABLE (boot) ⇒ es un RELOJ-SUELO: la compactación conserva SIEMPRE la
+//     fila LATEST de cada par (compactDeliveryRows), y la fila de llegada de un
+//     par resuelto ES su latest ⇒ el máximo por destinatario no se desinfla; en
+//     el peor caso (un par re-driveado tras una llegada, que el contrato no
+//     produce) el sesgo es a reportar MÁS ausencia, nunca menos. NO es un censo
+//     de entregas (ese error está fichado: fb-2143/§38 — el registRO no es el
+//     HECHO: el log de sesión es el hecho y NO se lee aquí).
+//   - el sujeto son los POSTS del catálogo (`deps.posts`): una dirección HOST
+//     (`host-session-*`) no es sujeto del eje (el plano host tiene su propia
+//     liveness; el corte del 09-18 fue al RD, un post).
+//   - ausencia SIN evidencia de llegada previa (un destinatario sin una sola
+//     fila delivered/resumed en el ledger) NO se certifica: se omite (nunca se
+//     fabrica silencio a partir de un dato ausente).
+//   - una fila `failed` RE-SELLADA por el sweep a `terminal` no aporta edad
+//     nueva: la edad se ancla en el último intento `prepared` (el patrón del
+//     `scanGatedManagerDeliveryStuck`).
+// ---------------------------------------------------------------------------
+
+/** EJE (i) — la clave de dedupe del hallazgo L1 (`recipient-starved:<postId>`).
+ * Module-private: la superficie de exports del bundle está CONGELADA por
+ * `test/export-parity.test.js` (puente `src/core/health.ts`) y ese fichero está
+ * FUERA del scope de esta misión — un export nuevo lo rompería. */
+const RECIPIENT_STARVED_KEY_PREFIX = 'recipient-starved'
+/** EJE (i)+(ii) — las claves propias de la escalera (fb-184): cada tier tiene su
+ * cadencia de re-alerta independiente de la del L1 (30 min). */
+const RECIPIENT_STARVED_L2_KEY_PREFIX = 'recipient-starved:l2'
+const RECIPIENT_STARVED_L3_KEY_PREFIX = 'recipient-starved:l3'
+
+/** EJE (i) — la barra de DURACIÓN por defecto (30 min = 1800000 ms): un par que
+ * nunca llegó y sigue re-drivable debe superar esta edad para que su DURACIÓN
+ * pese en la decisión. La barra del digest era ~8 h (1 ciclo de digest) —
+ * **~5x más larga que el daño que permite**: el corte del 09-18 corrió 137 min
+ * con el sistema reportando `PASS`. */
+const STARVATION_DEFAULT_HELD_MS = 30 * 60_000
+
+/** EJE (ii) — la barra de AUSENCIA por defecto (30 min): ningún `delivered`/
+ * `resumed` hacia ese destinatario dentro de la ventana. Éste es el eje que
+ * habría disparado a los ~53 min del corte del 09-18, cuando el sistema escribió
+ * `PASS`. */
+const STARVATION_DEFAULT_ABSENCE_MS = 30 * 60_000
+
+/** La escalera de reloj (fb-184): ≥ T2 (60 min) → L2 · ≥ T3 (120 min) → L3. El
+ * reloj es el de AUSENCIA (el dato que el eje ii aporta), no la edad del par. */
+const STARVATION_DEFAULT_ESCAL_T2_MS = 60 * 60_000
+const STARVATION_DEFAULT_ESCAL_T3_MS = 120 * 60_000
+
+/** El cap LOG-ONLY de la muestra de pares hambrientos (el patrón fb-467: el
+ * CONTEO siempre es exacto; sólo la lista del log está acotada). */
+const STARVATION_HELD_ID_LOG_CAP = 8
+
+/** EJE (i)+(ii) — el estado agregado de UN destinatario (module-private; el
+ * mínimo que la decisión necesita). */
+interface StarvationRecipientState {
+  postId: string
+  /** Pares de este destinatario que NUNCA llegaron y siguen sin resolver. */
+  hungryCount: number
+  /** El subconjunto `noWake` DESPIERTO (`needsRedelivery`) — la dirección
+   * `noWakeAwake` del censo del barrido, ahora POR DESTINATARIO. */
+  sealedAwakeCount: number
+  /** El ancla del par hambriento más antiguo (su último intento `prepared`, o
+   * su fila latest si nunca hubo intento). */
+  oldestHeldTs: number
+  /** El messageId del par hambriento más antiguo (informativo). */
+  oldestHeldMessageId: string
+  /** El sello `noWake` del par hambriento más antiguo (m-707). */
+  oldestHeldNoWake: boolean
+}
+
+/** EJE (i)+(ii) — la entrada del escaneo. PURA salvo el lector del sidecar. */
+interface StarvationScanInput {
+  /** El catálogo vivo — el SUJETO del eje (nunca su estado). */
+  posts: readonly PostActivityInput[]
+  stateDir: string
+  nowMs: number
+  /** Los ids RETIRADOS (hosts + posts): un destinatario terminal nunca es sujeto
+   * (W7: es terminal, su residuo no re-alerta). */
+  retiredMemberIds?: ReadonlySet<string>
+  /** EJE (i) — la barra de duración (def. STARVATION_DEFAULT_HELD_MS). */
+  heldMs?: number
+  /** EJE (ii) — la barra de ausencia (def. STARVATION_DEFAULT_ABSENCE_MS). */
+  absenceMs?: number
+  /** La escalera (def. 60 / 120 min). */
+  escalT2Ms?: number
+  escalT3Ms?: number
+  /** El lector del sidecar. IMPORTANTE: el tick de PRODUCCIÓN inyecta un lector
+   * TAIL (`deps.deliveryRowsReader`) para los escaneos VENTANEADOS — un delta de
+   * los últimos 60 s NO contiene los pares escritos hace 92 min, así que este eje
+   * usa SU PROPIO lector de fichero completo (def. `readDeliveryRowsFull`). */
+  reader?: DeliveryRowsReader
+}
+
+/** EJE (i)+(ii) — el resultado del escaneo: los hallazgos + los datums que el
+ * heartbeat publica (la MISMA pasada, nunca una segunda lectura). */
+interface StarvationScanResult {
+  findings: HealthFinding[]
+  /** Destinatarios vivos con ≥1 par hambriento por encima de la barra (eje i). */
+  heldRecipients: number
+  /** Destinatarios que cruzan AMBOS umbrales (los sujetos del hallazgo). */
+  starvedRecipients: number
+  /** La AUSENCIA máxima observada entre los sujetos (eje ii). */
+  oldestAbsenceMs?: number
+  /** La edad máxima del par hambriento entre los sujetos (eje i). */
+  oldestHeldMs?: number
+  /** Muestra log-only (`<messageId>@<iso>`), acotada. */
+  heldSample: string[]
+}
+
+/**
+ * ★★ EJE (i)+(ii) — el escaneo de DESABASTECIMIENTO por destinatario. PURE
+ * (salvo el lector inyectable), NUNCA lanza. Ver el bloque de comentario de
+ * arriba para la evidencia citada, la decisión, la escalera y los límites.
+ * Devuelve los hallazgos L1/L2/L3 + los datums del heartbeat en UNA pasada.
+ */
+function scanRecipientStarvation(input: StarvationScanInput): StarvationScanResult {
+  const heldMs = input.heldMs ?? STARVATION_DEFAULT_HELD_MS
+  const absenceMs = input.absenceMs ?? STARVATION_DEFAULT_ABSENCE_MS
+  const escalT2Ms = input.escalT2Ms ?? STARVATION_DEFAULT_ESCAL_T2_MS
+  const escalT3Ms = input.escalT3Ms ?? STARVATION_DEFAULT_ESCAL_T3_MS
+  const findings: HealthFinding[] = []
+  const result: StarvationScanResult = { findings, heldRecipients: 0, starvedRecipients: 0, heldSample: [] }
+  let rows: DeliveryRow[] = []
+  try {
+    rows = (input.reader ?? readDeliveryRowsFull)(input.stateDir)
+  } catch {
+    return result // the scan-absent contract: an unreadable sidecar is NOT a finding
+  }
+  if (rows.length === 0) return result
+  // The per-PAIR ledger (the same latest-per-key view the sweep/G2 use) + the
+  // per-RECIPIENT arrival clock (eje ii). ONE forward pass over the sidecar.
+  const pairLatest = new Map<string, DeliveryRow>()
+  const pairArrived = new Set<string>()
+  const pairLastPreparedTs = new Map<string, number>()
+  const arrivalTs = new Map<string, number>()
+  for (const row of rows) {
+    const key = `${row.messageId}\u0000${row.recipientId}`
+    pairLatest.set(key, row)
+    if (row.status === 'delivered' || row.status === 'resumed') {
+      // EJE (ii) — THE ARRIVAL: the bus reached the recipient (a wake happened).
+      // A `noWake` send NEVER writes this status (delivery.ts:1317 → prepared),
+      // so a sealed pair can never counterfeit an arrival.
+      pairArrived.add(key)
+      const prev = arrivalTs.get(row.recipientId)
+      if (prev === undefined || row.ts > prev) arrivalTs.set(row.recipientId, row.ts)
+    } else if (row.status === 'prepared') {
+      pairLastPreparedTs.set(key, row.ts) // file order is append order ⇒ last wins
+    }
+  }
+  // EJE (i) — the per-recipient HELD class: pairs that NEVER arrived and are
+  // still unresolved (the direction the digest's discount swallowed).
+  const held = new Map<string, StarvationRecipientState>()
+  for (const [key, latest] of pairLatest) {
+    if (pairArrived.has(key)) continue // the pair DID arrive → it is not starving
+    const status = latest.status
+    if (status === 'delivered' || status === 'resumed' || status === 'self') continue // success / the by-design ack-loop seal
+    const awake = needsRedelivery(status)
+    const lastPreparedTs = pairLastPreparedTs.get(key)
+    // The masked-wake refinement (the `scanGatedManagerDeliveryStuck` pattern):
+    // a pair the gated-settle closed to 'terminal' WITHOUT ever arriving is
+    // still a pair whose ONLY live rescue is a later arrival (fb-132).
+    const maskedSettle = status === 'terminal' && lastPreparedTs !== undefined
+    if (!awake && !maskedSettle) continue
+    const anchor = lastPreparedTs ?? latest.ts
+    if (input.nowMs - anchor < heldMs) continue // eje (i): its DURATION did not weigh in yet
+    let state = held.get(latest.recipientId)
+    if (state === undefined) {
+      state = {
+        postId: latest.recipientId,
+        hungryCount: 0,
+        sealedAwakeCount: 0,
+        oldestHeldTs: anchor,
+        oldestHeldMessageId: latest.messageId,
+        oldestHeldNoWake: latest.noWake === true
+      }
+      held.set(latest.recipientId, state)
+    }
+    state.hungryCount++
+    if (latest.noWake === true && awake) state.sealedAwakeCount++
+    if (anchor < state.oldestHeldTs) {
+      state.oldestHeldTs = anchor
+      state.oldestHeldMessageId = latest.messageId
+      state.oldestHeldNoWake = latest.noWake === true
+    }
+  }
+  result.heldRecipients = held.size
+  if (held.size === 0) {
+    // The honest negative (eje i): NO pair is over the held-duration bar at all
+    // — the digest's «0 prepared-stuck» case, certified in the SAME units.
+    return result
+  }
+  const minutes = (ms: number): number => Math.round(ms / 60_000)
+  // EJE (i)+(ii) — the DECISION, per LIVE catalog post (the subject set is
+  // MEMBERSHIP, never the post's own state: no `running`/`sleeping` read).
+  for (const post of input.posts) {
+    if (post.retired === true) continue
+    if (input.retiredMemberIds !== undefined && input.retiredMemberIds.has(post.postId)) continue
+    const state = held.get(post.postId)
+    if (state === undefined) continue // no held pair → nothing whose rescue we can measure
+    const lastArrivalTs = arrivalTs.get(post.postId)
+    if (lastArrivalTs === undefined) continue // no arrival evidence → never certify silence
+    const absenceMs_total = input.nowMs - lastArrivalTs
+    if (absenceMs_total < absenceMs) continue // eje (ii): the recipient IS receiving
+    const heldAgeMs = input.nowMs - state.oldestHeldTs
+    const hungry = state.hungryCount
+    const line =
+      `destinatario "${post.postId}": ${hungry} par(es) sin entregar (el más antiguo ${minutes(heldAgeMs)} min; ` +
+      `${state.sealedAwakeCount} sellado(s) noWake en la dirección DESPIERTA) y ` +
+      `${minutes(absenceMs_total)} min SIN NINGUNA LLEGADA (última ${new Date(lastArrivalTs).toISOString()}) — ` +
+      `corte de suministro medido por AUSENCIA de llegadas (eje ii), no por estado del post; ` +
+      `el par sellado sólo tiene una vía viva de rescate: una llegada posterior`
+    const tier = absenceMs_total >= escalT3Ms ? 3 : absenceMs_total >= escalT2Ms ? 2 : 1
+    const kind: HealthFinding['kind'] = tier === 3 ? 'recipient-starved:l3' : tier === 2 ? 'recipient-starved:l2' : 'recipient-starved'
+    const key =
+      tier === 3
+        ? `${RECIPIENT_STARVED_L3_KEY_PREFIX}:${post.postId}`
+        : tier === 2
+          ? `${RECIPIENT_STARVED_L2_KEY_PREFIX}:${post.postId}`
+          : `${RECIPIENT_STARVED_KEY_PREFIX}:${post.postId}`
+    findings.push({
+      kind,
+      key,
+      postId: post.postId,
+      messageId: state.oldestHeldMessageId,
+      ts: state.oldestHeldTs,
+      count: hungry,
+      // The ladder findings carry the STOCKED recipient so the tick can
+      // RE-SUPPLY it (notifyPost, QUEUE semantics) — on the L2/L3 tiers only.
+      ...(tier >= 2 ? { recipients: [post.postId] } : {}),
+      error: line
+    })
+    result.starvedRecipients++
+    if (result.oldestAbsenceMs === undefined || absenceMs_total > result.oldestAbsenceMs) result.oldestAbsenceMs = absenceMs_total
+    if (result.oldestHeldMs === undefined || heldAgeMs > result.oldestHeldMs) result.oldestHeldMs = heldAgeMs
+    if (result.heldSample.length < STARVATION_HELD_ID_LOG_CAP) {
+      result.heldSample.push(`${state.oldestHeldMessageId}→${post.postId}@${new Date(state.oldestHeldTs).toISOString()}${state.oldestHeldNoWake ? ' (noWake)' : ''}`)
+    }
+  }
+  return result
 }
 
 export function scanHealthCatchup(
@@ -7980,6 +8384,21 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     if (finding.kind === 'work-register-idle:l3') {
       return `- work-register-idle L3: ${finding.error ?? `ESCALADO al owner (D-Q3) — estancamiento ≥90 min sin despacho, census ${finding.count ?? 0} no-gated`}`
     }
+    // ★ EJE (i)+(ii) (2026-09-21) — the STARVATION branches (NEVER let them
+    // reach the stalled-post fallback). The finding's own line carries BOTH
+    // measured terms (the held-pair age = eje i and the ARRIVAL ABSENCE = eje ii)
+    // so every 30-min re-alert stays informative and the host sees the pair AND
+    // the silence it sits in. The L2/L3 wording names the escalation tier
+    // explicitly (the digest must not be able to read this as a WATCH item).
+    if (finding.kind === 'recipient-starved') {
+      return `- recipient-starved: ${finding.error ?? `${finding.postId ?? ''} — pares sin entregar con NINGUNA llegada (eje i duración + eje ii ausencia)`}`
+    }
+    if (finding.kind === 'recipient-starved:l2') {
+      return `- recipient-starved L2 (≥60 min sin llegadas): ${finding.error ?? `${finding.postId ?? ''} — desabastecido; re-despertar al destinatario`}`
+    }
+    if (finding.kind === 'recipient-starved:l3') {
+      return `- recipient-starved L3 (≥120 min sin llegadas — ESCALADO): ${finding.error ?? `${finding.postId ?? ''} — corte de suministro sostenido; el wake ES el suministro`}`
+    }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
@@ -8331,6 +8750,60 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: manager-delivery-stuck scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // ★ EJE (i)+(ii) (2026-09-21) — the STARVATION scan (default ON; an
+    // explicit `health.starvationEnabled === false` disables both axes). It
+    // runs HERE, BEFORE the heartbeat write, so its datum rides THIS tick's
+    // heartbeat (`starvation.*`) exactly like the P1-EXT hold datum rides the
+    // sweep — and its findings feed the SAME alert/dedupe/audit pipeline at
+    // step 3 (composed below — never scanned twice). The knobs resolve before
+    // the `health` binding below (the managerDeliveryStuckEnabled pattern).
+    // NEVER throws (a pure scan; a failure degrades to zero findings + a warn
+    // and the heartbeat still writes).
+    const starvationEnabled = deps.config?.health?.starvationEnabled !== false
+    const starvationHeldMs = resolvePositiveKnob(deps.config?.health?.starvationHeldMs, STARVATION_DEFAULT_HELD_MS)
+    const starvationAbsenceMs = resolvePositiveKnob(deps.config?.health?.starvationAbsenceMs, STARVATION_DEFAULT_ABSENCE_MS)
+    const starvationEscalT2Ms = resolvePositiveKnob(deps.config?.health?.starvationEscalT2Ms, STARVATION_DEFAULT_ESCAL_T2_MS)
+    const starvationEscalT3Ms = resolvePositiveKnob(deps.config?.health?.starvationEscalT3Ms, STARVATION_DEFAULT_ESCAL_T3_MS)
+    let starvationFindings: HealthFinding[] = []
+    let starvationDatum: StarvationHealthState | undefined
+    if (starvationEnabled) {
+      try {
+        const starvation = scanRecipientStarvation({
+          posts,
+          stateDir: deps.stateDir,
+          nowMs,
+          retiredMemberIds,
+          heldMs: starvationHeldMs,
+          absenceMs: starvationAbsenceMs,
+          escalT2Ms: starvationEscalT2Ms,
+          escalT3Ms: starvationEscalT3Ms,
+          // THE FULL LEDGER, never the tail delta (see `deliveryRowsFullReader`):
+          // a duration axis read from a 60 s delta would be blind to the pairs
+          // written 92 min ago — exactly the ones the 09-18 digest measured and
+          // discounted.
+          reader: deps.deliveryRowsFullReader ?? readDeliveryRowsFull
+        })
+        starvationFindings = starvation.findings
+        starvationDatum = {
+          heldRecipients: starvation.heldRecipients,
+          starvedRecipients: starvation.starvedRecipients,
+          ...(starvation.oldestAbsenceMs !== undefined ? { oldestAbsenceMs: starvation.oldestAbsenceMs } : {}),
+          ...(starvation.oldestHeldMs !== undefined ? { oldestHeldMs: starvation.oldestHeldMs } : {})
+        }
+        if (starvation.heldSample.length > 0) {
+          deps.logger?.info?.(
+            `[deepartments] system-health: starvation held=${starvation.heldRecipients} starved=${starvation.starvedRecipients}` +
+              `${starvation.oldestAbsenceMs !== undefined ? ` oldestAbsence=${Math.round(starvation.oldestAbsenceMs / 60_000)}min` : ''}` +
+              `${starvation.oldestHeldMs !== undefined ? ` oldestHeld=${Math.round(starvation.oldestHeldMs / 60_000)}min` : ''}` +
+              ` [${starvation.heldSample.join(', ')}]`
+          )
+        }
+      } catch (error: unknown) {
+        starvationFindings = []
+        starvationDatum = undefined
+        deps.logger?.warn(`[deepartments] system-health: recipient-starvation scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 1. heartbeat (always — even with no anomalies). Post-incidente 2026-09-04:
     // the health datums (surface / nRestarts / crashStreak) ride the heartbeat
     // when the wiring provided them (best-effort — ABSENT → omitted, never
@@ -8348,7 +8821,12 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       // delivery (0 is a REAL value — the tick observed none; the datum is
       // ABSENT only when the whole sweep datum is absent, i.e. a composition
       // without the sweep — never synthesized).
-      ...(deps.sweep !== undefined ? { sweep: { ...deps.sweep, gatedIdleHeld } } : {})
+      ...(deps.sweep !== undefined ? { sweep: { ...deps.sweep, gatedIdleHeld } } : {}),
+      // ★ EJE (i)+(ii) — the starvation datum of THIS tick (0 is a REAL value:
+      // the scan read the ledger and found no held/starved recipient). ABSENT
+      // only when the scan did not run (the axis disabled / a build without the
+      // seam) — never synthesized.
+      ...(starvationDatum !== undefined ? { starvation: starvationDatum } : {})
     })
     // POST-INCIDENTE 2026-09-04: the surface gate's BOOT LOG — the FIRST tick
     // of a new process reports the detected session surface + the breaker
@@ -9065,6 +9543,11 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       // health-alerts ledger dedupes `manager-delivery-stuck:<workerId>` to
       // ≤1 alert per worker per HEALTH_DEDUPE_WINDOW_MS).
       ...managerDeliveryStuckFindings,
+      // ★ EJE (i)+(ii) — the per-recipient starvation findings (L1/L2/L3). They
+      // ride the SAME dedupe/alert/audit path as every other scan: the SHARED
+      // health-alerts ledger gives each tier its own 30-min re-alert cadence on
+      // its own per-recipient key, and the host ALERT names both measured terms.
+      ...starvationFindings,
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
       ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deliveryRowsSnapshotReader),
       // fb-30 CATCH-UP (BOOT only): the bounded pass over the DURABLE event
@@ -9182,6 +9665,32 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
                   await deps.notifyPost(postId, buildHealthAlertFrame([ladder]), { interrupt: true, sourceKey: ladder.key })
                 } catch (error: unknown) {
                   deps.logger?.warn(`[deepartments] system-health: work-register-idle escalation delivery to "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+                }
+              }
+            }
+            // ★ EJE (i)+(ii) — the STARVATION re-supply: a FRESH `:l2`/`:l3`
+            // finding ALSO wakes the STARVED RECIPIENT ITSELF via notifyPost
+            // (§36: «el wake ES el suministro» — the sealed pair's only live
+            // rescue path is a later arrival, and the measured silence is the
+            // evidence that none is coming). `interrupt: false` — QUEUE
+            // semantics, DELIBERATELY (this is the ONE place where the design
+            // departs from the fb-184 ladder above): the stall clock here is a
+            // LACK OF ARRIVALS, which says nothing about whether the recipient is
+            // mid-turn (a long legitimate build looks identical to a cut from
+            // this axis), and this axis NEVER reads `running` (the guard that did
+            // not explain the 09-18 silence — the RD was `idle`). Aborting a live
+            // turn on a duration clock is the fb-163/171 class — so the wake is
+            // QUEUED, never an interrupt. Each with its OWN sourceKey (the tier
+            // key). Absent notifyPost → the HOST still gets the finding in the
+            // ALERT frame; the re-supply is a conservative no-op.
+            for (const finding of findingsToAlert) {
+              const starved = finding.kind === 'recipient-starved:l2' || finding.kind === 'recipient-starved:l3' ? finding : undefined
+              if (starved === undefined) continue
+              for (const postId of starved.recipients ?? []) {
+                try {
+                  await deps.notifyPost(postId, buildHealthAlertFrame([starved]), { interrupt: false, sourceKey: starved.key })
+                } catch (error: unknown) {
+                  deps.logger?.warn(`[deepartments] system-health: starvation re-supply delivery to "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
                 }
               }
             }
