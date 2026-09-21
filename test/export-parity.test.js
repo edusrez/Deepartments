@@ -307,12 +307,17 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // runtime binding (InterruptTriggerRow, GateRefusalRow); the remaining SIX
   // runtime exports are exactly the six measured on the surface. 8 − 2 = 6 = the
   // measured delta: the arithmetic closes to the symbol.
-  // IT IS MULTI-COMMIT DRIFT, NOT ONE COMMIT: the freeze c0b758b (2026-09-16) is
-  // FIVE days before f550d92, SIX commits in that range touched the two
-  // bridge-feeding package sources, and a13de06 (the commit before f550d92)
-  // contributed ZERO runtime surface names — AST-measured it added ONE name,
-  // `StarvationHealthState`, which is TYPE-ONLY. Attributing the whole +6 to a
-  // single commit is wrong; only the last commit of the drift moved the surface.
+  // THE RANGE IS MULTI-COMMIT; THE CAUSE IS ONE COMMIT (corrected 2026-09-21):
+  // the frozen number was set at c0b758b (2026-09-16), SIX commits behind HEAD,
+  // so the surface diff must be MEASURED over `c0b758b..HEAD` (13 source names
+  // added, 6 of which reach this bundle surface). But `git log -S<name>` over
+  // the SIX traces ALL SIX to `f550d92`, and the star bridge they ride
+  // (`export * from './core/health.js'`) is unchanged across that range — so
+  // they cannot have been on the surface before it. `a13de06` (the commit
+  // before) contributed ZERO runtime surface names: its one added name,
+  // `StarvationHealthState`, is TYPE-ONLY. An attribution to any OTHER commit
+  // gets the RANGE wrong; the earlier bare-grep count (8/1) got the COUNT
+  // wrong, never the author.
   // METHOD CORRECTION, CARRIED FORWARD: `dept_feedback_candidates` is NOT an
   // export and MUST NOT be counted here — it is a TOOL-NAME STRING LITERAL inside
   // OWN_LAYER_POST_TOOLS (src/invoke.ts:4186), and `hasOwnProperty` on the loaded
@@ -325,15 +330,12 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // count the artifact REALLY yields (`Object.keys(invoke)` on the module loaded two
   // lines above) — it is NOT a blind constant. Setting this literal back to 343 in a
   // COPY of this test turns it RED with `expected: 343, actual: 349`.
-  // NOTE (the honest part, 2026-09-21): the artifact measured here is PRE-build
-  // (`lib/invoke.js` mtime 14:34 while the uncommitted sources are 17:04-18:19).
-  // 349 is STABLE ACROSS THE PENDING BUILD, with the reason: the uncommitted
-  // sources a rebuild would propagate are reachable ONLY through CURATED package
-  // indexes / named re-export bridges (measured absent from the surface), and
-  // `dshd-health` re-exports NOTHING from `dshd-core` (measured: 4 shared names —
-  // apply/inject/name/createDepsHolder — and ZERO identity-equal bindings). The
-  // residual risk is REAL and is why this line is a prediction, not a fact: it
-  // rests on the CURRENT star-bridge topology, so after the build the number must
-  // be RE-MEASURED, not inherited — a rebuild that adds a star bridge moves it.
+  // NOTE (the honest part, 2026-09-21): MEASURED POST-BUILD — `lib/invoke.js`
+  // mtime 2026-09-21 18:38:49.973535619 +0000, after the deploy build of the
+  // same day (`pnpm build` + `pnpm --filter dshd-core --filter
+  // dshd-orchestration run build`), so the number below is an OBSERVATION, not
+  // a prediction. The residual risk stays REAL: it rests on the CURRENT
+  // star-bridge topology, and a future rebuild that adds a star bridge would
+  // move it — re-measure, never inherit.
   assert.equal(names.length, 349, `lib/invoke.js export count frozen at 349 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
