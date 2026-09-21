@@ -1466,3 +1466,97 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   Referencias: lane O2-ALIGN `9420964` ·
   /root/.deepartments/departments/internal-programming/reports/builder/2026-09-09-cleanup-wt-fbd-nudge-o2-631e8329.md
   y ...-exec-23a00303.md.
+
+---
+
+## 8. DEFAULT-FLIP de la cola (`d46d84b7`) — porqué, y el LÍMITE del instrumento de verificación
+
+> **Registrado por el Asistente (host `15f80d86`), 2026-09-21T19:2xZ.** El cambio entró
+> en `main` con el commit **`c572779`** **sin su razón escrita en el mensaje** (lo
+> clasifiqué como «operador» — error mío de atribución). Este apartado cierra esa deuda:
+> `main` no debe tener un cambio de COMPORTAMIENTO sin su porqué. Texto construido con la
+> redacción del IPH y **sus mediciones re-verificadas por mí en fuente**.
+
+### 8.1 El síntoma (encargo textual del owner)
+
+> «la cola no se drena sola… lo sigue haciendo uno a uno… hay 12 queued».
+
+### 8.2 La causa, medida
+
+El flag `batchEligible` tenía **un solo origen**: `send_message`
+(`packages/dshd-orchestration/src/tools.ts` —
+`const batchEligible = noWake === true || args.interrupt === true ? false : true`).
+**Toda otra clase productora** — avisos del daemon de salud, avisos de agenda/scheduler,
+avisos de post-error — entregaba **1:1 a un destinatario RUNNING pese a usar el mismo
+transporte**. Medido en la sesión viva: la clase marcada daba **0,391 turnos/mensaje**
+(9 items → 23 mensajes) y la no marcada **1,000** (8 → 8); **el flag era la única
+diferencia**.
+
+### 8.3 El cambio
+
+Una costura pura `isBatchEligible(opts)` en `packages/dshd-core/src/delivery.ts`:
+**el flag explícito GANA** (`false` = opt-out 1:1 · `true` = opt-in);
+**AUSENTE = ELEGIBLE**, salvo `noWake`/`interrupt`. La usan el gate fb-117, el transporte
+ALWAYS-WAKE y el registro del ledger.
+
+**El opt-out explícito es deliberado y está medido:** `packages/dshd-orchestration/src/delivery.ts`
+(`deliverBusRecord`, la **costura de RECUPERACIÓN** — el re-drive de arranque y el sweep de
+pares aparcados) pasa `batchEligible: false`. Con el flip dejado elegible,
+`test/wake-seam-mitigation.test.js` **caso 14** (O1 B3 sweep-dormancy) se puso **ROJA**: un
+re-drive a un host corriendo **se acumulaba en vez de ATERRIZAR** y sus pares quedaban
+`prepared` hasta el timeout. **Un re-drive existe para CERRAR un par tardío**: diferirlo a
+un flush recrea el par aparcado que el sweep venía a resolver. Con el opt-out: **14/14**.
+
+### 8.4 🔴 EL LÍMITE DEL INSTRUMENTO DE VERIFICACIÓN (leer ANTES de verificar el despliegue)
+
+El flip añade `batchEligibleDeclared` (`absent` | `true` | `false`), el campo que distingue
+un `false` **deliberado** de un flag **ausente**. **PERO es LOG-ONLY — no va al ledger.**
+Verificado por mí en fuente:
+- `packages/dshd-core/src/delivery.ts:802` — el `logger.info` **SÍ** lo lleva.
+- `:814-833` — `appendGateLedgerRow({…})` **NO** lo lleva (sus campos son
+  `kind, at, id, recipient, seq, gated, materialized, runningLive, batchEligible, noWake,
+  interrupt, headNoWake, awaited`).
+
+⇒ **Quien verifique el despliegue grepeando `batchEligibleDeclared` en
+`gate-decisions.jsonl` obtendrá 0 SIEMPRE — con el código viejo Y con el nuevo — y
+concluirá «el fix no cargó» teniéndolo cargado.** El criterio correcto va **partido por
+campo**:
+- **`batchEligible=true`** ⇒ **SÍ está en el ledger** (`:823`) ⇒ sirve para ver que un
+  aviso del daemon pasó a elegible.
+- **`batchEligibleDeclared`** ⇒ **es la LÍNEA DEL LOG**, la que lleva
+  `FB467_INSTRUMENTATION_STAMP`.
+
+### 8.5 Verificación post-reinicio (lo único que falta)
+
+El **build** está hecho: `grep -c isBatchEligible packages/dshd-core/lib/delivery.js` ⇒ **6**
+(antes 0 ⇒ el «INERT» del informe `d46d84b7` está **caducado**). Falta **sólo el reinicio**.
+Orden: (1) build → hecha; (2) la **línea del LOG** con `batchEligibleDeclared=` presente
+(código nuevo cargado) **y** `batchEligible=true` en el ledger para un aviso del daemon;
+(3) re-medir el ratio de la clase sin-flag contra el **1,000** de línea base.
+
+### 8.6 Límite de alcance — dicho, no rebajado
+
+**La aceptación del owner (N encolados ⇒ ≈⌈N/lote⌉ turnos) NO es alcanzable para todas las
+clases:**
+- **El chat del owner NO es una entrega del bus** (es input del harness:
+  `{"kind":"user","rpcId",…,"clientTimeZone"}`) ⇒ **ningún flag de este repo le aplica**.
+- **El 1:1 estructural es el `Inbox.claim` del HARNESS**: `next-step` reclama la lista
+  ENTERA y **`next-turn` reclama EXACTAMENTE 1**
+  (`…/dsh-agent/lib/types/inbox.js:51-53`, ruta ANIDADA bajo `@deepseek-ai/dsh`) ⇒ está
+  **fuera de este repo**: se eleva al owner de DSH, no se parchea aquí.
+
+### 8.7 Discrepancia declarada (para que no se herede)
+
+El informe `d46d84b7` afirma «`test/batch-drain.test.js` **17/17** (3 corridas)».
+**Medido en 6 pasadas: 17/0 · 16/1 · 17/0 · 17/0 · 17/0 · 16/1** ⇒ **~2/6 fallan.**
+**Tres pasadas limpias no establecen 17/17.** El rojo está **capturado y nombrado**:
+`FB-258 (tool, C1): deliveredAt() …` en **`test/batch-drain.test.js:859`**,
+`expected 1790017547320 / actual 1790017547305` ⇒ **carrera de RELOJ (15 ms), no de
+lógica**; **preexistente** (`75cba35`, fb-258, builder-198) y **el diff del flip NO la
+toca** ⇒ **no la rompió el fix: la destapa el reloj**. **NO se arregla ablandando la
+aserción**: `delivered === pairRows[last].ts` es un oráculo de **coherencia** legítimo; el
+problema es el reloj.
+
+**Referencias:** informe fuente `reports/builder/2026-09-21-cola-no-se-drena-d46d84b7.md`
+(run `d46d84b7`) · redacción del porqué
+`reports/2026-09-21-iph-cola-documentacion-deflip.md` · commit del mecanismo `c572779`.
