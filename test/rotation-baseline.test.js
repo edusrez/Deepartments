@@ -138,24 +138,28 @@ function healthyOldEvents(now = T0) {
   ]
 }
 
-/** The canonical healthy NEW host artifact events: the balanced 5-event seed +
- * exactly one end-seed + exactly ONE handoff notice + a first turn AFTER the
- * handoff. With opts.parked the successor stays BOOT-QUIET (seed + end-seed). */
+/** The canonical healthy NEW host artifact events under the 2026-09-21 contract
+ * (compat 0.1.5): the balanced 4-event seed (setup 0..2 + the title pin at 3 —
+ * the seq-3 `user/message` journal node was RETRACTED) + exactly one end-seed +
+ * exactly ONE handoff notice + a first turn AFTER the handoff. The journal
+ * (orientation) now travels as wake-pack context injection, NOT as a seed node,
+ * so `journalText` is accepted for call-site compatibility but is NOT seeded.
+ * With opts.parked the successor stays BOOT-QUIET (seed + end-seed). */
 function healthyNewEvents(journalText, now, handoffTs, opts = {}) {
+  void journalText // retracted node — kept in the signature for call-site compat
   const events = [
     ev('permission/preset', 0, now + 0, { preset: 'danger-full-access' }),
     ev('sandbox/mode', 1, now + 1, { mode: 'danger-full-access' }),
     ev('approval/policy', 2, now + 2, { policy: 'never' }),
-    ev('user/message', 3, now + 3, { role: 'user', content: [{ type: 'text', text: journalText }], source: { kind: 'plugin', plugin: 'deepartments', form: 'notice' } }),
-    ev('session/title', 4, now + 4, { title: 'Asistente', messageSeqs: [], source: { kind: 'user' } }),
-    ev('session/end-seed', 5, now + 5, {}),
-    ev('user/message', 6, now + 6, { role: 'user', content: [{ type: 'text', text: '[From deepartments → host-session-new]: host session rotation complete (spec 002) — this is the rotation\'s OWN successor handoff.' }], source: { kind: 'system' } })
+    ev('session/title', 3, now + 3, { title: 'Asistente', messageSeqs: [], source: { kind: 'user' } }),
+    ev('session/end-seed', 4, now + 4, {}),
+    ev('user/message', 5, now + 5, { role: 'user', content: [{ type: 'text', text: '[From deepartments → host-session-new]: host session rotation complete (spec 002) — this is the rotation\'s OWN successor handoff.' }], source: { kind: 'system' } })
   ]
   if (opts.parked !== true) {
     events.push(
-      ev('turn/start', 7, handoffTs + 1, { turn: 1 }),
-      ev('user/message', 8, handoffTs + 2, { role: 'user', content: [{ type: 'text', text: 'wake input' }], source: { kind: 'user' } }),
-      ev('turn/end', 9, handoffTs + 3, { turn: 1, reason: { kind: 'completed' } })
+      ev('turn/start', 6, handoffTs + 1, { turn: 1 }),
+      ev('user/message', 7, handoffTs + 2, { role: 'user', content: [{ type: 'text', text: 'wake input' }], source: { kind: 'user' } }),
+      ev('turn/end', 8, handoffTs + 3, { turn: 1, reason: { kind: 'completed' } })
     )
   }
   return events
@@ -392,18 +396,67 @@ test('A-I2b: a dept_sleep call WITHOUT its immediate clean result → `sleep-too
   assert.ok(codesOf(r2).includes('sleep-tool-shape'), `expected sleep-tool-shape for the errored result, got ${JSON.stringify(codesOf(r2))}`)
 })
 
+test('A-I2c NEGATIVE CONTROL (the 0.1.5 regression lock): re-introducing the RETRACTED seq-3 `user/message` journal node in the seed → `seed-unbalanced`; and dropping back to a 4-event seed with the OLD order → `seed-unbalanced` too (the 4-event contract is not a relaxation)', async () => {
+  const fixture = healthyHostFixture(0)
+
+  // (a) The EXACT regression that motivated the realignment: if buildRotationSeed
+  // ever re-emits the surface node (the pre-0.1.5 5-event shape), the detector
+  // must FAIL LOUD — a relaxed assertion would let the unloadable-session class
+  // ship silently. This is the control that proves the assertion can still fail.
+  const withRetracted = await verifyRotationBaseline({
+    ...fixture.deps,
+    decodeArtifact: async (p) => {
+      if (p === '/f/sessions/new.jsonl') {
+        const parsed = fixture.newText.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+        // Re-insert the journal node at seq 3 and shift the rest (the old shape).
+        parsed.splice(3, 0, ev('user/message', 3, T0 + 2003, { role: 'user', content: [{ type: 'text', text: fixture.hjNew }], source: { kind: 'plugin', plugin: 'deepartments', form: 'notice' } }))
+        for (let i = 3; i < parsed.length; i++) parsed[i].seq = i
+        return { lines: parsed.map((e) => JSON.stringify(e)), byteOk: true }
+      }
+      return fixture.deps.decodeArtifact(p)
+    }
+  })
+  const codesRetracted = codesOf(withRetracted)
+  assert.ok(codesRetracted.includes('seed-unbalanced'), `the retracted 5-event seed MUST fail (got ${JSON.stringify(codesRetracted)})`)
+  assert.match(
+    withRetracted.violations.find((v) => v.code === 'seed-unbalanced').detail,
+    /RETRACTED surface node re-appeared in the seed/,
+    'the failure names the retracted surface node explicitly'
+  )
+  assert.equal(withRetracted.ok, false, 'the regression is a RED verdict, not a warning')
+
+  // (b) The OLD ORDER with a 4-event body (title pin at index 3 but a stray
+  // foreign event swapped in) still fails — the contract is the EXACT type/seq
+  // sequence, so this realignment is NOT "4 events, any order".
+  const wrongOrder = await verifyRotationBaseline({
+    ...fixture.deps,
+    decodeArtifact: async (p) => {
+      if (p === '/f/sessions/new.jsonl') {
+        const parsed = fixture.newText.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+        const title = parsed.find((e) => e.type === 'session/title')
+        title.seq = 2 // title pin moved INTO the setup slot
+        const policy = parsed.find((e) => e.type === 'approval/policy')
+        policy.seq = 3
+        return { lines: parsed.map((e) => JSON.stringify(e)), byteOk: true }
+      }
+      return fixture.deps.decodeArtifact(p)
+    }
+  })
+  assert.ok(codesOf(wrongOrder).includes('seed-unbalanced'), `a swapped setup/title order MUST fail (got ${JSON.stringify(codesOf(wrongOrder))})`)
+})
+
 test('A-I2c: NEW pre-turn block — a non-seed event in the block → `seed-unbalanced`; a second turn/start after the first turn/end → `orphan-turn-start`', async () => {
   const fixture = healthyHostFixture(0)
 
-  // Foreign event inside the pre-turn block (a contiguous seq-5 non-seed event —
+  // Foreign event inside the pre-turn block (a contiguous seq-4 non-seed event —
   // the parser sorts by seq, so an out-of-band seq would land after the turn).
   const foreignResult = await verifyRotationBaseline({
     ...fixture.deps,
     decodeArtifact: async (p) => {
       if (p === '/f/sessions/new.jsonl') {
         const parsed = fixture.newText.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
-        parsed.splice(5, 0, ev('request/header', 5, T0 + 2999, { reason: 'change', header: {} }))
-        for (let i = 5; i < parsed.length; i++) parsed[i].seq = i
+        parsed.splice(4, 0, ev('request/header', 4, T0 + 2999, { reason: 'change', header: {} }))
+        for (let i = 4; i < parsed.length; i++) parsed[i].seq = i
         return { lines: parsed.map((e) => JSON.stringify(e)), byteOk: true }
       }
       return fixture.deps.decodeArtifact(p)
@@ -413,7 +466,7 @@ test('A-I2c: NEW pre-turn block — a non-seed event in the block → `seed-unba
 
   // Orphan: a second turn/start after the first turn/end.
   const parsed = fixture.newText.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
-  parsed.push(ev('turn/start', 10, T0 + 3000, { turn: 2 }))
+  parsed.push(ev('turn/start', 9, T0 + 3000, { turn: 2 }))
   const orphanResult = await verifyRotationBaseline({
     ...fixture.deps,
     decodeArtifact: async (p) => {
@@ -428,11 +481,11 @@ test('A-I2d: NEW replays an OLD event (identical type/time/data — the old queu
   const fixture = healthyHostFixture(0)
   const oldEvents = healthyOldEvents(T0)
   const replayed = [
-    ...healthyNewEvents(fixture.hjNew, T0 + 2000, T0 + 1000).slice(0, 5),
-    ev('user/message', 5, T0 + 5, oldEvents[5].data), // the OLD turn-1 input copied verbatim
-    ev('session/end-seed', 6, T0 + 5, {}),
-    ev('turn/start', 7, T0 + 1001, { turn: 1 }),
-    ev('turn/end', 8, T0 + 1002, { turn: 1, reason: { kind: 'completed' } })
+    ...healthyNewEvents(fixture.hjNew, T0 + 2000, T0 + 1000).slice(0, 4),
+    ev('user/message', 4, T0 + 5, oldEvents[5].data), // the OLD turn-1 input copied verbatim
+    ev('session/end-seed', 5, T0 + 5, {}),
+    ev('turn/start', 6, T0 + 1001, { turn: 1 }),
+    ev('turn/end', 7, T0 + 1002, { turn: 1, reason: { kind: 'completed' } })
   ]
   const result = await verifyRotationBaseline({
     ...fixture.deps,
@@ -475,15 +528,18 @@ test('A-I3b/I3c/I3d: the journal pair + the seed node — re-key mismatch → `j
   })
   assert.ok(codesOf(r1).includes('journal-rekey-mismatch'), `expected journal-rekey-mismatch, got ${JSON.stringify(codesOf(r1))}`)
 
-  // I3c — the seed journal node truncates the re-keyed journal.
+  // I3c — the seed journal node truncates the re-keyed journal. CONTRACT
+  // 2026-09-21: the seed no longer carries a journal node, so the verbatim
+  // invariant is exercised WHERE THE NODE STILL ARRIVES — a journal-like node
+  // appended AFTER the seed block (the legacy in-place-fallback append lane).
   const truncated = b.hjNew.slice(0, 40)
   const r2 = await verifyRotationBaseline({
     ...b.deps,
     decodeArtifact: async (p) => {
       if (p === '/f/sessions/new.jsonl') {
         const parsed = b.newText.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
-        const node = parsed.find((e) => e.type === 'user/message' && e.seq === 3)
-        node.data.content[0].text = truncated
+        parsed.splice(4, 0, ev('user/message', 4, T0 + 2004, { role: 'user', content: [{ type: 'text', text: truncated }], source: { kind: 'plugin', plugin: 'deepartments', form: 'notice' } }))
+        for (let i = 4; i < parsed.length; i++) parsed[i].seq = i
         return { lines: parsed.map((e) => JSON.stringify(e)), byteOk: true }
       }
       return b.deps.decodeArtifact(p)
@@ -605,7 +661,8 @@ test('A-I6: handoff + settle — 2 handoff records → `handoff-count`; first tu
   // I6b — the NEW first turn/start time precedes the handoff ts.
   const b2 = healthyHostFixture(0)
   const earlyTurn = healthyNewEvents(b2.hjNew, T0 + 2000, T0 + 1000)
-  earlyTurn[7] = { ...earlyTurn[7], time: T0 + 900 }
+  const earlyIdx = earlyTurn.findIndex((e) => e.type === 'turn/start')
+  earlyTurn[earlyIdx] = { ...earlyTurn[earlyIdx], time: T0 + 900 }
   const r2 = await verifyRotationBaseline({
     ...b2.deps,
     decodeArtifact: async (p) => {
@@ -1219,7 +1276,8 @@ test('B-T1: the REAL rotation on a temp stateDir → wait for the dispose/finali
       // The REAL successor artifact: the REAL recorded seed + end-seed + the
       // handoff notice (ts from the durable record) + a post-handoff turn.
       const seed = recordedSeedFor(env.persistence, newId)
-      assert.ok(seed !== undefined && seed.length === 5, 'the rotation persisted the 5-event seed')
+      assert.equal(seed?.length, 4, 'the rotation persisted the 4-event seed (setup + title pin; the seq-3 journal surface node was RETRACTED for 0.1.5 compat)')
+      assert.deepEqual(seed.map((e) => e.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'], 'the seed carries NO surface node (setup + the title pin only)')
       const handoffRecords = await loadMessageRecords(resolveMessagesPath(stateDir))
       const wake = handoffRecords.find((r) => r.from === 'deepartments' && (r.to ?? []).includes(newHostId))
       assert.ok(wake !== undefined, 'the REAL rotation-wake handoff record is durable')
@@ -1304,22 +1362,26 @@ test('B-AA: rotate the chain 2x — the 2nd assertion uses the 2nd pair ids (no 
       assert.ok(host2 !== undefined, 'the successor is materialized (rotation-1 wake)')
       // The successor's OWN artifact (OLD for rotation 2): the real seed1 +
       // end-seed + handoff node + a turn whose log carries the rotation-2 memo
-      // + sleep pair (result at seq 12 — the real boundarySeq2).
+      // + sleep pair (result at seq 12 — the real boundarySeq2). The seq layout
+      // is DERIVED from seed1 (4 events under the 0.1.5 contract) so the fixture
+      // never hardcodes a seed length.
       const now2 = base + 5000
+      const s1n = seed1.length
       const events2 = [
         ...seed1.map((e) => JSON.parse(JSON.stringify(e))),
-        ev('session/end-seed', 5, now2 - 4, {}),
-        ev('user/message', 6, now2 - 3, { role: 'user', content: [{ type: 'text', text: '[From deepartments → host-session-…]: handoff' }], source: { kind: 'system' } }),
-        ev('turn/start', 7, now2 - 2, { turn: 1 }),
-        ev('user/message', 8, now2 - 1, { role: 'user', content: [{ type: 'text', text: 'wake input' }], source: { kind: 'user' } }),
-        ev('tool/call', 9, now2, { turn: 1, step: 1, callId: 'c-memo-2', name: 'dept_memo_write', arguments: '{}' }),
-        ev('tool/result', 10, now2 + 1, { turn: 1, step: 1, callId: 'c-memo-2', message: { role: 'user', content: [{ type: 'tool-result', text: 'memo 2' }], isError: false, source: { kind: 'tool', callId: 'c-memo-2' } } }),
-        ev('tool/call', 11, now2 + 2, { turn: 1, step: 1, callId: 'c-sleep-2', name: 'dept_sleep', arguments: '{}' }),
-        ev('tool/result', 12, now2 + 3, { turn: 1, step: 1, callId: 'c-sleep-2', message: { role: 'user', content: [{ type: 'tool-result', text: 'sleeping: rotation 2' }], isError: false, source: { kind: 'tool', callId: 'c-sleep-2' } } }),
-        ev('turn/end', 13, now2 + 4, { turn: 1, reason: { kind: 'completed' } })
+        ev('session/end-seed', s1n, now2 - 4, {}),
+        ev('user/message', s1n + 1, now2 - 3, { role: 'user', content: [{ type: 'text', text: '[From deepartments → host-session-…]: handoff' }], source: { kind: 'system' } }),
+        ev('turn/start', s1n + 2, now2 - 2, { turn: 1 }),
+        ev('user/message', s1n + 3, now2 - 1, { role: 'user', content: [{ type: 'text', text: 'wake input' }], source: { kind: 'user' } }),
+        ev('tool/call', s1n + 4, now2, { turn: 1, step: 1, callId: 'c-memo-2', name: 'dept_memo_write', arguments: '{}' }),
+        ev('tool/result', s1n + 5, now2 + 1, { turn: 1, step: 1, callId: 'c-memo-2', message: { role: 'user', content: [{ type: 'tool-result', text: 'memo 2' }], isError: false, source: { kind: 'tool', callId: 'c-memo-2' } } }),
+        ev('tool/call', s1n + 6, now2 + 2, { turn: 1, step: 1, callId: 'c-sleep-2', name: 'dept_sleep', arguments: '{}' }),
+        ev('tool/result', s1n + 7, now2 + 3, { turn: 1, step: 1, callId: 'c-sleep-2', message: { role: 'user', content: [{ type: 'tool-result', text: 'sleeping: rotation 2' }], isError: false, source: { kind: 'tool', callId: 'c-sleep-2' } } }),
+        ev('turn/end', s1n + 8, now2 + 4, { turn: 1, reason: { kind: 'completed' } })
       ]
+      const boundarySeq2 = s1n + 7
       const oldPath2 = await authorArtifact(sessionsRoot, newId1, events2)
-      host2.session = realSessionUpToSleepCall(events2, newId1) // events 0..11 → seq 12 == the tool/result seq
+      host2.session = realSessionUpToSleepCall(events2, newId1) // events 0..(s1n+6) → seq (s1n+7) == the tool/result seq
       const r2 = await env.root.tools.get('dept_sleep').execute({}, { agent: host2, signal, concludeTurn: () => {} })
       assert.match(r2.member, /^host-session-/, 'rotation 2 returned the 2nd NEW host id')
       assert.notEqual(r2.member, newHostId1, 'rotation 2 really minted a NEW id')
@@ -1331,12 +1393,12 @@ test('B-AA: rotate the chain 2x — the 2nd assertion uses the 2nd pair ids (no 
         return snap === (await readFile(oldPath2, 'utf8'))
       }, 5000, 'rotation-2 snapshot finalized')
       const hosts = await readHosts(stateDir)
-      assert.equal(hosts[newHostId2].boundarySeq, 12, 'rotation-2 boundarySeq == the 2nd rotation tool/result seq (12)')
+      assert.equal(hosts[newHostId2].boundarySeq, boundarySeq2, `rotation-2 boundarySeq == the 2nd rotation tool/result seq (${boundarySeq2})`)
       const handoffs2 = await loadMessageRecords(resolveMessagesPath(stateDir))
       const wake2 = handoffs2.find((r) => r.from === 'deepartments' && (r.to ?? []).includes(newHostId2))
       assert.ok(wake2 !== undefined, 'rotation-2 handoff durable')
       const seed2 = recordedSeedFor(env.persistence, newId2)
-      assert.ok(seed2 !== undefined && seed2.length === 5, 'rotation-2 persisted its 5-event seed')
+      assert.equal(seed2?.length, 4, 'rotation-2 persisted the 4-event seed (setup + title pin — the 0.1.5 contract)')
       const s2 = await authorSuccessorArtifact(sessionsRoot, newId2, seed2, wake2.ts)
       const authorMap2 = new Map([
         [newId1, oldPath2],
@@ -1418,11 +1480,13 @@ test('C-T2: dept_head_rotate vía el tool real (patrón invoke.test.js:21792) �
       const createCall = env.agents.createCalls.find((c) => String(c.sessionId) === freshId)
       assert.ok(createCall !== undefined, 'the fresh head was created with the seed')
       const seedEvents = createCall.seed ?? []
-      assert.equal(seedEvents.length, 5, 'the fresh head seed is the balanced 5-event head seed')
-      assert.deepEqual(seedEvents.map((e) => e.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
+      assert.equal(seedEvents.length, 4, 'the fresh head seed is the balanced 4-event head seed (setup + department title pin)')
+      assert.deepEqual(seedEvents.map((e) => e.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'])
+      assert.deepEqual(seedEvents.map((e) => e.seq), [0, 1, 2, 3], 'contiguous seqs 0..3 — the Session ctor contract')
+      assert.equal(seedEvents.at(-1).data.title, 'Research Head', 'the head seed pins the DEPARTMENT title (not the host "Asistente" default)')
       const freshEvents = [
         ...seedEvents.map((e) => JSON.parse(JSON.stringify(e))),
-        ev('session/end-seed', 5, now + 10, {})
+        ev('session/end-seed', 4, now + 10, {})
       ]
       const freshPath = await authorArtifact(sessionsRoot, freshId, freshEvents)
 
@@ -1446,8 +1510,8 @@ test('C-T2: dept_head_rotate vía el tool real (patrón invoke.test.js:21792) �
       const noisyId = freshId + '-noisy'
       const noisy = [
         ...seedEvents.map((e) => JSON.parse(JSON.stringify(e))),
-        ev('session/end-seed', 5, now + 10, {}),
-        ev('user/message', 6, now + 11, { role: 'user', content: [{ type: 'text', text: '[From deepartments → head-research-head]: unexpected wake' }], source: { kind: 'system' } })
+        ev('session/end-seed', 4, now + 10, {}),
+        ev('user/message', 5, now + 11, { role: 'user', content: [{ type: 'text', text: '[From deepartments → head-research-head]: unexpected wake' }], source: { kind: 'system' } })
       ]
       const noisyPath = await authorArtifact(sessionsRoot, noisyId, noisy)
       const noisyMap = new Map([

@@ -212,7 +212,7 @@ import type {
 import { buildSubagentOrientation } from 'dshd-core'
 import type { SubagentRole } from 'dshd-core'
 import type { MessagesStore } from 'dshd-core'
-import { AUTO_RETIRE_DISPOSE_GRACE_MS, probeRotationMintModel } from './delivery.js'
+import { AUTO_RETIRE_DISPOSE_GRACE_MS, probeRotationMintModel, isExistingSessionError as isExistingSessionErrorShared } from './delivery.js'
 import type { DeliverySurface } from './delivery.js'
 import type { HeadToolDisposers, SpawnSurface } from './spawn.js'
 // LANE R4 («aborts sin detalle + clase O1»): the WRITE-AHEAD TOOL-INTENT
@@ -4333,6 +4333,18 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * no durable session exists yet (then create). Always (re)records the
    * registry entry keyed by the stable session id. Piece 1: every branch also
    * fire-and-forgets the workspace attach + the session title pin (sidebar). */
+  /** dev-fix 2026-09-21 (resistencia de arranque): ¿el error es «la sesión ya
+   * existe» del persistence? El harness 0.1.5 es ESTRICTO en `create` y ese
+   * error se escala a **fallo fatal de carga** (el proceso muere y systemd entra
+   * en bucle). La org debe reconocerlo para ROTAR en vez de morir: un artefacto
+   * durable que no se puede reanudar (p. ej. el persistence rechaza migrar un
+   * log v2: «format v2 surface before first step cannot acquire a system head
+   * without changing chronology») NO autoriza a crear encima del mismo id.
+   * U1 (2026-09-21): la definición es ÚNICA y vive en ./delivery.js (donde vive
+   * su gemela `materializePost`); se IMPORTA aquí en vez de duplicarla, para que
+   * las dos rutas de materialización no puedan divergir. */
+  const isExistingSessionError = isExistingSessionErrorShared
+
   const ensureHead = async (department: DepartmentConfig, roomId: string): Promise<void> => {
     const coordinator = department.coordinator
     if (coordinator === void 0) return
@@ -4404,16 +4416,38 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
             handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
             registerEntry(makeEntry(department, roomId, String(sessionId)))
           } catch (error: unknown) {
-            // Resume failed (e.g. no durable session in the persistence store after
-            // a stateDir wipe): fall back to creating a fresh session.
-            ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
-            handle = await agents.create({
-              sessionId: String(sessionId),
-              meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
-              agentOptions,
-              setup
-            })
-            registerEntry(makeEntry(department, roomId, String(sessionId)))
+            // Resume failed. DOS causas distintas NO se pueden confundir (dev-fix
+            // 2026-09-21, incidente del salto a 0.1.5):
+            //  (a) NO hay sesión durable (wipe del stateDir) → create con el MISMO id;
+            //  (b) la sesión durable EXISTE pero NO es reanudable (0.1.5 rechaza
+            //      migrar un artefacto v2). El create sobre ese id lanza
+            //      SessionAlreadyExistsError ⇒ fallo fatal de carga ⇒ bucle de caídas.
+            // Regla (idéntica a la del id archivado): NUNCA crear encima de un id
+            // durable inutilizable — se ROTA a un id fresco y se crea ESE; la
+            // historia queda intacta en el artefacto viejo.
+            const reason = error instanceof Error ? error.message : String(error)
+            ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${reason}`)
+            try {
+              handle = await agents.create({
+                sessionId: String(sessionId),
+                meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
+                agentOptions,
+                setup
+              })
+              registerEntry(makeEntry(department, roomId, String(sessionId)))
+            } catch (createError: unknown) {
+              if (!isExistingSessionError(createError)) throw createError
+              const fresh = String(SessionId(`${HEAD_SESSION_PREFIX}${postId}-${randomUUID()}`))
+              ctx.logger.warn(`[deepartments] head "${postId}": durable session ${String(sessionId)} EXISTS but is NOT resumable (${reason}) — rotating to fresh ${fresh}; a head materialization must never abort the boot`)
+              sessionId = SessionId(fresh)
+              handle = await agents.create({
+                sessionId: fresh,
+                meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
+                agentOptions,
+                setup
+              })
+              registerEntry(makeEntry(department, roomId, fresh))
+            }
           }
         }
       } else {

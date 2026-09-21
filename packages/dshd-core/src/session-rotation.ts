@@ -168,12 +168,26 @@ export function buildRotationSeedMessage(reKeyedJournal: string) {
  */
 export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: string; sandbox?: string; policy?: string; now?: number; title?: string } = {}): RotationSeedEvent[] {
   const now = opts.now ?? Date.now()
-  const message = buildRotationSeedMessage(reKeyedJournal)
+  // dev-fix 2026-09-21 (compat 0.1.5): el nodo `user/message` (un SURFACE_TYPE)
+  // va DESPUÉS de los eventos de setup y ANTES de cualquier «system head», y la
+  // migración v2→v3 de 0.1.5 lo rechaza por diseño:
+  //   «format v2 surface before first step cannot acquire a system head without
+  //    changing chronology» (dsh-session-format-v2-to-v3 lib:733).
+  // Consecuencia medida: TODA sesión creada por rotación (host y heads) nacía
+  // inobservable en 0.1.5 — el chat del Asistente no cargaba, el arranque moría
+  // en bucle al reanudar artefactos v2 y el sidebar mostraba duplicados.
+  // El journal NO se pierde: la orientación viaja como inyección de contexto del
+  // wake pack en `agent/pre-step` («FRESH wake-pack injection at message-arrival
+  // time», packages/dshd-core/src/wakepack.ts) — el mismo carril que ya usa la
+  // org. El seed conserva setup + title-pin (ninguno es surface) y la sesión
+  // nace cargable/observable. `reKeyedJournal` se mantiene en la firma por
+  // compatibilidad de llamadas; el IPD decide la forma final (p. ej. sembrar un
+  // head de sistema antes del mensaje).
+  void reKeyedJournal
   return [
     { type: 'permission/preset', seq: 0, time: now, data: { preset: opts.preset ?? 'danger-full-access' } },
     { type: 'sandbox/mode', seq: 1, time: now, data: { mode: opts.sandbox ?? 'danger-full-access' } },
     { type: 'approval/policy', seq: 2, time: now, data: { policy: opts.policy ?? 'never' } },
-    { type: 'user/message', seq: 3, time: now, data: message as unknown as Record<string, unknown>, surfaceOp: 'append' },
     // U4 — the SESSION TITLE PIN: a user-source `session/title` event in the
     // exact rename() shape (dsh-session-title lib/index.js ~242). The title
     // projection folds last-wins over the log and a user-source pin supersedes
@@ -182,7 +196,9 @@ export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: strin
     // synthetic turn events (blank rows keep the client-side "New Session"
     // label until the first turn). Default: the HOST "Asistente" title (U4);
     // a HEAD rotation passes its DEPARTMENT title (see buildHeadRotationSeed).
-    { type: 'session/title', seq: 4, time: now, data: { title: opts.title ?? ASISTENTE_SESSION_TITLE, messageSeqs: [], source: { kind: 'user' } } }
+    // (Renumerado 3.. tras retirar el nodo surface — las seqs deben ser
+    // contiguas desde 0: el constructor de Session lo valida.)
+    { type: 'session/title', seq: 3, time: now, data: { title: opts.title ?? ASISTENTE_SESSION_TITLE, messageSeqs: [], source: { kind: 'user' } } }
   ]
 }
 

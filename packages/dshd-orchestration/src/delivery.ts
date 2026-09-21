@@ -765,6 +765,28 @@ export interface DeliverySurface {
  * observed 3–34 ms race window and below the delivery-sweep cadence). */
 export const AUTO_RETIRE_DISPOSE_GRACE_MS = 5_000
 
+/** dev-fix 2026-09-21 (resistencia de arranque): ¿el error es «la sesión ya
+ * existe» del persistence? El harness 0.1.5 es ESTRICTO en `create` y ese
+ * error se escala a **fallo fatal de carga** (el proceso muere y systemd entra
+ * en bucle). La org debe reconocerlo para ROTAR en vez de morir: un artefacto
+ * durable que no se puede reanudar (p. ej. el persistence rechaza migrar un
+ * log v2: «format v2 surface before first step cannot acquire a system head
+ * without changing chronology») NO autoriza a crear encima del mismo id.
+ * SINGLE DEFINITION (U1, 2026-09-21): the predicate is SHARED by the TWO
+ * materialization routes — the tools factory `ensureHead` resume→create
+ * fallback (tools.ts) and the delivery factory `materializePost` resume→create
+ * fallback (this module). It lives HERE (and tools.ts imports it) so the two
+ * routes can never diverge into two copies of the same recognition rule.
+ * Exported PACKAGE-INTERNALLY (the probeRotationMintModel /
+ * AUTO_RETIRE_DISPOSE_GRACE_MS precedent): the package index is CURATED (only
+ * the 5 factories + their types), so this name never reaches the frozen
+ * `lib/invoke.js` export surface. */
+export const isExistingSessionError = (error: unknown): boolean => {
+  const name = error instanceof Error ? error.name : ''
+  const message = error instanceof Error ? error.message : String(error)
+  return name === 'SessionAlreadyExistsError' || name === 'SessionAlreadyOwnedError' || /already exists|already owned/i.test(message)
+}
+
 /** R2 (fb-42/25 — the glm-5.3-flash rotation class, feedback fb-42): the
  * ROTATION-MODEL PROBE surface — the minimal `ctx.get('llm')` slice the mint
  * probe reads: the registered provider routes + the per-provider configured
@@ -1492,7 +1514,10 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       registerEntry({ ...entry, previousChildId: previousSession, sleepEpoch: undefined, inflightWorkers: undefined })
       resumed = true
     }
-    const sessionId = SessionId(entry.sessionId)
+    // `let` (not `const`): the U1 durable-unresumable rotation below REPLACES the
+    // entry's unusable durable session id with a FRESH one, and the handle
+    // bookkeeping + the live-target tail must follow the ROTATED id.
+    let sessionId = SessionId(entry.sessionId)
     // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart;
     // clase fb-18 contrato): the GUARD at the LIVE resume branch. A session the
     // harness restored into the agent registry WITHOUT the deepartments setup
@@ -1626,7 +1651,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
           agentOptions: materializeOptions,
           setup
-        }).catch((createError: unknown) => {
+        }).catch(async (createError: unknown): Promise<AgentHandleLike> => {
           // B5 — a WORKER whose create throws "has no provider/model" is the
           // VARIANT-2 / builder-87 ghost: a DURABLE session PRESENT but with NO
           // usable AgentOptions. The fb-6 fallback above has ALREADY resolved a
@@ -1641,12 +1666,41 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // isNoProviderModelError classification — the original text is kept).
           // The marker is CLEARED on a successful materialization (see the
           // return below), so a worker that recovers is never over-retired.
+          // ORDER (U1): the B5 forensics stay FIRST — a no-provider/model error
+          // is NOT an existing-session error, so it never reaches the rotation.
           if (isWorker && isNoProviderModelError(createError)) {
             const forensic = withAgentOptionsContext(createError, agentOptions)
             void markUnusableWorkerSession(stateDir, entry.postId, entry.sessionId, forensic.message)
             throw forensic
           }
-          throw createError
+          // U1 (2026-09-21, la MISMA clase que el fix de tools.ts:4439-4451 —
+          // «resistencia de arranque»): la sesión durable EXISTE pero NO es
+          // reanudable (p. ej. el persistence de 0.1.5 rechaza migrar un
+          // artefacto v2 «format v2 surface before first step cannot acquire a
+          // system head without changing chronology»), así que el create sobre
+          // el MISMO id lanza SessionAlreadyExistsError. SIN este guard ese
+          // error escala a fallo fatal de carga y el arranque ABORTA (el
+          // incidente de amnesia del host). Regla: NUNCA crear encima de un id
+          // durable inutilizable — se ROTA a un id FRESCO (uuid) y se crea ESE;
+          // la historia queda intacta en el artefacto viejo. El CONTROL
+          // POSITIVO es estructural: cualquier OTRO error NO entra aquí y se
+          // propaga (la alarma NO se apaga).
+          if (!isExistingSessionError(createError)) throw createError
+          const fresh = isWorker
+            ? String(SessionId(mintFreshSessionIdNotArchived(workspaceRegistry(), () => mintWorkerSessionId(entry.postId), `worker durable-unresumable "${entry.postId}"`)))
+            : String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
+          ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}": durable session ${String(sessionId)} EXISTS but is NOT resumable (${error instanceof Error ? error.message : String(error)}) — rotating to fresh ${fresh}; a materialization must never abort the boot`)
+          byChild.delete(String(sessionId))
+          registerEntry({ ...entry, sessionId: fresh, previousChildId: String(sessionId), sleepEpoch: undefined, inflightWorkers: undefined })
+          sessionId = SessionId(fresh)
+          // RETURN the fresh handle (the outer assignment consumes it — the
+          // rotation is the value of this catch, exactly like a successful create).
+          return await agents.create({
+            sessionId: fresh,
+            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
+            agentOptions: materializeOptions,
+            setup
+          })
         })
       }
       if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
@@ -2951,7 +3005,29 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       senderSessionId,
       signal,
       interrupt: opts?.interrupt,
-      noWake: opts?.noWake
+      noWake: opts?.noWake,
+      // 2026-09-21 (DEFAULT-FLIP, run token d46d84b7) — THIS WRAPPER IS THE
+      // RECOVERY SEAM: send_message does NOT use it (it calls
+      // `delivery.deliverOrQueue` directly), so every caller here is a
+      // re-drive/backstop family — the boot re-delivery driver, the
+      // prepared-stuck sweep, the destroy-wake, and the scheduler/daemon
+      // producers. MEASURED: leaving the class eligible (the flipped default)
+      // BROKE the sweep's landing contract — `wake-seam-mitigation` case 14
+      // (O1 B3 sweep-dormancy) went RED: the re-drive to a running host
+      // accumulated in the batch drain instead of LANDING, so its pairs stayed
+      // 'prepared' and the wait for 'delivered' timed out (the pre-flip run of
+      // the SAME suite is green — the flip is the only difference).
+      //
+      // WHY 1:1 IS THE CORRECT SEMANTIC HERE (not a lost optimisation): a
+      // re-drive exists to CLOSE a pair that is already late (a crash-class
+      // 'prepared' row, a >10-min stuck pair). Its job is LANDING, not
+      // coalescing — the batch flush is a settle-time event, so deferring a
+      // recovery to it re-creates exactly the parked pair the sweep was called
+      // to resolve. The eligible class the flip targets (the daemon/system
+      // notices, the scheduler/agenda notices — which call `busDeliverToPost`
+      // directly, never this wrapper) keeps the coalescing; the recovery lane
+      // keeps the byte-identical 1:1 landing it was designed with.
+      batchEligible: false
     })
   }
 

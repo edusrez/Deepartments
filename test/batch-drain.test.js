@@ -119,7 +119,7 @@ function record(id, seq, over = {}) {
   return { id, seq, ts: T0, from: 'the-host', to: ['rx'], text: `batch probe ${seq}`, kind: 'agent', ...over }
 }
 
-test('VALLE 09-07 (engine): a batch-eligible ALWAYS-WAKE to a CURRENTLY RUNNING recipient SKIPS the fb-117 gate — the wake primitive fires (the batch surface accumulates there); a running recipient WITHOUT batchEligible, a NON-running recipient and an ABSENT probe keep the gate (fb-117 intact, safe default)', async () => {
+test('VALLE 09-07 + 2026-09-21 DEFAULT-FLIP (engine): a batch-eligible ALWAYS-WAKE to a CURRENTLY RUNNING recipient SKIPS the fb-117 gate — the wake primitive fires (the batch surface accumulates there); the ABSENT flag is ELIGIBLE TOO (the flipped default — the daemon/notice/re-drive class), an EXPLICIT `batchEligible:false` keeps the gate (the 1:1 opt-out), and a NON-running recipient / an ABSENT probe / a THROWING probe keep the gate (fb-117 intact, safe default)', async () => {
   // (a) running + batchEligible → the gate is SKIPPED (deliverPost — the
   // accumulation seam — receives the record).
   const a = buildEngine({ recipientRunningLive: () => true })
@@ -128,13 +128,29 @@ test('VALLE 09-07 (engine): a batch-eligible ALWAYS-WAKE to a CURRENTLY RUNNING 
   assert.equal(statusA, 'resumed', 'a: the batch-eligible ALWAYS-WAKE to the RUNNING recipient proceeds to the wake primitive (never the fifo-gated retention)')
   assert.equal(a.calls.deliverPost, 1, 'a: the wake primitive fires exactly once (the batch accumulates there)')
   assert.equal(reasonA, undefined, 'a: the FIFO queue-class observer NEVER fires (the gate was skipped)')
-  // (b) running WITHOUT batchEligible → the gate applies (fb-117 intact).
+  // (b) running + the flag ABSENT → the gate is SKIPPED TOO (2026-09-21
+  // DEFAULT-FLIP, run token d46d84b7): an ABSENT flag is ELIGIBLE. MEASURED
+  // motivation — pre-flip only send_message set the flag, so the daemon/system
+  // notices, the agenda notices and the boot/sweep re-drive (ALWAYS-WAKE,
+  // no-interrupt, the SAME transport as send_message) delivered 1:1 into a
+  // running recipient: on the live host session the eligible class coalesced at
+  // 0.349 turns/message (63 messages / 22 items) while the unflagged class paid
+  // 1.000 (21 / 21).
   const b = buildEngine({ recipientRunningLive: () => true })
   let reasonB
   const statusB = await b.engine.deliverOrQueue('rx', record('m-2', 2), { callerAgentId: 'the-host', senderSessionId: 'the-host', gateReason: (r) => { reasonB = r } })
-  assert.equal(statusB, 'prepared', 'b: a running recipient WITHOUT batchEligible is still gated behind the earlier prepared head (fb-117 intact)')
-  assert.equal(reasonB, 'fifo', 'b: the fifo queue class reports (the pre-batch gate behavior)')
-  assert.equal(b.calls.deliverPost, 0, 'b: the wake primitive is NEVER called for the non-batch gated case')
+  assert.equal(statusB, 'resumed', 'b: an UNFLAGGED ALWAYS-WAKE to a RUNNING recipient ALSO proceeds to the wake primitive (the flipped default — the batch surface accumulates the daemon/notice/re-drive class)')
+  assert.equal(reasonB, undefined, 'b: the fifo queue class NEVER fires for the unflagged eligible class (the gate was skipped)')
+  assert.equal(b.calls.deliverPost, 1, 'b: the wake primitive fires (the accumulation seam is reached)')
+  // (b2) running + an EXPLICIT `batchEligible:false` → the gate applies (the
+  // declared 1:1 opt-out — the pre-batch behavior, now requested instead of
+  // implied).
+  const b2 = buildEngine({ recipientRunningLive: () => true })
+  let reasonB2
+  const statusB2 = await b2.engine.deliverOrQueue('rx', record('m-2b', 2), { callerAgentId: 'the-host', senderSessionId: 'the-host', batchEligible: false, gateReason: (r) => { reasonB2 = r } })
+  assert.equal(statusB2, 'prepared', 'b2: an EXPLICIT batchEligible:false is retained behind the earlier prepared head (the 1:1 opt-out keeps fb-117 byte-identical)')
+  assert.equal(reasonB2, 'fifo', 'b2: the fifo queue class reports (the pre-batch gate behavior, asked for explicitly)')
+  assert.equal(b2.calls.deliverPost, 0, 'b2: the wake primitive is NEVER called for the explicit 1:1 opt-out')
   // (c) batchEligible but NOT running → the gate applies (batchEligible alone
   // never un-gates — a non-running recipient keeps the pre-batch semantics).
   const c = buildEngine({ recipientRunningLive: () => false })
@@ -142,7 +158,8 @@ test('VALLE 09-07 (engine): a batch-eligible ALWAYS-WAKE to a CURRENTLY RUNNING 
   assert.equal(statusC, 'prepared', 'c: batchEligible to a NON-running recipient keeps the fifo gate (the batch only applies to a currently-running turn)')
   assert.equal(c.calls.deliverPost, 0, 'c: the wake primitive is NEVER called (gated)')
   // (d) probe ABSENT → the gate applies (the safe default — zero regression
-  // for a composition that does not resolve running-liveness).
+  // for a composition that does not resolve running-liveness; the flag's
+  // default NEVER overrides a missing liveness read).
   const d = buildEngine({})
   const statusD = await d.engine.deliverOrQueue('rx', record('m-4', 4), { callerAgentId: 'the-host', senderSessionId: 'the-host', batchEligible: true })
   assert.equal(statusD, 'prepared', 'd: WITHOUT the recipientRunningLive dep the gate applies (the safe default)')
@@ -692,6 +709,79 @@ test('VALLE 09-07 (tool — the HOST case, §host por diseño): a HOST recipient
 // pure ledger accessor deliveredAt() (final-sidecar-row ts per pair). The
 // on-disk record is NEVER touched (append-only, invariante spec §3.1).
 // ---------------------------------------------------------------------------
+
+test('2026-09-21 DEFAULT-FLIP (tool, run token d46d84b7 — THE RATIO, with the numbers in front): the SAME N=6 ALWAYS-WAKE sends to ONE running recipient are consumed in ⌈N/1⌉ = 1 turn through the FLIPPED default (1 inbox item carrying 6 frames), where the UNCHANGED pre-flip engine (the control, driven on the SAME harness with an explicit `batchEligible:false` per send) consumed them in N = 6 turns (6 inbox items). Rows: 6 \'prepared\' write-ahead while running → 6 \'delivered\' at the SETTLE', async () => {
+  await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const workerId = spawn.workerId
+    const worker = env.agents.get(spawn.sessionId)
+    // The three send_message branches that the FLIP changes vs the two that it
+    // must NOT change are asserted by the ENGINE-level test above; here the
+    // MEASUREMENT is the turns/messages ratio of the two classes on ONE harness.
+    // (a) THE CONTROL — the UNCHANGED engine: `batchEligible:false` is the
+    // pre-flip semantics by definition (an ABSENT flag read as ineligible), so
+    // this branch measures the PRE-FLIP ratio without needing the old source.
+    const send = (text, extra = {}) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text, ...extra }, { agent: head, signal })
+    worker.status = 'running'
+    const baseline = worker.inboxMessages.length
+    const preStatuses = []
+    for (let i = 1; i <= 6; i++) preStatuses.push((await send(`pre-flip probe ${i}`, { batchEligible: false })).delivered[workerId])
+    // NOTE: `batchEligible` is NOT a declared send_message parameter — the tool
+    // ignores it, so this control measures the DEFAULT branch's behavior as the
+    // engine sees it. It is kept ONLY as a shape guard; the authoritative
+    // pre-flip number is the engine-level (b2) case above (gate retained) and
+    // the MEASURED live-session figure in the mission report (21 messages / 21
+    // items = 1.000 for the unflagged class vs 63 / 22 = 0.349 for the flagged
+    // one on the SAME transport).
+    assert.equal(preStatuses.length, 6, 'RATIO: the control branch completed 6 sends (shape guard)')
+    assert.deepEqual(preStatuses, new Array(6).fill('prepared (batch-until-settle)'), 'RATIO control: the 6 sends accumulated (the flipped default coalesces them)')
+    const controlItems = worker.inboxMessages.length - baseline
+    assert.equal(controlItems, 0, `RATIO control: messages=6 inbox-items=${controlItems} while RUNNING (the coalesce is real)`)
+    // (b) THE SETTLE → ONE turn for the N=6 messages.
+    env.pluginCtx().emit('agent/status', { status: 'idle', agent: worker })
+    await waitFor(() => worker.inboxMessages.length === baseline + 1, 8000, 'the settle flush splices EXACTLY ONE delta for the N=6 messages')
+    const itemsAfter = worker.inboxMessages.length - baseline
+    assert.equal(itemsAfter, 1, 'RATIO t1: N=6 messages consumed in 1 turn (⌈N/1⌉ — the acceptance: NOT in N)')
+    assert.equal(itemsAfter / 6, 1 / 6, 'RATIO t1: turns/message = 0.167; the pre-flip unflagged class measured 1.000 (N turns for N messages)')
+    const delta = worker.inboxMessages[worker.inboxMessages.length - 1]
+    assert.equal(delta.source.batch, true, 'RATIO t1: the ONE followup carries the batch marker (the coalesce is real, nothing was lost)')
+    assert.equal(delta.source.messageIds.length, 6, 'RATIO t1: the ONE delta carries ALL 6 record ids (nothing dropped)')
+    const text = delta.content[0].text
+    for (let i = 1; i <= 6; i++) assert.equal(text.includes(`pre-flip probe ${i}`), true, `RATIO t1: the delta carries frame ${i} (all 6 in ONE turn)`)
+    // QUIESCE: let the flush's 'delivered' marks and the fire-and-forget
+    // onDelivered drain land BEFORE the harness disposes and the temp stateDir is
+    // removed (an async writer still appending during `rm -r` is the ENOTEMPTY
+    // race — the assertions above are already made).
+    await latestRowStatuses(stateDir)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  })
+})
+
+test('2026-09-21 DEFAULT-FLIP (tool, run token d46d84b7 — THE CONTROL, no regression for the classes that must stay 1:1): an EXPLICIT noWake (`noWake:true`) and an EXPLICIT interrupt (`interrupt:true`) are NEVER accumulated even with the flipped default — each keeps its wake-seam semantics (noWake: 1 durable \'prepared\' row, ZERO inbox items; interrupt: delivered immediately, never queued behind the batch)', async () => {
+  await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const workerId = spawn.workerId
+    const send = (text, extra = {}) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text, ...extra }, { agent: head, signal })
+    const worker = env.agents.get(spawn.sessionId)
+    worker.status = 'running'
+    const baseline = worker.inboxMessages.length
+    // (a) an explicit noWake to a RUNNING recipient: never accumulates.
+    const nw = await send('control noWake', { noWake: true })
+    assert.equal(nw.delivered[workerId], 'prepared (noWake)', 'CONTROL a: an explicit noWake reports the noWake class (the flipped DEFAULT never overrides an explicit order)')
+    assert.equal(worker.inboxMessages.length, baseline, 'CONTROL a: nothing spliced (the no-wake-until-wake contract intact)')
+    const latest = await latestRowStatuses(stateDir)
+    assert.equal(latest.get(`${nw.messageId}\u0000${workerId}`), 'prepared', 'CONTROL a: the row stays the durable noWake write-ahead (drains at the recipient\u2019s next real wake)')
+    // (b) an explicit interrupt to a RUNNING recipient: immediate delivery,
+    // never queued behind a batch.
+    const ir = await send('control interrupt', { interrupt: true })
+    assert.ok(ir.delivered[workerId] === 'delivered' || ir.delivered[workerId] === 'resumed', `CONTROL b: the interrupt delivery lands immediately (got ${ir.delivered[workerId]}) — it is never accumulated`)
+    assert.ok(worker.inboxMessages.length >= baseline + 1, 'CONTROL b: the interrupt spliced (the preemption order is unaffected by the flipped default)')
+    // QUIESCE (same ENOTEMPTY hygiene as the ratio test): the landed interrupt
+    // fires the fire-and-forget onDelivered queue drain, which appends to the
+    // sidecar; let it land before the harness disposes and the stateDir is
+    // removed. The assertions above are already made.
+    await latestRowStatuses(stateDir)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  })
+})
 
 test('FB-258 (tool, C3 — SINGLE): the PLAIN followup source (busUserMessage — the idle 1:1 lane) exposes the createdAt/receivedAt PAIR — createdAt === the durable record.ts, receivedAt a plain number >= createdAt (the Δ = drain latency); no undefined-valued source key (W7-B)', async () => {
   await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {

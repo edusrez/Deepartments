@@ -624,13 +624,26 @@ function assertSuccessorShape(
   const firstTurnStartIndex = events.findIndex((ev) => ev.type === 'turn/start')
   const preTurn = firstTurnStartIndex === -1 ? events : events.slice(0, firstTurnStartIndex)
 
-  const seedTypes = ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title']
-  const allowedPreTurn = new Set([...seedTypes, 'session/end-seed'])
+  // CONTRACT 2026-09-21 (compat 0.1.5 — dev-fix of session-rotation.ts): the seed
+  // is setup + TITLE PIN ONLY (4 events, seqs 0..3). The old seq-3 `user/message`
+  // journal node was RETRACTED: it is a SURFACE_TYPE appearing before the first
+  // step, and the harness's v2→v3 migration rejects it by design ("format v2
+  // surface before first step cannot acquire a system head without changing
+  // chronology"), which made every rotated session unloadable. The orientation
+  // now travels as wake-pack context injection at message-arrival time
+  // (`agent/pre-step`, packages/dshd-core/src/wakepack.ts) — never frozen into
+  // the seed. Hence: 4 seed events, NO journal node in the pre-turn block, and
+  // its presence is itself the violation (`seed-surface-retracted`).
+  const seedTypes = ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title']
+  // The tail may carry the end-seed marker + ONE `user/message` (the rotation
+  // handoff notice — source kind 'system', NOT journal-like). The seed slot
+  // itself is governed by the strict 4-event loop below.
+  const allowedPreTurn = new Set([...seedTypes, 'session/end-seed', 'user/message'])
   let unbalanced = ''
-  if (preTurn.length < 5) {
-    unbalanced = `pre-turn block has ${preTurn.length} events — expected at least the 5-event balanced seed`
+  if (preTurn.length < 4) {
+    unbalanced = `pre-turn block has ${preTurn.length} events — expected at least the 4-event balanced seed (setup + title pin)`
   } else {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 4; i++) {
       const ev = preTurn[i]
       if (ev.type !== seedTypes[i] || ev.seq !== i) {
         unbalanced = `seed index ${i}: expected ${seedTypes[i]}@seq ${i}, got ${ev.type}@${ev.seq}`
@@ -638,13 +651,23 @@ function assertSuccessorShape(
       }
     }
     if (unbalanced === '') {
-      for (const ev of preTurn.slice(5)) {
+      for (const ev of preTurn.slice(4)) {
         if (!allowedPreTurn.has(ev.type)) {
           unbalanced = `unexpected pre-turn event ${ev.type}@${ev.seq} (allowed after the seed: session/end-seed + the handoff notice)`
           break
         }
       }
     }
+  }
+  // The RETRACTED surface node: the seed must NOT carry a JOURNAL node (the
+  // seq-3 `user/message` of the old contract). Positive detector (fails loud if
+  // the 4-event contract regresses to 5): a re-introduced journal node in the
+  // pre-turn block would re-break the v2→v3 migration for every rotated session
+  // — this is the exact regression lock. Scoped to JOURNAL-LIKE text so the
+  // legitimate rotation handoff notice (source kind 'system') is not flagged.
+  const seedSurface = preTurn.find((ev) => ev.type === 'user/message' && isJournalLikeText(messageTextOf(ev)))
+  if (seedSurface !== undefined) {
+    unbalanced = `${unbalanced === '' ? '' : unbalanced + '; '}RETRACTED surface node re-appeared in the seed: user/message@${seedSurface.seq} (the 0.1.5 contract is setup + title pin ONLY — a pre-step surface node makes the session unloadable under the v2→v3 migration)`
   }
   const otherUserBeforeCount = preTurn.filter((ev) => ev.type === 'user/message' && !isJournalLikeText(messageTextOf(ev))).length
   if (mode === 'host' && otherUserBeforeCount > 1) {
@@ -682,9 +705,20 @@ function assertSuccessorShape(
   }
 }
 
-/** I3c — the seed's journal node (NEW seq-3 user/message) carries the journal
- * VERBATIM: in host mode the re-keyed new journal; in head mode the raw old
- * journal (no re-key — the head journal is seeded verbatim). */
+/** I3c — the journal node, WHERE IT EXISTS, must carry the journal VERBATIM:
+ * in host mode the re-keyed new journal; in head mode the raw old journal (no
+ * re-key — the head journal is seeded verbatim).
+ *
+ * CONTRACT 2026-09-21 (compat 0.1.5 — same dev-fix as assertSuccessorShape):
+ * the seed's seq-3 `user/message` was RETRACTED, so a successor with NO journal
+ * node is the HEALTHY case now — the old `seed-journal-truncated` "carries NO
+ * journal node" branch was a false positive against every real rotation and is
+ * REMOVED (the invariant is not: the orientation carrier must still be
+ * byte-verbatim, and a journal node that IS present — pre-turn or appended
+ * later by the legacy in-place fallback — is still held to it). The regression
+ * lock for the retracted node lives in assertSuccessorShape
+ * (`seed-surface-retracted`), which fails when the pre-turn block re-gains a
+ * `user/message`. */
 function assertJournalNodeVerbatim(
   warn: (code: string, detail: string) => void,
   newArtifact: ParsedArtifact,
@@ -696,10 +730,7 @@ function assertJournalNodeVerbatim(
   const journalNode = newArtifact.events.find(
     (ev) => ev.type === 'user/message' && isJournalLikeText(messageTextOf(ev))
   )
-  if (journalNode === undefined) {
-    warn('seed-journal-truncated', 'the new artifact carries NO journal node in its seed (the re-keyed/verbatim journal must be the seq-3 user/message)')
-    return
-  }
+  if (journalNode === undefined) return // HEALTHY under the 0.1.5 contract: the orientation travels by wake pack
   const expected = mode === 'host' ? hjNew : hjOld
   if (expected === undefined) return // missing-artifact already reported
   const actual = messageTextOf(journalNode)

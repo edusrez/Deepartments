@@ -200,19 +200,37 @@ export interface DeliverOrQueueOptions {
    * splice still goes first-item of the next turn — the preemption is the
    * documented intent of `interrupt`, not an inversion). */
   interrupt?: boolean
-  /** VALLE 09-07 (BATCH-DRAIN) — OPTIONAL opt-in: the caller's send is
-   * batch-eligible (send_message sets it ONLY on its ALWAYS-WAKE no-interrupt
-   * default; noWake, ack-dormant, interrupt and every internal/internal-driver
-   * delivery leave it ABSENT — the safe default false, zero regression for the
-   * re-drive/boot/sweep/daemon/emergency paths). When true AND the recipient's
-   * live handle is CURRENTLY RUNNING, the engine SKIPS the fb-117 FIFO gate
-   * AND the batch surface accumulates the record for a drain-on-settle delta
-   * (one followup at the settle with all pending messages in seq order — the
-   * completion-order inversion this gate protects is structurally impossible
-   * for a batched delivery). A non-running (idle/dormant) recipient is NOT
-   * affected: the delivery proceeds to the plain ALWAYS-WAKE followup exactly
-   * as today (the first message wakes the recipient; the batch never delays a
-   * settle — no starvation by construction). */
+  /** VALLE 09-07 (BATCH-DRAIN) + 2026-09-21 (DEFAULT-FLIP, run token d46d84b7) —
+   * the batch-eligibility OPT-OUT, three-valued:
+   *   - `true`  → eligible (send_message's ALWAYS-WAKE no-interrupt default).
+   *   - `false` → EXPLICIT 1:1 opt-out: this delivery keeps the pre-batch
+   *     behavior byte-identical (the fb-117 FIFO gate applies and the wake
+   *     primitive splices it 1:1 into the running recipient's inbox). Every
+   *     caller that NEEDS the old absent-default semantics asks for them
+   *     explicitly (`send_message` already sets `false` on its noWake/interrupt
+   *     branches).
+   *   - ABSENT  → ELIGIBLE (the flipped default, MEASURED — not assumed):
+   *     every ALWAYS-WAKE bus delivery (no `noWake`, no `interrupt`) is
+   *     batch-eligible. PRE-FLIP the flag was set by the `send_message` path
+   *     ALONE, so the daemon/system-notice notices, the agenda notices, the
+   *     post-error notices and the boot/sweep RE-DRIVE — all of them
+   *     ALWAYS-WAKE, no-interrupt, i.e. structurally identical to the
+   *     send_message default — delivered 1:1 to a RUNNING recipient. MEASURED
+   *     on the live host session (session-bb5b8d5b…, 84 bus frames carried by
+   *     43 inbox items): the eligible class coalesced at 0.349 turns/message
+   *     (63 messages / 22 items) while the unflagged class paid 1.000 (21
+   *     messages / 21 items) — the SAME transport, the FLAG its only
+   *     difference. The read is gated by the live-liveness probe
+   *     (`recipientRunningLive`), so an idle/dormant recipient NEVER batches:
+   *     the first message wakes it exactly as before (no starvation by
+   *     construction), and a `noWake`/`interrupt` order is never eligible
+   *     (their branches keep byte-identical wake-seam semantics). When
+   *     eligible AND the recipient's live handle is CURRENTLY RUNNING, the
+   *     engine SKIPS the fb-117 FIFO gate AND the batch surface accumulates
+   *     the record for a drain-on-settle delta (ONE followup at the settle
+   *     with ALL pending messages in seq order — the completion-order
+   *     inversion the gate protects is structurally impossible for a batched
+   *     delivery). */
   batchEligible?: boolean
   /** P1 (fb-131 — WAKE-SEAM lane) — OPTIONAL queue-class observer
    * (observability ONLY, never a behavior gate): invoked exactly when the
@@ -567,6 +585,26 @@ export function frameBusRecord(record: MessageRecord): string {
   return `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`
 }
 
+/** 2026-09-21 (DEFAULT-FLIP — run token d46d84b7) — whether THIS delivery is
+ * batch-eligible (the single decision seam the FIFO-gate skip, the gate ledger
+ * and the ALWAYS-WAKE transport all read). The explicit `batchEligible` WINS
+ * (`false` = the caller's 1:1 opt-out, `true` = the caller's opt-in — that is
+ * `send_message`'s declared default). ABSENT = ELIGIBLE: the pre-flip read
+ * (`=== true`) made the `send_message` path the ONLY eligible one, so every
+ * other ALWAYS-WAKE producer (health/system notices, agenda notices, the
+ * re-drive/sweep) delivered 1:1 into a running recipient even though its
+ * transport is byte-identical to `send_message`'s; the MEASURED split on the
+ * live host session was 0.349 vs 1.000 turns per message for the two classes.
+ * A `noWake` (queue-until-wake) or an `interrupt` (preemption) order is NEVER
+ * eligible — their branches are cut before the ALWAYS-WAKE transport and their
+ * wake-seam semantics stay byte-identical (noWake/ack/interrupt unchanged).
+ * PURE, never throws (the read is a pure field test — it can never take a
+ * delivery down). */
+export function isBatchEligible(opts: { batchEligible?: boolean | undefined; noWake?: boolean | undefined; interrupt?: boolean | undefined }): boolean {
+  if (opts.batchEligible !== undefined) return opts.batchEligible === true
+  return opts.noWake !== true && opts.interrupt !== true
+}
+
 /**
  * Create the delivery engine on the apply fiber (AGENTS.md rule 4 — NO
  * module-global mutable state). Injects the harness services + the closure-bound
@@ -680,7 +718,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
           batchRunning = undefined // conservative — the gate applies
           deps.logger.warn(`[deepartments] bus delivery running-liveness probe failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
         }
-        if (opts.batchEligible === true && batchRunning === true) {
+        if (isBatchEligible(opts) && batchRunning === true) {
           deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: batch-eligible ALWAYS-WAKE to a RUNNING recipient — the record accumulates for the drain-on-settle batch (seq order preserved by construction, fb-117 inapplicable)`)
         } else {
         // VARIANTE (i) — DORMANCY-AWARE GATE. Resolve liveness FIRST (fail-soft
@@ -761,7 +799,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             // line: the ID + the recipient + the liveness probes the gate used
             // (host liveness) + the batch verdict, emitted ONCE per gated
             // delivery, before any branch (log-only — no delivery can observe it).
-            deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-decision id=${record.id} recipient=${recipientId} seq=${record.seq} gated=true materialized=${String(materialized)} runningLive=${String(batchRunning)} batchEligible=${String(opts.batchEligible === true)} noWake=${String(opts.noWake === true)} interrupt=${String(opts.interrupt ?? false)}`)
+            deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-decision id=${record.id} recipient=${recipientId} seq=${record.seq} gated=true materialized=${String(materialized)} runningLive=${String(batchRunning)} batchEligible=${String(isBatchEligible(opts))} batchEligibleDeclared=${opts.batchEligible === undefined ? 'absent' : String(opts.batchEligible)} noWake=${String(opts.noWake === true)} interrupt=${String(opts.interrupt ?? false)}`)
             // GATE LEDGER (2026-09-17, run token 5f015e56): the SAME decision,
             // landed in a durable sink. `headNoWake` is the RESOLVED
             // discriminator, read from the RESOLUTION (never re-derived) — the
@@ -782,7 +820,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
               gated: true,
               materialized: String(materialized),
               runningLive: String(batchRunning),
-              batchEligible: opts.batchEligible === true,
+              batchEligible: isBatchEligible(opts),
               noWake: opts.noWake === true,
               // `?? false` form on purpose: at this point TS has already narrowed
               // `opts.interrupt` to `false | undefined` (the gate's own condition
@@ -1508,10 +1546,15 @@ async function catalogRoute(
   // VALLE 09-07 (BATCH-DRAIN): the batch-eligibility TRANSPORT flag is threaded
   // from `deliverOrQueue` into the ALWAYS-WAKE primitives so the batch surface
   // (dshd-orchestration) can accumulate a running recipient's record instead of
-  // splicing the inbox 1:1 (absent → the byte-identical pre-batch opts).
+  // splicing the inbox 1:1. 2026-09-21 (DEFAULT-FLIP, run token d46d84b7): the
+  // flag is now the DECISION seam `isBatchEligible(opts)` — an ABSENT flag is
+  // ELIGIBLE (every ALWAYS-WAKE no-interrupt delivery), so the daemon/system
+  // notices, the agenda notices and the boot/sweep re-drive coalesce exactly
+  // like `send_message` does; only an explicit `batchEligible: false` (or a
+  // noWake/interrupt order) keeps the byte-identical 1:1 pre-batch opts.
   const interrupt: DeliveryInterruptOptions = {
     ...(opts.interrupt === true ? { interrupt: true } : {}),
-    ...(opts.batchEligible === true ? { batchEligible: true } : {}),
+    ...(isBatchEligible(opts) ? { batchEligible: true } : {}),
     ...(opts.failedGround !== undefined ? { failedGround: opts.failedGround } : {})
   }
   if (route.kind === 'post') {

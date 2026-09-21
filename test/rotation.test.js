@@ -71,50 +71,51 @@ const logger = () => {
   }
 }
 
-test('U2 T1: buildRotationSeed produces the contiguous minimal-artifact event list (setup + re-keyed journal), cold-boots via Session.fromRestore', async () => {
+test('U2 T1: buildRotationSeed produces the contiguous minimal-artifact event list (setup + TITLE PIN — the seq-3 journal surface node was RETRACTED for 0.1.5 compat), cold-boots via Session.fromRestore', async () => {
   const oldHostId = 'host-session-old'
   const newHostId = 'host-session-new'
   const reKeyed = sampleBumpedJournal(oldHostId).replace(/^author: .*$/m, `author: ${newHostId}`)
   const seed = buildRotationSeed(reKeyed, { now: 1787000000000 })
 
   // Exact event types, contiguous seq 0..k (the Session ctor contract).
-  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
+  // CONTRACT 2026-09-21 (compat 0.1.5): the seed is setup + the TITLE PIN only.
+  // The former seq-3 `user/message` journal node was RETRACTED because it is a
+  // SURFACE_TYPE emitted before the first step, and the harness's v2→v3
+  // migration rejects that shape by design ("format v2 surface before first step
+  // cannot acquire a system head without changing chronology") — every rotated
+  // session was unloadable. The orientation now travels as wake-pack context
+  // injection at message-arrival time (packages/dshd-core/src/wakepack.ts).
+  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'])
   seed.forEach((ev, i) => assert.equal(ev.seq, i, `seq ${ev.seq} contiguous at index ${i}`))
   assert.ok(seed.every((ev) => ev.time === 1787000000000), 'seed times pinned by the clock seam')
+  assert.ok(!seed.some((ev) => ev.type === 'user/message'), 'the RETRACTED surface node is absent (a user/message in the seed re-breaks the v2→v3 migration)')
+  assert.ok(!seed.some((ev) => ev.surfaceOp !== undefined), 'no surface-origin event in the seed (surface nodes cannot precede the first step)')
 
   // The title pin (U4): a user-source `session/title` event in the exact
   // rename() shape — the rotated host's sidebar label folds to "Asistente"
   // from its first materialization (automatic LLM/fallback titles cannot
   // override a user-source pin; blank rows keep the client-side "New Session"
   // label — no synthetic turn events).
-  const titleEvent = seed[4]
+  const titleEvent = seed[3]
   assert.equal(titleEvent.type, 'session/title')
   assert.equal(titleEvent.data.title, 'Asistente')
   assert.deepEqual(titleEvent.data.messageSeqs, [])
   assert.deepEqual(titleEvent.data.source, { kind: 'user' })
   assert.equal(titleEvent.surfaceOp, undefined, 'title pin is a log-only event (no surface entry)')
 
-  // The journal node: plugin/notice framing, byte-identical journal text
-  // modulo re-key (compare the model-visible content + source shape against
-  // buildSleepJournalMessage — see spec T1).
-  const journalEvent = seed[3]
-  assert.equal(journalEvent.surfaceOp, 'append', 'journal node stays append-origin')
-  const data = journalEvent.data
-  assert.equal(data.role, 'user')
-  assert.equal(data.content[0].type, 'text')
-  assert.equal(data.content[0].text, reKeyed, 'seed journal text is the re-keyed journal (author: host-<newId>)')
-  assert.equal(data.source.kind, 'plugin')
-  assert.equal(data.source.plugin, 'deepartments')
-  assert.equal(data.source.form, 'notice')
-  assert.ok(typeof data.id === 'string' && data.id.length > 0, 'message carries an identity')
-  const legacy = buildSleepJournalMessage(reKeyed)
-  assert.equal(data.role, legacy.role, 'same framing as buildSleepJournalMessage')
-  assert.equal(data.source.kind, legacy.source.kind)
-  assert.equal(data.source.plugin, legacy.source.plugin)
-  assert.equal(data.source.form, legacy.source.form)
+  // The ORIENTATION carrier (what replaced the retracted node): still exported
+  // and still plugin/notice-framed — the wake pack is the lane that now carries
+  // the journal into the first turn.
+  const legacy = buildRotationSeedMessage(reKeyed)
+  assert.equal(legacy.role, 'user')
+  assert.equal(legacy.source.kind, 'plugin')
+  assert.equal(legacy.source.plugin, 'deepartments')
+  assert.equal(legacy.source.form, 'notice')
+  assert.equal(legacy.content[0].text, reKeyed)
 
   // T1 cold-boot proof (the resume ctor): Session.fromRestore accepts the
-  // exact list and the surface folds to the single journal node.
+  // exact list; under the new contract the seed carries NO surface node (the
+  // orientation arrives by wake pack, so the folded surface is empty).
   const restored = Session.fromRestore(SessionId('session-rot-t1'), seed, {
     version: 0,
     id: 'session-rot-t1',
@@ -125,10 +126,8 @@ test('U2 T1: buildRotationSeed produces the contiguous minimal-artifact event li
     isSeeded: false
   })
   assert.equal(restored.seq, seed.length + 1, 'fresh session continues appending after the seed (+ end-seed marker)')
-  assert.equal(restored.surface.nodes.length, 1, 'the journal node is the only surface node')
-  const derived = restored.deriveMessages()
-  assert.equal(derived.length, 1)
-  assert.equal(derived[0].content[0].text, reKeyed, 'the wake surface node is the re-keyed journal')
+  assert.equal(restored.surface.nodes.length, 0, 'no seed surface node (the retracted journal node is not a surface entry)')
+  assert.equal(restored.deriveMessages().length, 0, 'the seed derives no messages — orientation rides the wake pack')
   assert.ok(!restored.snapshotEvents().some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
 })
 
@@ -155,30 +154,32 @@ test('M-A: buildHeadRotationSeed mints the HEAD-ROTATION seed — raw journal VE
   const seed = buildHeadRotationSeed(headJournal, { now: 1787000000000, title: 'Internal Programming Head' })
 
   // Exact event types + contiguous seq 0..k (the Session ctor contract).
-  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
+  // CONTRACT 2026-09-21 (compat 0.1.5): setup + title pin ONLY — the seq-3
+  // `user/message` journal node was RETRACTED (see the U2 T1 test above and the
+  // buildRotationSeed dev-fix comment in session-rotation.ts).
+  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'])
   seed.forEach((ev, i) => assert.equal(ev.seq, i, `seq ${ev.seq} contiguous at index ${i}`))
   assert.ok(seed.every((ev) => ev.time === 1787000000000), 'seed times pinned by the clock seam')
+  assert.ok(!seed.some((ev) => ev.type === 'user/message'), 'no seeded journal node (the head journal must NOT be frozen as a pre-step surface event)')
+  assert.ok(!seed.some((ev) => ev.surfaceOp !== undefined), 'no surface-origin event in the head seed')
 
-  // NO RE-KEY: the journal node is the RAW head journal (author unaffected) —
-  // the head's member id is the STABLE postId, unlike the host's host-<id>.
-  const journalEvent = seed[3]
-  assert.equal(journalEvent.surfaceOp, 'append', 'journal node stays append-origin')
-  assert.equal(journalEvent.data.content[0].text, headJournal, 'the head journal is seeded VERBATIM (byte-identical, no re-key)')
-  assert.match(journalEvent.data.content[0].text, /^author: internal-programming-head$/m, 'head author untouched (NO host re-key)')
-  assert.equal(journalEvent.data.source.kind, 'plugin')
-  assert.equal(journalEvent.data.source.form, 'notice')
+  // NO RE-KEY: the head's member id is the STABLE postId, so the host re-key
+  // (rekeyJournal) is never applied to a head journal. Under the new contract
+  // the journal text is not seeded at all — the assertable half that remains is
+  // that the raw text still round-trips through the host-only re-key tooling
+  // without the head path invoking it (the head seed above carries no node).
+  assert.match(rekeyJournal(headJournal, 'host-session-new'), /^author: host-session-new$/m, 'rekeyJournal remains host-only tooling (never applied to the head path)')
 
   // DEPARTMENT TITLE PIN: a user-source session/title in the exact rename()
   // shape (the host seed's "Asistente" default must NOT leak into a head seed).
-  const titleEvent = seed[4]
+  const titleEvent = seed[3]
   assert.equal(titleEvent.type, 'session/title')
   assert.equal(titleEvent.data.title, 'Internal Programming Head')
   assert.deepEqual(titleEvent.data.messageSeqs, [])
   assert.deepEqual(titleEvent.data.source, { kind: 'user' })
   assert.equal(titleEvent.surfaceOp, undefined, 'title pin is a log-only event (no surface entry)')
 
-  // T1 cold-boot proof (the resume ctor): fromRestore accepts the exact list
-  // and folds the single journal node as the first-turn surface.
+  // T1 cold-boot proof (the resume ctor): fromRestore accepts the exact list.
   const restored = Session.fromRestore(SessionId('session-head-rot'), seed, {
     version: 0,
     id: 'session-head-rot',
@@ -188,14 +189,13 @@ test('M-A: buildHeadRotationSeed mints the HEAD-ROTATION seed — raw journal VE
     isSeeded: false
   })
   assert.equal(restored.seq, seed.length + 1, 'fresh session continues appending after the seed (+ end-seed marker)')
-  assert.equal(restored.surface.nodes.length, 1, 'the journal node is the only surface node')
-  const derived = restored.deriveMessages()
-  assert.equal(derived[0].content[0].text, headJournal, 'the wake surface node is the raw head journal')
+  assert.equal(restored.surface.nodes.length, 0, 'no seed surface node (the head seed is setup + the title pin)')
+  assert.equal(restored.deriveMessages().length, 0, 'the head seed derives no messages — orientation rides the wake pack')
   assert.ok(!restored.snapshotEvents().some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
   // The DEFAULT host title stays untouched for the plain host seed (zero
   // regression on the parametrization).
   const hostDefault = buildRotationSeed(headJournal, { now: 1787000000000 })
-  assert.equal(hostDefault[4].data.title, 'Asistente', 'plain buildRotationSeed default remains the host title')
+  assert.equal(hostDefault[3].data.title, 'Asistente', 'plain buildRotationSeed default remains the host title')
 })
 
 test('U2 T3: rekeyJournal rewrites ONLY the frontmatter author (room + every other byte untouched) and throws without an author line', () => {
@@ -570,14 +570,22 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     assert.equal(createdMeta.version, 0, 'header version 0')
     assert.equal(createdMeta.createdAt, 1787000000000, 'createdAt from the clock seam')
     assert.equal(createdMeta.cwd, '/root', 'workspace path attributed')
-    assert.equal(createdMeta.seedLength, 5, 'seedLength = the seed event count')
+    assert.equal(createdMeta.seedLength, 4, 'seedLength = the seed event count (setup + title pin — the retracted journal node is NOT counted)')
     assert.equal(createdMeta.delegationDepth, 0, 'fresh host seed has delegation depth 0')
     const [appended] = state.persistenceAppended
+    assert.equal(createdMeta.seedLength, appended.events.length, 'seedLength agrees with the appended event list length')
     assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
-    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
+    // CONTRACT 2026-09-21 (compat 0.1.5): setup + the title pin only. The former
+    // seq-3 `user/message` journal node was RETRACTED — it is a surface node
+    // emitted before the first step, which the harness v2→v3 migration rejects.
+    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'], 'append carries the 4-event rotation seed (no retracted surface node)')
     appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
-    assert.equal(appended.events[3].data.content[0].text, journalText, 'seed journal node carries the re-keyed journal')
-    assert.deepEqual(appended.events[4].data, { title: 'Asistente', messageSeqs: [], source: { kind: 'user' } }, 'seed title pin is the rename()-shape "Asistente" (U4)')
+    assert.ok(!appended.events.some((ev) => ev.type === 'user/message'), 'the RETRACTED seed surface node is absent (the journal rides the wake pack, not the seed)')
+    assert.deepEqual(appended.events[3].data, { title: 'Asistente', messageSeqs: [], source: { kind: 'user' } }, 'seed title pin is the rename()-shape "Asistente" (U4)')
+    // The re-keyed journal still EXISTS durably (S1.5b) and reaches the model as
+    // wake-pack context — verify the durable file itself, since it is no longer
+    // a seed node.
+    assert.match(journalText, new RegExp(`^author: ${newHostId}$`, 'm'), 'the durable re-keyed journal is written (S1.5b) even though it is no longer a seed node')
     // Regression (c) — NO live sessions-store dependency on the rotation path:
     // the artifact is written cold (a later resume restores it via
     // persistence.prepare); nothing may ever store-attach the session here.

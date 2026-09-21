@@ -590,6 +590,7 @@ test('fb-11 (2) ZERO REGRESSION: a rotation with SUBSEQUENT traffic keeps the sa
     const now = Date.now()
     const host = fakeParentAgent() // the (OLD) host session about to ROTATE
     const oldHostId = `host-${host.id}`
+    const rawOldSessionId = String(host.id) // the RAW retired session address
     await seedJournal(stateDir, oldHostId, 'FB11-REGRESSION-MEMORY')
     // The CANARY (pre-boot): a 'failed' row to a DEAD recipient whose message
     // record EXISTS. The boot re-delivery pass is FIRE-AND-FORGET — the canary
@@ -599,7 +600,8 @@ test('fb-11 (2) ZERO REGRESSION: a rotation with SUBSEQUENT traffic keeps the sa
     // rows at boot #1).
     await seedMessageRecords(stateDir, [
       { id: 'm-canary', seq: 0, ts: now, from: 'research-head', to: ['dead-canary'], text: 'pass-completion canary', kind: 'agent' },
-      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [oldHostId], text: 'crash mid-fan-out to host', kind: 'agent' }
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [oldHostId], text: 'crash mid-fan-out to host', kind: 'agent' },
+      { id: 'm-raw-1', seq: 2, ts: now, from: 'research-head', to: [rawOldSessionId], text: 'raw retired-session address', kind: 'agent' }
     ])
     await seedDeliveryRows(stateDir, [{ messageId: 'm-canary', recipientId: 'dead-canary', status: 'failed', ts: now }])
     const env = await bootPluginReady(stateDir)
@@ -607,10 +609,15 @@ test('fb-11 (2) ZERO REGRESSION: a rotation with SUBSEQUENT traffic keeps the sa
       // BARRIER: the pre-boot canary is settled to 'terminal' ONLY BY the boot
       // re-delivery pass — observing it proves the pass finished.
       await waitFor(async () => (await deliveryStatus(stateDir, 'm-canary', 'dead-canary')) === 'terminal', 5000, 'boot re-delivery pass completed (canary settled)')
-      // The pending row is seeded IN-SESSION (post-pass), exactly like a
-      // mid-session crash leaves it before the next boot (the PR-2 settle
-      // target — the retired host must settle it AT ROTATION TIME).
-      await seedDeliveryRows(stateDir, [{ messageId: 'm-1', recipientId: oldHostId, status: 'prepared', ts: now }])
+      // The pending rows are seeded IN-SESSION (post-pass), exactly like a
+      // mid-session crash leaves it before the next boot. The RAW retired-session
+      // row is the PR-2 settle target (the retired host must settle it AT
+      // ROTATION TIME); the host-MEMBER-id row is the LANE ② reroutable class
+      // (re-driven to the live successor, never terminal-settled).
+      await seedDeliveryRows(stateDir, [
+        { messageId: 'm-raw-1', recipientId: rawOldSessionId, status: 'prepared', ts: now },
+        { messageId: 'm-1', recipientId: oldHostId, status: 'prepared', ts: now }
+      ])
 
       env.agents.put(host)
       const realSession = Session.create(SessionId(String(host.id)))
@@ -634,12 +641,18 @@ test('fb-11 (2) ZERO REGRESSION: a rotation with SUBSEQUENT traffic keeps the sa
       const wakeRecords = recordsAfterRotate.filter((r) => r.from === 'deepartments' && (r.to ?? []).includes(newHostId))
       assert.equal(wakeRecords.length, 1, 'EXACTLY ONE durable rotation-wake record (no double tuple)')
 
-      // (3) PR-2 in-session settle is INTACT: the retired host's pending row
-      // became terminal AT ROTATION TIME (no boot involved), and the NEW host
-      // has NO terminal/settle row (untouched).
-      assert.equal(await deliveryStatus(stateDir, 'm-1', oldHostId), 'terminal', 'the retired host\'s prepared row is settled to terminal AT ROTATION TIME (PR-2 settle intact)')
+      // (3) PR-2 in-session settle is INTACT for the RAW retired-session pair:
+      // it became terminal AT ROTATION TIME (no boot involved), and the NEW host
+      // has NO terminal/settle row (untouched). The host-MEMBER-id pair is the
+      // LANE ② reroutable class (fb-58 F-3 / m-440): it is NOT terminal-settled
+      // at the boundary — the re-drive re-routes it to the live successor, so a
+      // terminal here would LOSE the send (the org's current semantics; this
+      // assertion previously encoded the pre-LANE② member-id→terminal contract).
+      assert.equal(await deliveryStatus(stateDir, 'm-raw-1', rawOldSessionId), 'terminal', 'the raw retired-session prepared row is settled to terminal AT ROTATION TIME (PR-2 settle intact)')
+      assert.equal(await deliveryStatus(stateDir, 'm-1', oldHostId), 'prepared', 'the REROUTABLE host-member pair is NOT terminal at the boundary (fb-58 F-3 — the re-drive re-routes it to the live successor)')
       const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
       assert.ok(rows.every((row) => row.recipientId !== newHostId), 'NO delivery-sidecar row EVER addresses the NEW live host (the settle + the wake never touch it)')
+      assert.ok(rows.every((row) => !(row.recipientId === oldHostId && row.status === 'terminal')), 'the reroutable member-id pair never gains a terminal row (the re-route stays recoverable)')
       assert.equal(rows.filter((row) => row.messageId === wakeRecords[0].id).length, 0, 'the rotation wake still writes ZERO sidecar rows after the settle runs')
 
       // (2) SUBSEQUENT traffic enters the SAME live-branch delivery: a head
@@ -671,13 +684,16 @@ test('fb-11 (2) ZERO REGRESSION: a rotation with SUBSEQUENT traffic keeps the sa
     } finally {
       await env.dispose()
     }
-    // (2 continued) the settle survives boot #2 intact (no double settlement /
-    // no re-drive of the settled pair; the wake record is NOT re-delivered).
+    // (2 continued) the settle survives boot #2 intact (no double settlement);
+    // the REROUTABLE member pair is re-driven (LANE ②) and the wake record is
+    // NOT re-delivered.
     const second = await bootPlugin(stateDir)
     try {
       await new Promise((resolve) => setTimeout(resolve, 250)) // give the fire-and-forget driver a chance
       const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
-      assert.deepEqual(rows.filter((r) => r.messageId === 'm-1' && r.recipientId === oldHostId).map((r) => r.status), ['prepared', 'terminal'], 'boot #2 does not re-attempt the settled pair (no new rows)')
+      assert.deepEqual(rows.filter((r) => r.messageId === 'm-raw-1' && r.recipientId === rawOldSessionId).map((r) => r.status), ['prepared', 'terminal'], 'boot #2 does not re-attempt the settled raw pair (no new rows)')
+      assert.ok(rows.filter((r) => r.recipientId === rawOldSessionId).filter((r) => r.status === 'terminal').length === 1, 'STILL exactly ONE terminal row for the raw retired session at boot #2 (no double settlement)')
+      assert.ok(rows.filter((r) => r.recipientId === oldHostId).every((r) => r.status !== 'terminal'), 'the reroutable member pair never becomes terminal at boot #2 either (recoverable re-route)')
     } finally {
       await second.dispose()
     }

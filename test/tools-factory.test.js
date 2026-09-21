@@ -268,7 +268,30 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   // bus/feedback tools + the arrays + the driver + the buckets + the globals).
   assert.ok(/const feedbackTool = defineTool/.test(factory), 'feedbackTool moved verbatim into the factory (the universal feedback emitter)')
   assert.ok(/const sendMessageTool = defineTool/.test(factory), 'sendMessageTool moved verbatim (the bus send tool)')
-  assert.ok(/const feedbackEmitTools: readonly ReturnType<typeof defineTool>\[\] = \[feedbackTool\]/.test(factory), 'feedbackEmitTools moved verbatim (the emit array — now a FACTORY-LOCAL const)')
+  // RE-CONGELADO 2026-09-21 (lane fb-2181 — MEDIDO, no deducido; medicion
+  // 2026-09-21T14:39Z sobre f550d92): el array paso de
+  //   `= [feedbackTool]`
+  // a
+  //   `= [feedbackTool, feedbackCandidatesTool]`
+  // y es ADITIVO, no un movimiento destructivo. Medido en el diff
+  // `git diff f550d92^ f550d92 -- packages/dshd-orchestration/src/tools.ts`
+  // (4 borrados / 83 anadidos): la UNICA linea borrada del array es el array
+  // VIEJO, reemplazado por el extendido; el primer elemento (`feedbackTool`)
+  // sigue, el ORDEN se preserva y solo se ANADE. `feedbackCandidatesTool` es
+  // una pieza NUEVA, no un renombrado: se DEFINE en ese mismo commit
+  // (`const feedbackCandidatesTool = defineTool({`) y es READ-ONLY (la query
+  // PRE-WRITE de duplicados — el MISMO `dedupeCandidates` que corre el create,
+  // con CERO escrituras). El invariante de AUTORIDAD queda INTACTO: las 4
+  // lineas de guard QH-only en `packages/dshd-orchestration/src/tools.ts` son
+  // byte-identicas al padre (textos comparados 1:1 contra `f550d92^`; 0 lineas
+  // del commit mencionan `isQh`), citadas por su LITERAL y su linea al instante
+  // de la medicion: `if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may move feedback to a TERMINAL estado (resuelto | descartado | duplicado)')` (tools.ts:6153);
+  // `if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may reopen feedback (en-estudio → abierto, with new evidence)')` (tools.ts:6155);
+  // `if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may mark feedback as a duplicate (terminal duplicate_of)')` (tools.ts:6167);
+  // `if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may set the `frozen` lifecycle flag (the stale-review escape)')` (tools.ts:6178).
+  // ⇒ ANADIR un tool read-only no toca la transicion terminal. La asercion
+  // se mueve CON la evidencia, auditables sin abrir otro fichero.
+  assert.ok(/const feedbackEmitTools: readonly ReturnType<typeof defineTool>\[\] = \[feedbackTool, feedbackCandidatesTool\]/.test(factory), 'feedbackEmitTools moved verbatim (the emit array — now a FACTORY-LOCAL const; LANE fb-2181 extended it ADDITIVELY with the read-only dept_feedback_candidates — the first element and its ORDER are preserved and the terminal transition stays QH-only)')
   assert.ok(/const feedbackHeadTools: readonly ReturnType<typeof defineTool>\[\] = \[feedbackListTool, feedbackUpdateTool\]/.test(factory), 'feedbackHeadTools moved verbatim (the head array — FACTORY-LOCAL)')
   assert.ok(/const busTools: readonly ReturnType<typeof defineTool>\[\] = \[sendMessageTool, agentMessagesTool, deptWhoTool\]/.test(factory), 'busTools moved verbatim (the bus array — FACTORY-LOCAL)')
   assert.ok(/const redeliverPendingDeliveries =/.test(factory), 'redeliverPendingDeliveries moved verbatim (the boot re-delivery driver — FACTORY-LOCAL now)')

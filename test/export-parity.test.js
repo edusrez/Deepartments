@@ -283,5 +283,57 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // can move this count without touching invoke.ts and without any signal. The
   // first two attributions looked for the culprit in invoke.ts and were false.
   // The bump below is the deliberate, documented act the lock exists to force.
-  assert.equal(names.length, 343, `lib/invoke.js export count frozen at 343 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LOCK CORRECTED 343 → 349 (f550d92, fb-2160): the surface was extended by SIX
+  // runtime exports of the noWake-churn + gate-refusal-ledger lane. MEASURED, not
+  // assumed — and measured ON THE ARTIFACT, never by grepping a diff:
+  // `Object.keys(require('./lib/invoke.js')).length` is 349 (2026-09-21, the
+  // PRE-build artifact) while this lock still held 343, so the delta is +6.
+  // THE VECTOR IS THE BRIDGE, AND IT IS NOW MEASURED AS SUCH: deleting the SINGLE
+  // line `export * from './core/health.js'` (compiled lib/invoke.js:360;
+  // src/invoke.ts:676) from a COPY of the artifact drops the count 349 → 151 —
+  // 198 names ride that one line, and ALL 201 names of the dshd-health artifact
+  // reach this surface through it (only the plugin's own name/inject/apply are
+  // written locally, and they survive the cut). NO `export` line was written in
+  // invoke.ts for ANY of the six: the own-export set of src/invoke.ts is 218 at
+  // the freeze and 218 at HEAD (TypeScript AST: added=[] / removed=[]), and its
+  // ONLY two star bridges are `./core/health.js` (:676) and `./core/quality.js`
+  // (:696) — both unchanged across the range. The six names are IDENTITY-EQUAL
+  // across lib/invoke.js === lib/core/health.js === dshd-health (measured by
+  // importing the three artifact modules and comparing the bindings):
+  // GATE_REFUSALS_FILE, INTERRUPTS_LEDGER_FILE, scanGateRefusals,
+  // shouldArmDeliveryInterrupt, appendGateRefusals, appendInterruptTriggerRow.
+  // WHY EXACTLY SIX: f550d92 added EIGHT `export` declarations to
+  // packages/dshd-health/src/index.ts, of which TWO are TYPE-ONLY and emit no
+  // runtime binding (InterruptTriggerRow, GateRefusalRow); the remaining SIX
+  // runtime exports are exactly the six measured on the surface. 8 − 2 = 6 = the
+  // measured delta: the arithmetic closes to the symbol.
+  // IT IS MULTI-COMMIT DRIFT, NOT ONE COMMIT: the freeze c0b758b (2026-09-16) is
+  // FIVE days before f550d92, SIX commits in that range touched the two
+  // bridge-feeding package sources, and a13de06 (the commit before f550d92)
+  // contributed ZERO runtime surface names — AST-measured it added ONE name,
+  // `StarvationHealthState`, which is TYPE-ONLY. Attributing the whole +6 to a
+  // single commit is wrong; only the last commit of the drift moved the surface.
+  // METHOD CORRECTION, CARRIED FORWARD: `dept_feedback_candidates` is NOT an
+  // export and MUST NOT be counted here — it is a TOOL-NAME STRING LITERAL inside
+  // OWN_LAYER_POST_TOOLS (src/invoke.ts:4186), and `hasOwnProperty` on the loaded
+  // artifact returns false. By the SAME rule `isExistingSessionError` (exported by
+  // packages/dshd-orchestration/src/delivery.ts) does NOT reach this surface: the
+  // package index is CURATED and EVERY compiled lib/core/orchestration/*.js bridge
+  // is a NAMED re-export (0 star lines), so it is absent here — also verified
+  // false on the artifact. A grep over a diff's `+` lines would have counted both.
+  // NEGATIVE CONTROL (verified, not assumed): the assert below compares against the
+  // count the artifact REALLY yields (`Object.keys(invoke)` on the module loaded two
+  // lines above) — it is NOT a blind constant. Setting this literal back to 343 in a
+  // COPY of this test turns it RED with `expected: 343, actual: 349`.
+  // NOTE (the honest part, 2026-09-21): the artifact measured here is PRE-build
+  // (`lib/invoke.js` mtime 14:34 while the uncommitted sources are 17:04-18:19).
+  // 349 is STABLE ACROSS THE PENDING BUILD, with the reason: the uncommitted
+  // sources a rebuild would propagate are reachable ONLY through CURATED package
+  // indexes / named re-export bridges (measured absent from the surface), and
+  // `dshd-health` re-exports NOTHING from `dshd-core` (measured: 4 shared names —
+  // apply/inject/name/createDepsHolder — and ZERO identity-equal bindings). The
+  // residual risk is REAL and is why this line is a prediction, not a fact: it
+  // rests on the CURRENT star-bridge topology, so after the build the number must
+  // be RE-MEASURED, not inherited — a rebuild that adds a star bridge moves it.
+  assert.equal(names.length, 349, `lib/invoke.js export count frozen at 349 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
