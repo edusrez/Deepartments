@@ -237,7 +237,7 @@ import {
 // terminal-estado predicate + the record/option types the 3 feedback tool
 // bodies use (dshd-feedback — no cycle).
 import { FeedbackStore, isTerminalEstado } from 'dshd-feedback'
-import type { FeedbackDedupeCandidate, FeedbackEstado, FeedbackInput, FeedbackListOptions, FeedbackListResult, FeedbackRecord, FeedbackSeveridad, FeedbackTipo, FeedbackUpdateInput } from 'dshd-feedback'
+import type { FeedbackCandidateQueryResult, FeedbackDedupeCandidate, FeedbackEstado, FeedbackInput, FeedbackListOptions, FeedbackListResult, FeedbackRecord, FeedbackSeveridad, FeedbackTipo, FeedbackUpdateInput } from 'dshd-feedback'
 // The core delivery module (SUB-BATCH 4 — the bus/ACL/catalog/delivery seams
 // the bus-feedback tools + the Binder buckets dereference): the types of the
 // delivery-surface members the CUT4 zone consumes late.
@@ -3048,7 +3048,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * allowExec-gated own-layer seam tools (dept_exec / dept_zstd_read — a role
    * that declares dept_exec also gets dept_zstd_read, installHeadBoardTools)
    * nor the calendar tools, which is exactly the recorded 13-vs-16 divergence. */
-  const EFFECTIVE_TOOLSET_CANDIDATES: readonly string[] = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'])]
+  const EFFECTIVE_TOOLSET_CANDIDATES: readonly string[] = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_candidates', 'dept_feedback_list', 'dept_feedback_update'])]
 
   /** The CANONICAL effective-toolset enumeration — the agent-scope visible
    * candidates (the SAME filter the M2.3 WP3 `toolset-final` audit waypoint
@@ -5860,7 +5860,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * coordinator; the real emisor travels in the record + the body). */
   const feedbackTool = defineTool({
     name: 'dept_feedback',
-    description: 'Emit a quality/feedback record to the durable feedback backlog (the quality-head backlog). ANY agent — a worker, a department head, or the host — may send; the record.write is ACL-free. `tipo` = the kind ("fallo" | "mejora"); `severidad` = priority ("critico" | "alto" | "medio" | "bajo"); `resumen` = the one-line summary (required); `evidencia`/`archivo_linea` = optional supporting detail. The record is written to <stateDir>/feedback.jsonl with estado "abierto" (emisor = YOU) and the quality-head is notified SEVERITY-GATED: critico → wake + interrupt; alto → wake; medio/bajo/mejora → no-wake queue. The notification is ACL-legal (a worker forwards via its head; the real emisor is in the record + body). LOOP FASE 1 (search-before-create): before creating, the backlog (live open + archive) is searched LEXICALLY for duplicate candidates (≥2 shared significant resumen tokens; tipo/severidad refine the score) and up to 3 NON-blocking `candidates` are returned alongside the record. To OPT IN to a duplicate instead, pass `duplicate_of: <fb-id canónico>` — the record is created as estado "duplicado" (a terminal triage state, ACL-free at creation, spec §4a.3) and its evidence is MERGED into the canonical record tail (emisor + origen fb-XXX, cross-linked `related[]`). Every record created as "abierto" emits one normalized bridge line to <stateDir>/feedback-bridge.jsonl (the shared host+IPD queue; the severity gate above is ADDITIVE, never altered). Returns the created FeedbackRecord (id included) + the duplicate `candidates` array.',
+    description: 'Emit a quality/feedback record to the durable feedback backlog (the quality-head backlog). ANY agent — a worker, a department head, or the host — may send; the record.write is ACL-free. `tipo` = the kind ("fallo" | "mejora"); `severidad` = priority ("critico" | "alto" | "medio" | "bajo"); `resumen` = the one-line summary (required); `evidencia`/`archivo_linea` = optional supporting detail. The record is written to <stateDir>/feedback.jsonl with estado "abierto" (emisor = YOU) and the quality-head is notified SEVERITY-GATED: critico → wake + interrupt; alto → wake; medio/bajo/mejora → no-wake queue. The notification is ACL-legal (a worker forwards via its head; the real emisor is in the record + body). LOOP FASE 1 (search-before-create): before creating, the backlog (live open + archive) is searched LEXICALLY for duplicate candidates (≥2 shared significant resumen tokens; tipo/severidad refine the score) and up to 3 NON-blocking `candidates` are returned alongside the record. ⚠️ THOSE CANDIDATES ARRIVE WITH THE CREATED RECORD — i.e. AFTER the write: to fold the new record you must know the canonical BEFORE committing (fb-2181), so call `dept_feedback_candidates` FIRST (read-only, nothing written) and pass its actionable offer here. To OPT IN to a duplicate, pass `duplicate_of: <fb-id canónico>` — the record is created as estado "duplicado" (a terminal triage state, ACL-free at creation, spec §4a.3) and its evidence is MERGED into the canonical record tail (emisor + origen fb-XXX, cross-linked `related[]`). Folding a record that ALREADY exists (via `dept_feedback_update`) is a TERMINAL transition reserved to quality-head — hence this create is the ONLY fold available to a non-QH emitter. Every record created as "abierto" emits one normalized bridge line to <stateDir>/feedback-bridge.jsonl (the shared host+IPD queue; the severity gate above is ADDITIVE, never altered). Returns the created FeedbackRecord (id included) + the duplicate `candidates` array.',
     parameters: {
       tipo: { type: 'string', required: true, description: 'The feedback type: "fallo" (defect) | "mejora" (improvement).' },
       severidad: { type: 'string', required: true, description: 'The priority: "critico" | "alto" | "medio" | "bajo".' },
@@ -5924,6 +5924,83 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         }
       }
       return { ...record, candidates }
+    }
+  })
+
+  /** fb-2181 — the PRE-WRITE duplicate query (read-only, ZERO writes). THE
+   * DEFECT IT CLOSES (host, `fb-2181`; live instance `fb-2206`): the create
+   * path ALREADY accepts `duplicate_of` from ANY emitter (ACL-free at creation
+   * — `FeedbackStore.append` validates the canonical against the LIVE index and
+   * nothing else), but the candidate search ran INSIDE the create and its
+   * answer travelled WITH the creation's response — so a non-QH emitter
+   * discovered the canonical ONLY AFTER the record existed, while the post-hoc
+   * fold (`dept_feedback_update` + `duplicate_of`) is a TERMINAL transition
+   * gated to quality-head. The information arrived AFTER the act, and every
+   * non-QH emitter that created a duplicate was left with it OPEN and
+   * UNREACHABLE (systematic backlog production).
+   *
+   * THE FIX IS TEMPORAL, NOT AUTHORITATIVE: this tool moves the SAME search the
+   * create runs to BEFORE the write, so the emitter passes the canonical IN the
+   * create and the fold lands on the ALREADY-permitted path. The authority
+   * invariant is UNTOUCHED — the terminal transition (`resuelto` |
+   * `descartado` | `duplicado`) stays QH-only (spec §4), and no new estado is
+   * introduced.
+   *
+   * REGISTRATION (deliberate, and the reason it is NOT a head tool): it rides
+   * `feedbackEmitTools`, the UNIVERSAL own-layer array — a WORKER, which never
+   * sees `dept_feedback_list`/`dept_feedback_update` (fb-18 structural
+   * absence), DOES see it, because the emitter that must be saved from the
+   * unreachable fold is exactly the one without terminal authority. It is a
+   * pure READ: no append, no bridge line, no QH notification, no id consumed. */
+  const feedbackCandidatesTool = defineTool({
+    name: 'dept_feedback_candidates',
+    description: 'Search the durable feedback backlog for DUPLICATE CANDIDATES of a prospective record, BEFORE writing it (fb-2181 — READ-ONLY, ZERO writes: nothing is created, no id is consumed, no bridge line is emitted and quality-head is not notified). Pass the SAME `tipo`/`severidad`/`resumen` you intend to emit and read the ≤3 NON-blocking offers: an offer with `admissible: true` is a LEGAL `duplicate_of` destination RIGHT NOW. THE ORDER THIS FIXES: `dept_feedback` accepts `duplicate_of` from ANY emitter (ACL-free at creation), but its own search answer arrives WITH the created record — i.e. AFTER the act — while folding a record that ALREADY exists (`dept_feedback_update` + `duplicate_of`) is a TERMINAL transition reserved to quality-head. So: call THIS first, and create with `duplicate_of: <the admissible fb-id>` when the report is a true duplicate — the fold then happens in the create, which needs no authority. Available to EVERY emitter (workers included — the emitter that needs it most is the one without terminal authority). An empty `candidates` array means the ≥2-significant-token lexical match found nothing; it is a SEARCH, not a verdict — a non-empty report does not oblige you to fold. Returns {candidates, admissible, input}.',
+    parameters: {
+      tipo: { type: 'string', required: true, description: 'The kind of the record you intend to emit: "fallo" | "mejora" (used for the score refinement).' },
+      severidad: { type: 'string', required: true, description: 'The priority of the record you intend to emit: "critico" | "alto" | "medio" | "bajo" (used for the score refinement).' },
+      resumen: { type: 'string', required: true, description: 'The one-line summary of the record you intend to emit (the >2-significant-token lexical search key).' },
+      max: { type: 'number', description: 'Optional candidate cap (default 3 — the create\'s own cap).' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          candidates: { type: 'array', required: true, items: feedbackDedupeCandidateSchema },
+          admissible: { type: 'number', required: true },
+          input: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              resumen: { type: 'string', required: true },
+              tipo: { type: 'string', required: true },
+              severidad: { type: 'string', required: true }
+            }
+          }
+        }
+      },
+      render: (_args, value) => {
+        const head = `feedback candidate search (${value.candidates.length} offer(s), ${value.admissible} actionable) — NOTHING written`
+        if (value.candidates.length === 0) {
+          return [{ type: 'text', text: `${head}: no candidate shares ≥2 significant resumen tokens — proceed with a plain dept_feedback create` } as const]
+        }
+        const lines = value.candidates.map((candidate) => `  - ${candidate['fb-id']} [${candidate.severidad}] ${candidate.tipo} ${candidate.estado} (score ${candidate.score}, ${candidate.admissible ? 'ACTIONABLE' : `NOT admissible: ${candidate.relation}`}): ${candidate.resumen}`)
+        const actionable = value.candidates.filter((candidate) => candidate.admissible)
+        const tail = actionable.length === 0
+          ? 'no offer is a legal duplicate_of destination right now (all archived/no live canonical) — a plain create is the only option'
+          : `if this IS the same issue as ${actionable[0]['fb-id']}, create with duplicate_of: "${actionable[0]['fb-id']}" and the fold happens at creation (no quality-head needed)`
+        return [{ type: 'text', text: `${head}:\n${lines.join('\n')}\n${tail}` } as const]
+      }
+    },
+    async execute(args): Promise<FeedbackCandidateQueryResult> {
+      const tipo = String(args.tipo).trim() as FeedbackTipo
+      const severidad = String(args.severidad).trim() as FeedbackSeveridad
+      const resumen = String(args.resumen).trim()
+      const store = await feedbackStoreReady
+      const opts: { max?: number } = {}
+      if (args.max !== undefined && Number.isFinite(args.max as number) && (args.max as number) > 0) opts.max = Math.floor(args.max as number)
+      return store.dedupeCandidateQuery({ resumen, tipo, severidad }, opts)
     }
   })
 
@@ -6105,7 +6182,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   })
 
-  const feedbackEmitTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool]
+  const feedbackEmitTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool, feedbackCandidatesTool]
   const feedbackHeadTools: readonly ReturnType<typeof defineTool>[] = [feedbackListTool, feedbackUpdateTool]
 
   /** LOOP FASE 1 — the CREATE tool render: the record (id/estado, duplicate_of
@@ -7510,11 +7587,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // update the backlog. Registered globally (the host is every agent's top of
   // the reporting chain — D6); the QH-authority is enforced in `execute`.
   const globalFeedback = ctx.tools.register(feedbackTool)
+  const globalFeedbackCandidates = ctx.tools.register(feedbackCandidatesTool)
   const globalFeedbackList = ctx.tools.register(feedbackListTool)
   const globalFeedbackUpdate = ctx.tools.register(feedbackUpdateTool)
 
   ctx.effect(() => () => {
     globalFeedback()
+    globalFeedbackCandidates()
     globalFeedbackList()
     globalFeedbackUpdate()
     globalWakeSnapshot()

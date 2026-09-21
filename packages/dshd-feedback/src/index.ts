@@ -479,6 +479,52 @@ export function findDuplicateCandidates(
   })
 }
 
+/** fb-2181 — the PRE-WRITE candidate query. THE DEFECT IT CLOSES (host,
+ * `fb-2181`; live instance `fb-2206`): the create path already accepts
+ * `duplicate_of` for ANY emitter (ACL-free at creation — `FeedbackStore.append`
+ * validates the canonical against the LIVE index and nothing else), but the
+ * candidate search ran INSIDE the create and its answer travelled WITH the
+ * creation's response. A non-QH emitter therefore learned WHICH record was the
+ * canonical ONLY AFTER the record existed, and the post-hoc fold
+ * (`dept_feedback_update` + `duplicate_of`) is a TERMINAL transition the TOOL
+ * gates to quality-head. The information arrived after the act.
+ *
+ * THE FIX IS TEMPORAL, NOT AUTHORITATIVE (the authority invariant is UNTOUCHED:
+ * terminal stays QH-only): this helper runs the SAME `dedupeCandidates` search
+ * with ZERO writes, so the emitter can call it BEFORE the write and pass the
+ * canonical in the create — the fold then happens in the create, the one path
+ * that was already ACL-free.
+ *
+ * The pure core takes an ALREADY-READ pool so it is testable without a store
+ * (the query itself is `FeedbackStore.dedupeCandidateQuery` below). The
+ * ACTIONABLE view — `admissible === true` — is the set of ids the create path
+ * will actually accept as `duplicate_of` right now (the invariant the fb-1874
+ * docstring declares: `admissible === (relation === 'canonical' ||
+ * relation === 'canonical-shared')`). */
+export interface FeedbackCandidateQueryResult {
+  /** The same NON-blocking offers the create would return for this input (≤3). */
+  candidates: FeedbackDedupeCandidate[]
+  /** The count of offers whose `admissible` is true — the ids the create path
+   * resolves against its LIVE index RIGHT NOW. */
+  admissible: number
+  /** The input the search ran on (echoed, trimmed as the create would). */
+  input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad }
+}
+
+/** fb-2181 — the PURE pre-write candidate projection over an already-read pool
+ * (no store, no I/O). `input` is echoed UNCHANGED apart from the create's own
+ * `trim` of `resumen`, so the offer the emitter sees here is the offer the
+ * create would return for the SAME call. */
+export function projectCandidateQuery(
+  pool: readonly (FeedbackRecord | FeedbackDedupePoolEntry)[],
+  input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
+  opts: { max?: number; liveIndex?: ReadonlyMap<string, FeedbackRecord>; declarationLines?: readonly FeedbackRecord[] } = {}
+): FeedbackCandidateQueryResult {
+  const trimmed = { resumen: input.resumen.trim(), tipo: input.tipo, severidad: input.severidad }
+  const candidates = findDuplicateCandidates(pool, trimmed, opts)
+  return { candidates, admissible: candidates.filter((candidate) => candidate.admissible).length, input: trimmed }
+}
+
 /** The unit divergence of the two instruments that both say "size" of the same
  * store (fb-1874, piece 6 — DECLARED here because nobody had written it):
  * the LIVE CAP counts LINES (an id's transitions AND every evidence merge are
@@ -914,6 +960,18 @@ export class FeedbackStore {
     input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
     opts: { max?: number } = {}
   ): Promise<FeedbackDedupeCandidate[]> {
+    const pool = await this.dedupePool()
+    return findDuplicateCandidates(pool, input, { ...opts, liveIndex: this.byId, declarationLines: this.records })
+  }
+
+  /** The pool the dedupe scorer reads: the LIVE byId view (excluding `duplicado`
+   * — a linked dup is noise as a suggestion) tagged `ledger: 'live'` ∪ the
+   * ARCHIVE read on demand, tagged `ledger: 'archive'` (a missing/malformed
+   * archive degrades to the live pool — dedupe is best-effort suggestions,
+   * creates never block). Shared by `dedupeCandidates` (the create's
+   * search-before-create) and `dedupeCandidateQuery` (the fb-2181 PRE-WRITE
+   * query) so the two can never search different pools. */
+  private async dedupePool(): Promise<FeedbackDedupePoolEntry[]> {
     const live = [...this.byId.values()].filter((record) => record.estado !== 'duplicado')
     let archived: FeedbackRecord[] = []
     try {
@@ -921,11 +979,26 @@ export class FeedbackStore {
     } catch {
       archived = [] // a malformed archive must never break a create
     }
-    const pool: FeedbackDedupePoolEntry[] = [
+    return [
       ...live.map((record): FeedbackDedupePoolEntry => ({ record, ledger: 'live' })),
       ...archived.map((record): FeedbackDedupePoolEntry => ({ record, ledger: 'archive' }))
     ]
-    return findDuplicateCandidates(pool, input, { ...opts, liveIndex: this.byId, declarationLines: this.records })
+  }
+
+  /** fb-2181 — the PRE-WRITE candidate query the emitter calls BEFORE it
+   * creates: the SAME search the create runs, with ZERO writes (no append, no
+   * bridge line, no QH notification, no id allocated — `nextSeq` is untouched).
+   * The emitter reads the offers, passes the actionable canonical
+   * (`admissible: true`) to the create as `duplicate_of`, and the fold happens
+   * in the create — the path that was ALREADY ACL-free for any emitter. This is
+   * the TEMPORAL half of fb-2181; the authority half is deliberately untouched
+   * (the terminal transition stays QH-only — spec §4). */
+  async dedupeCandidateQuery(
+    input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
+    opts: { max?: number } = {}
+  ): Promise<FeedbackCandidateQueryResult> {
+    const pool = await this.dedupePool()
+    return projectCandidateQuery(pool, input, { ...opts, liveIndex: this.byId, declarationLines: this.records })
   }
 
   /** LOOP FASE 1: the duplicate-merge — append the dup's evidence to the

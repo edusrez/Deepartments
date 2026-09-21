@@ -3116,7 +3116,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       stateDir: messageStoreDir,
       logger: ctx.logger,
       markPrepared: (record, recipientId, opts) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared', undefined, opts?.noWake),
-      markFinal: (record, recipientId, status, opts) => markDelivery(messageStoreDir, record.id, recipientId, status, undefined, opts?.noWake),
+      // fb-2160 (2026-09-21): the in-bundle FALLBACK mirrors the composed engine
+      // — the CAUSE column of a 'failed' row rides through `opts.reason`.
+      markFinal: (record, recipientId, status, opts) => markDelivery(messageStoreDir, record.id, recipientId, status, undefined, opts?.noWake, opts?.reason),
       // fb-117 (fold-in batch A): the FIFO-gate predicate — SAME wiring as the
       // dshd-core lazy engine (the store's per-recipient seq index + the
       // sidecar's LATEST row per pair; fail-soft — a read error never breaks a

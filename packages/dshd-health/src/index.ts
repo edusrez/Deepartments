@@ -85,6 +85,12 @@ import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from 'dshd-quality'
 // + the structural PacingConfigLike mirror). Same workspace dependency as the
 // registry readers above — no cycle.
 import { isPeakAt, pacingStateAt, pacingWindowFromConfig, countPendingWorkRegister, RE_DELIVERY_PREPARED_STUCK_MS } from 'dshd-core'
+// fb-2160 (2026-09-21): the ARMED no-wake intent + the handoff the seam refused
+// — dshd-core's OWN predicates, so the gate-refusal ledger and the re-drive
+// sweep can never disagree about what an armed no-wake pair is.
+// (`needsRedelivery` is ALREADY imported from dshd-core further up — the
+// undrained test below reuses it rather than redeclaring it.)
+import { noWakeIntentTs, noWakeFailuresSince } from 'dshd-core'
 import type { PacingConfigLike, PacingState } from 'dshd-core'
 import type { DeliveryRow, HostEntryLike } from 'dshd-core'
 
@@ -1201,6 +1207,12 @@ export interface HealthFinding {
   hostId?: string
   /** The messageId (delivery-failed) — the bus record that failed delivery. */
   messageId?: string
+  /** fb-2160 (2026-09-21) — the STABLE IDENTITY of a `delivery-failed` finding:
+   * the pair + the failure RUN's anchor (`delivery-failed:<messageId>
+   * #<recipientId>#<runFirstTs>` — the same literal as `key`, repeated here so a
+   * consumer can group/cap by OBJECT without re-parsing the prose of the key).
+   * Carried by `delivery-failed` findings only. */
+  deliveryPairKey?: string
   /** fb-1707 (builder-412, MEDIDO) — the RECIPIENT of the delivery PAIR a
    * `delivery-storm` finding describes. The scan aggregates per
    * `(messageId, recipientId)` because a FAN-OUT message has several
@@ -1482,6 +1494,103 @@ interface InterruptDetail {
   ts: number
 }
 
+/** ---------------------------------------------------------------- fb-2165 --
+ * THE DURABLE INTERRUPT TRIGGER LEDGER (2026-09-21, the head's point (4').2).
+ *
+ * THE MEASURED DEFECT (fb-2165, two independent observations — the head's and
+ * the host's): `<stateDir>/interrupt-state.json` IS PRUNED to the ~4 most recent
+ * keys. It is a LIVE LEDGER, not a history: `safeInterrupt` rewrites it on every
+ * interrupt and drops every entry older than the 5-min cooldown (`:1571-1578`
+ * and `:1585-1587`), so the entry the head had READ three turns earlier was
+ * GONE by the time the host looked — the head's own `builder-441` interrupt
+ * evicted the rows he had cited.
+ *
+ * WHY THAT IS THE MECHANICAL CAUSE OF `fb-2149`/`fb-2011`: the `interrupt-detail`
+ * entry is the ONLY place where an abort is tied to its TRIGGER (`sourceKey`).
+ * `post-errors.jsonl` names only the VICTIM and the TOOL
+ * (`tool call aborted — bash (session-…)`), never the emitter of the interrupt,
+ * and fb-2011 measured literally ZERO `sourceKey` anywhere else in the stateDir.
+ * ⇒ PAST THE PRUNING, «WHO ABORTED THIS TURN AND WHY» IS IRRECOVERABLE.
+ *
+ * WHAT THIS IS: an APPEND-ONLY, NEVER-PRUNED row of exactly that fact, written
+ * at the SAME instant the ephemeral entry is written (so the two can never
+ * disagree about a live interrupt). Row = {ts, recipientId, reason, sourceKey,
+ * key}: `key` is the alert identity that armed the interrupt (the attribution
+ * `fb-2149` needs), `sourceKey` is what the caller passed. A reader can then
+ * answer «which trigger aborted seat X at time T» AFTER the fact — the property
+ * `interrupt-state.json` can never provide by construction.
+ *
+ * THE COST, declared: ONE appendFile per interrupt actually EXECUTED — and
+ * `safeInterrupt` executes at most one per recipient per INTERRUPT_COOLDOWN_MS
+ * (5 min), so the file grows with REAL aborts (measured: a handful per hour),
+ * not with the tick cadence. Fail-soft: a ledger that cannot be written must
+ * never turn a successful abort into a failed delivery (any error only warns).
+ *
+ * THE POINT OF INSERTION: `safeInterrupt`, in the SAME block that builds the
+ * `interrupt-detail:` entry — the single choke point through which EVERY bus
+ * interrupt passes (busDeliverToHost + busDeliverToPost). */
+export const INTERRUPTS_LEDGER_FILE = 'interrupts.jsonl'
+/** fb-2160 (the head's point (4').1) — THE OBJECT-LEVEL INTERRUPT BOUND, as a
+ * PURE predicate (no runtime state: the caller decides how to remember it).
+ *
+ * WHY IT EXISTS: `delivery-failed` is the ONE finding class that both re-emits
+ * on a cadence AND is delivered with `interrupt: true` (the health seam's
+ * `notifyHost` sends `{interrupt: true}` on BOTH branches — no `kind` gate).
+ * Before fb-2160 the alert identity embedded the ATTEMPT's `ts`, so a SINGLE
+ * dead object re-armed a DIFFERENT interrupt on every retry — i.e. one corpse
+ * could ask to abort a live turn, repeatedly (`fb-2149`'s class, with the flag
+ * ARMED).
+ *
+ * THE BOUND IS THE OBJECT, NOT THE MESSAGE: `deliveryPairKey` (the pair + the
+ * FAILURE RUN's anchor, non-renumerable — the remap can neither collide nor
+ * rename it). A NEW run of the same pair — its predecessor DRAINED — mints a NEW
+ * key and therefore a NEW interrupt: BOTH DIRECTIONS are measured, so the bound
+ * can never swallow a legitimate alert (the `fb-1478` warning: over-suppressing
+ * is as wrong as under-suppressing).
+ *
+ * SCOPE IS DELIBERATELY THE ONE CLASS: every other finding kind is unchanged
+ * (no key → `true`, i.e. «arm it»), so removing this can never silence a class
+ * it was not aimed at. The API takes the two values the caller already holds and
+ * RETURNS the decision, so it is testable without a process and carries no
+ * module-global mutable state (AGENTS.md rule 4). */
+export function shouldArmDeliveryInterrupt(
+  finding: { kind: string; deliveryPairKey?: string },
+  alreadyArmed: ReadonlySet<string> | undefined
+): boolean {
+  if (finding.kind !== 'delivery-failed') return true // every other class: unchanged
+  const key = finding.deliveryPairKey
+  if (key === undefined) return true // no stable identity → never silently suppress
+  return alreadyArmed === undefined || !alreadyArmed.has(key)
+}
+/** One durable interrupt-trigger row (see the block comment above). */
+export interface InterruptTriggerRow {
+  ts: number
+  /** The seat that was aborted (post id or host id). */
+  recipientId: string
+  /** The cancel reason put on the wire ('interrupted' — INTERRUPT_CANCEL_CAUSE). */
+  reason: string
+  /** The emitter's trigger identity (the alert key that armed the interrupt). */
+  sourceKey: string
+}
+
+/** fb-2165 — append ONE durable interrupt-trigger row. NEVER throws: the
+ * attribution ledger is observability, and an unwritable one must not affect the
+ * abort that already happened. The file is append-only by design — it is the
+ * HISTORY the live `interrupt-state.json` cannot be.
+ *
+ * EXPORTED for the point-of-insertion contract: `safeInterrupt` is its PRODUCTION
+ * caller (below), and a composition that owns its own interrupt choke point can
+ * write the same rows — the attribution has ONE shape wherever it is produced. */
+export async function appendInterruptTriggerRow(stateDir: string, row: InterruptTriggerRow): Promise<void> {
+  try {
+    const filePath = path.join(stateDir, INTERRUPTS_LEDGER_FILE)
+    await mkdir(path.dirname(filePath), { recursive: true })
+    await appendFile(filePath, `${JSON.stringify(row)}\n`, 'utf8')
+  } catch {
+    /* fail-soft — the abort already happened; the live ledger keeps its entry */
+  }
+}
+
 /** O1-EXT P4 — read the interrupt-DETAIL map of `<stateDir>/interrupt-state.json`
  * (the `interrupt-detail:` sibling entries; anything else — the numeric GATE
  * map — is ignored). Absent / unreadable / malformed → {} (never throws). */
@@ -1580,6 +1689,21 @@ export async function safeInterrupt(
     if (nowMs - v.ts > INTERRUPT_COOLDOWN_MS) delete details[k]
   }
   try { await writeInterruptState(stateDir, next, details) } catch { /* best-effort */ }
+  // fb-2165 (2026-09-21) — THE DURABLE HALF. The block above writes the LIVE
+  // ledger, which PRUNES (the measured ~4 most recent keys): the attribution is
+  // destroyed by the NEXT interrupt, and `fb-2011` measured that no other
+  // append-only file carries a `sourceKey` — so «who aborted this turn» became
+  // unanswerable after the fact (the mechanical cause of `fb-2149`). This append
+  // is the history the live ledger cannot be; it is written at the SAME instant,
+  // never pruned, and fail-soft. AWAITED (an instrument whose rows race the
+  // assertion that reads them measures nothing on demand — the repo's own rule
+  // for the gate ledger, mirrored).
+  await appendInterruptTriggerRow(stateDir, {
+    ts: nowMs,
+    recipientId,
+    reason: INTERRUPT_CANCEL_CAUSE.reason,
+    sourceKey: sourceKey ?? ''
+  })
   return true
 }
 
@@ -3601,6 +3725,212 @@ function deliveryFailedKey(row: Pick<DeliveryRow, 'messageId' | 'recipientId' | 
   return `delivery-failed:${row.messageId}#${row.recipientId}#${row.ts}`
 }
 
+/** ---------------------------------------------------------------- fb-2160 --
+ * THE DEDUPE IDENTITY OF A DELIVERY FAILURE (2026-09-21) — THE HALF `fb-198`
+ * LEFT OPEN, and the constraint that shapes it.
+ *
+ * WHAT WAS MEASURED. `deliveryFailedKey` signs the key with the row's OWN
+ * `ts` — and a re-drive cycle writes a NEW row with a NEW `ts` every time. So
+ * the SAME dead pair mints a DIFFERENT identity per attempt, the shared
+ * health-alerts ledger can never dedupe it, and the host is woken per attempt:
+ * measured on `/.deepartments` for the four `noWake` directives to
+ * `quality-head` — keys `delivery-failed:m-17488#quality-head#1789993971289`
+ * (12:32) and `…#1789994631509` (12:43) are the SAME object, alerted TWICE;
+ * 40 audit rows carry the class. A `count:1` that never grows is the tell: the
+ * ledger is not a counter here, it is a fresh row every time.
+ *
+ * WHY THE OBVIOUS FIX IS FORBIDDEN. Dropping the `ts` back to the pre-fix
+ * `delivery-failed:<messageId>` REOPENS `fb-198`/`fb-2119`: a boot compaction
+ * RENUMBERS message ids (the old id is recycled onto an UNRELATED later
+ * record) and the stale ledger key then SUPPRESSES the new record's alert — a
+ * durable false negative the operator reads backwards. (And per fb-1478 the
+ * relation is not symmetric: a stale band key SUPPRESSES rather than re-fires,
+ * so a wrong identity is silent, not noisy.)
+ *
+ * THE IDENTITY ADOPTED — THE FAILURE RUN, not the attempt. A pair's failure
+ * history is a SEQUENCE OF RUNS delimited by SUCCESS: the run is exactly the
+ * class `pairConsecutiveAttemptCount` (dshd-core) measures for the max-attempts
+ * cap, and it is reset by the only event that means the pair recovered
+ * (`delivered`/`resumed`/`self`). The identity is the pair + the RUN'S FIRST
+ * ROW TS — a field that (a) is IMMUTABLE (compaction rewrites only `messageId`),
+ * (b) does NOT change as the run keeps failing (every later attempt maps onto
+ * the SAME key ⇒ the shared ledger's `HEALTH_DEDUPE_WINDOW_MS` window finally
+ * applies), and (c) is NOT renumbered by a compaction — so the `fb-198`
+ * guarantee is preserved VERBATIM: a recycled `messageId` mints a different
+ * pair/run and can never collide with the stale entry.
+ *
+ * DIRECTION MEASURED BOTH WAYS (fb-1478's warning honoured): suppressed is
+ * exactly «the same run, again, inside the window» — the measured churn of
+ * 9–11 attempts over 6 h collapses to ONE alert per pair per 30-min window;
+ * re-fired is «the pair recovered and failed again» (a NEW run ⇒ a NEW key ⇒ a
+ * fresh alert, never hidden) and «the window elapsed and the run is STILL
+ * failing» (the legacy per-key cadence, unchanged). Nothing legitimate is
+ * buried.
+ *
+ * Module-private, like `deliveryFailedKey` (the export-parity lock). */
+function deliveryFailureRunAnchorTs(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number | undefined {
+  // Walk FORWARD over the pair's OWN rows, resetting at each SUCCESS — the SAME
+  // success class `pairConsecutiveAttemptCount` uses, so the two can never drift
+  // (a `delivered`/`resumed`/`self` row is the run boundary; `terminal` is a
+  // stop word, never a recovery, exactly as the cap reads it).
+  let anchor: number | undefined
+  let sawFailure = false
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (row.status === 'delivered' || row.status === 'resumed' || row.status === 'self') {
+      anchor = undefined
+      sawFailure = false
+      continue
+    }
+    if (row.status !== 'failed') continue
+    sawFailure = true
+    if (anchor === undefined) anchor = row.ts
+  }
+  return sawFailure ? anchor : undefined
+}
+
+/** fb-2160 — the identity key of a delivery-failure FINDING: the pair + the
+ * CURRENT RUN's anchor ts (see `deliveryFailureRunAnchorTs`). Falls back to the
+ * row's own `ts` (the fb-198 signed key) when the caller could not resolve the
+ * run — the honest degradation, never a bare `<messageId>`. */
+function deliveryFailedIdentity(row: Pick<DeliveryRow, 'messageId' | 'recipientId' | 'ts'>, runAnchorTs?: number): string {
+  return deliveryFailedKey({ messageId: row.messageId, recipientId: row.recipientId, ts: runAnchorTs ?? row.ts })
+}
+
+/** ---------------------------------------------------------------- fb-2160 --
+ * THE GATE-REFUSAL LEDGER (2026-09-21, the amended acceptance) — THE MISSING
+ * ANSWER TO «HOW MANY DISPATCHES WERE ATTEMPTED AND REFUSED».
+ *
+ * THE MEASURED BLIND SPOT (host, 2026-09-21): a DURABLE DIRECTIVE THAT WAS NOT
+ * WOKEN HAS NO DRAIN ROUTE, and its gate refusal is written NOWHERE except the
+ * MESSAGE'S OWN TEXT (`m-17488`/`m-17524`/`m-17836` carry the annotation
+ * «capacity-gate verdict: BLOCKED … SUSTAINED … do NOT deploy inspectors now …
+ * this directive is DURABLE but was NOT woken») plus the retry churn of the
+ * delivery sidecar. Neither is a countable ledger: the text is prose nobody
+ * aggregates and the churn counts ATTEMPTS, not REFUSALS (and the sidecar is a
+ * FLOOR, not a count — `compactDeliveryRows` collapses a pair whose run is
+ * empty, so a delivery can vanish from it, as this lane's own history shows).
+ *
+ * WHAT THIS IS: the durable, append-only, COUNTABLE sink of that class —
+ * `<stateDir>/gate-refusals.jsonl`, one row per (pair, run) with the
+ * `attempts`/`refusals` counters, written by the SAME tick that already scans
+ * the ledger, so the datum survives the compaction that erases the sidecar rows
+ * and answers the operator's question by aggregation instead of by forensics.
+ *
+ * WHY IT IS A SCAN + A TICK-WRITER AND NOT A NEW ENGINE SEAM (the DESIGN, and
+ * its honest limit): the delivery engine already HAS the refusal instant — the
+ * `acl` / `unknown` / `retired` / `reroute` grounds it classifies in
+ * `catalogRoute` (fb-2160 persisted them as the row's CAUSE) — and that seam is
+ * where a FUTURE implementation should emit the refusal SYNCHRONOUSLY. What
+ * this lane lands is the OBSERVABLE half that needs no shared-engine surgery:
+ * the health tick derives the same class from the ledger it already reads
+ * (`noWakeIntentTs` + `noWakeFailuresSince`, dshd-core's own predicates) and
+ * persists it. Declared consequence, measured: the counter is a TICK GRANULARITY
+ * aggregate (a refusal seen only between two ticks is counted at the next), and
+ * a pair whose rows were compacted away BEFORE the first tick that observed it
+ * is not counted at all — the same floor the sidecar has, bounded by the tick
+ * cadence (60 s) instead of by the boot compaction.
+ *
+ * THE COUNTERS, defined so they cannot be read backwards:
+ *   - `attempts`: the rows of the pair's current run that NEEDED delivery
+ *     (`prepared`/`failed`) — what the re-drive tried to hand over;
+ *   - `refusals`: of those, the `failed` REJECTIONS — the handoffs the seam
+ *     refused. `attempts - refusals` = cycles that have not failed (yet);
+ *   - `firstFailureTs`/`lastFailureTs`: the run's refusal window;
+ *   - `active`: the pair has NOT drained (its latest row still needs delivery).
+ * A pair whose latest row is a success is not emitted (it drained — the other
+ * accepted output).
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO: it never writes a `terminal`, never
+ * re-drives, never touches the pair's status. The pair stays PRESERVED — its
+ * content and its order are the evidence, and the enmienda forbids closing it.
+ * PURE over the rows it is given; the WRITER beside it is fail-soft. */
+export const GATE_REFUSALS_FILE = 'gate-refusals.jsonl'
+/** The row shape of `<stateDir>/gate-refusals.jsonl` (append-only JSONL). */
+export interface GateRefusalRow {
+  /** Append ts of THIS observation (the tick's clock). */
+  ts: number
+  /** The pair — the SAME anchor `deliveryFailedKey`/`deliveryFailedIdentity`
+   * use (a stable, non-renumerable identity). */
+  messageId: string
+  recipientId: string
+  /** The pair's CURRENT-RUN anchors (see the block comment). */
+  intentTs: number
+  firstFailureTs: number
+  lastFailureTs: number
+  attempts: number
+  refusals: number
+  /** `true` = the pair is STILL armed and undrained at this observation. */
+  active: boolean
+}
+
+/** fb-2160 — the gate-refusal rows of the CURRENT ledger (PURE, never throws).
+ * The class is read from the pair's OWN rows through dshd-core's predicates, so
+ * this scan and the sweep can never disagree about what an armed no-wake pair
+ * is. A pair with no refusal is not emitted (nothing was refused); a pair that
+ * drained (a success class in the run) is not emitted either. */
+export function scanGateRefusals(rows: readonly DeliveryRow[], nowMs: number): GateRefusalRow[] {
+  const out: GateRefusalRow[] = []
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const key = `${row.messageId}#${row.recipientId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const intentTs = noWakeIntentTs(rows, row.messageId, row.recipientId)
+    if (intentTs === undefined) continue // not an armed no-wake pair: not this class
+    const firstFailureTs = noWakeFailuresSince(rows, row.messageId, row.recipientId)
+    if (firstFailureTs === undefined) continue // never handed over: nothing refused
+    let latest: DeliveryRow | undefined
+    let attempts = 0
+    let refusals = 0
+    let lastFailureTs = firstFailureTs
+    for (const r of rows) {
+      if (r.messageId !== row.messageId || r.recipientId !== row.recipientId) continue
+      latest = r
+      if (r.status === 'prepared' || r.status === 'failed') attempts++
+      if (r.status === 'failed') {
+        refusals++
+        lastFailureTs = r.ts
+      }
+    }
+    if (latest === undefined) continue
+    out.push({
+      ts: nowMs,
+      messageId: row.messageId,
+      recipientId: row.recipientId,
+      intentTs,
+      firstFailureTs,
+      lastFailureTs,
+      attempts,
+      refusals,
+      active: needsRedelivery(latest.status)
+    })
+  }
+  return out
+}
+
+/** fb-2160 — the WRITER of the gate-refusal ledger: append ONE row per pair of
+ * the CURRENT scan to `<stateDir>/gate-refusals.jsonl`. Append-only by design
+ * (the counter's whole point is that it survives the sidecar's compaction and is
+ * never rewritten); the file grows with the number of PAIRS observed, not with
+ * the tick cadence. NON-FATAL: a ledger that cannot be written must never break
+ * the health tick (the same discipline the alert-audit sink uses — any error
+ * only warns). Returns the number of rows appended (observability). */
+export async function appendGateRefusals(
+  stateDir: string,
+  rows: readonly GateRefusalRow[]
+): Promise<number> {
+  if (rows.length === 0) return 0
+  const filePath = path.join(stateDir, GATE_REFUSALS_FILE)
+  try {
+    await mkdir(path.dirname(filePath), { recursive: true })
+    await appendFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
+    return rows.length
+  } catch {
+    return 0 // fail-soft: the tick is never broken by its own observability
+  }
+}
+
 /** Group fresh delivery 'failed' rows inside HEALTH_ERROR_WINDOW_MS, deduped per
  * messageId (multiple rows for the same messageId → ONE finding).
  * Bug (re-alert loop): a `retiredMemberIds` set of RETIRED member ids (hosts +
@@ -3646,12 +3976,30 @@ export function scanDeliveryFindings(
   for (const row of fresh) byMessage.set(row.messageId, row) // last-wins
   const findings: HealthFinding[] = []
   for (const [messageId, row] of byMessage) {
+    // fb-2160: the RUN anchor. Resolved over the FULL sidecar (the same read the
+    // storm scan below performs) because the run's FIRST row may sit outside the
+    // 2 h anomaly window while its attempts keep landing inside it. A read
+    // failure degrades to the row's own ts (the fb-198 signed key) — never to a
+    // bare `<messageId>`.
+    let runAnchorTs: number | undefined
+    try {
+      runAnchorTs = deliveryFailureRunAnchorTs(rows, messageId, row.recipientId)
+    } catch {
+      runAnchorTs = undefined
+    }
     findings.push({
       kind: 'delivery-failed',
       // FB-198 (T2): the NON-RENUMERABLE signed key — a reused message id (a
       // post-compaction renumber) never dedupes against a stale ledger entry.
-      key: deliveryFailedKey(row),
+      // fb-2160: signed by the RUN's anchor instead of the attempt's ts, so the
+      // same dead pair keeps ONE identity across its attempts (see the identity
+      // block above); the non-renumerability is untouched.
+      key: deliveryFailedIdentity(row, runAnchorTs),
       messageId,
+      // fb-2160 (the head's point (4').1): the SAME literal, exposed as the
+      // finding's OBJECT identity — the field the interrupt-bounding consumer
+      // groups by, so a dead object cannot re-arm its marker once per attempt.
+      deliveryPairKey: deliveryFailedIdentity(row, runAnchorTs),
       ts: row.ts,
       count: 1
     })
@@ -4356,13 +4704,26 @@ export function scanHealthCatchup(
   const deliveries = retiredMemberIds === undefined ? oldDeliveries : oldDeliveries.filter((row) => !retiredMemberIds.has(row.recipientId))
   const byMessage = new Map<string, DeliveryRow>()
   for (const row of deliveries) byMessage.set(row.messageId, row) // last-wins
+  // fb-2160: the run anchor needs the pair's WHOLE history (the catch-up rows are
+  // BY DEFINITION outside the live window), so the full sidecar is read once more
+  // here — the same source the callers already passed through
+  // `readDeliveryRowsFull`.
+  let catchupRows: DeliveryRow[] = []
+  try {
+    catchupRows = readDeliveryRowsFull(stateDir)
+  } catch {
+    catchupRows = []
+  }
   for (const [messageId, row] of byMessage) {
     findings.push({
       kind: 'delivery-failed',
       // FB-198 (T2): the NON-RENUMERABLE signed key — identical to the live
       // scan's (the shared-ledger dedupe applies verbatim; a reused id after a
-      // compaction never collides with the stale entry).
-      key: deliveryFailedKey(row),
+      // compaction never collides with the stale entry). fb-2160: signed by the
+      // failure RUN's anchor, exactly like the live scan — the two scans must
+      // mint the SAME identity for the same pair or the ledger would count one
+      // event twice.
+      key: deliveryFailedIdentity(row, deliveryFailureRunAnchorTs(catchupRows, messageId, row.recipientId)),
       messageId,
       ts: row.ts,
       count: 1,
@@ -9535,6 +9896,24 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       }
     }
     // 3. scan.
+    // fb-2160 (the amended acceptance): THE GATE-REFUSAL LEDGER — the answer to
+    // «how many dispatches were attempted and refused» that did not exist (the
+    // refusal lived only in the message's own prose + the sidecar churn, and the
+    // sidecar is a FLOOR because the boot compaction erases pairs whose run is
+    // empty). Read ONCE here from the SAME snapshot the delivery scans use, then
+    // appended DURABLY below — the counters survive the compaction that erases
+    // the rows they were derived from. It never writes a status: the pair's
+    // content is the evidence the enmienda forbids destroying.
+    let gateRefusalRows: GateRefusalRow[] = []
+    try {
+      gateRefusalRows = scanGateRefusals(deliveryRowsSnapshotReader(deps.stateDir), nowMs)
+      const appended = await appendGateRefusals(deps.stateDir, gateRefusalRows)
+      if (appended > 0) {
+        deps.logger?.info(`[deepartments] system-health: gate-refusals ledger appended ${appended} row(s) — ${gateRefusalRows.filter((r) => r.active).length} armed no-wake pair(s) STILL undrained with ${gateRefusalRows.reduce((n, r) => n + r.refusals, 0)} refusal(s) recorded`)
+      }
+    } catch (error: unknown) {
+      deps.logger?.warn(`[deepartments] system-health: gate-refusals ledger failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
     const findings = [
       // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the
       // manager-delivery-stuck findings computed BEFORE the heartbeat write

@@ -68,7 +68,17 @@ const CLOSE = "  }, 'deepartments: host-plane tools')"
 // `relation_because`, `destination`, `linked_from`, `resolved_from`), and the 6
 // pre-existing properties are untouched. MEASURED with the SAME command above
 // (the same extraction this file performs).
-const FROZEN_MD5 = '8ffce0e12fc65ade2050e54a5d084932'
+// RE-FROZE 2026-09-21 (lane fb-2181 — the non-QH fold is UNREACHABLE because the
+// information arrives AFTER the act / run token 78ed6bf5):
+// 8ffce0e12fc65ade2050e54a5d084932 → 5dc4d300ed610e2040733ef57fa91da9 — ONE
+// ADDITIVE in-span change: a NEW read-only tool `dept_feedback_candidates` (the
+// PRE-WRITE duplicate query — the SAME `dedupeCandidates` search the create runs,
+// with ZERO writes) + its registration in the UNIVERSAL `feedbackEmitTools` array
+// (a WORKER sees it — the emitter without terminal authority) + the 10th global
+// host-plane registration + the create-description pointer sentence. The terminal
+// transition stays QH-only (spec §4): the fix is TEMPORAL, not authoritative.
+// MEASURED with the SAME command above (the same extraction this file performs).
+const FROZEN_MD5 = '5dc4d300ed610e2040733ef57fa91da9'
 
 const md5 = (s) => createHash('md5').update(s, 'utf8').digest('hex')
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length

@@ -154,6 +154,16 @@ export interface DeliveryRow {
    * ABSENT (undefined/false) = a normal (always-wake or legacy) row — the
    * pre-m-707 on-disk shape stays byte-identical (R6). */
   noWake?: boolean
+  /** fb-2160 (2026-09-21) — WHY a non-final row settled the way it did: the
+   * delivery seam's own classified GROUND (`BusDeliveryFailedGround` /
+   * `materialization-failed`, `unknown`, `acl`, `retired`, `reroute`,
+   * `session-not-found`, `pool`, `child`), or `unreported` when the seam
+   * produced no classification. Until this field the measured churn wrote
+   * `{messageId, recipientId, status, ts}` ALONE — an instrument that hides its
+   * own cause: an operator reading `failed` could not tell a wake failure from
+   * an ACL refusal from a retired address. Purely ADDITIVE and only ever set on
+   * a 'failed' row (absent → byte-identical to the pre-fb-2160 shape, R6). */
+  reason?: string
 }
 
 /** Page request: `limit` (default 10, defensively capped at 50) + optional exclusive id cursor. */
@@ -691,11 +701,20 @@ export async function markDelivery(
   recipientId: string,
   status: DeliveryStatus,
   ts: number = Date.now(),
-  noWake?: boolean
+  noWake?: boolean,
+  /** fb-2160 — the CAUSE column (see `DeliveryRow.reason`). Additive: only a
+   * 'failed' row ever carries it, and an absent value keeps the pre-fb-2160
+   * serialization byte-identical. */
+  reason?: string
 ): Promise<DeliveryRow> {
-  const row: DeliveryRow = noWake === true
-    ? { messageId, recipientId, status, ts, noWake: true }
-    : { messageId, recipientId, status, ts }
+  const row: DeliveryRow = {
+    messageId,
+    recipientId,
+    status,
+    ts,
+    ...(noWake === true ? { noWake: true } : {}),
+    ...(reason !== undefined && status === 'failed' ? { reason } : {})
+  }
   const filePath = resolveDeliveriesPath(stateDir)
   await mkdir(path.dirname(filePath), { recursive: true })
   await appendFile(filePath, JSON.stringify(row) + '\n', 'utf8')
@@ -1184,7 +1203,102 @@ export function pairConsecutiveAttemptCount(rows: readonly DeliveryRow[], messag
  * boot-only re-drive left parked until the next boot). */
 export const RE_DELIVERY_PREPARED_STUCK_MS = 10 * 60_000
 
-/** FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
+// ─── NO-WAKE HOLD vs NO-WAKE EXPIRY (2026-09-21, fb-2160) ────────────────────
+// ⚠️ THE FIRST CUT OF THIS LANE WAS WRONG AND IS REVERTED. It settled an aged
+// no-wake pair to `terminal` after a 6-h TTL. THE HEAD'S ENMIENDA (host,
+// 2026-09-21) refutes it BY READING THE ROWS' OWN TEXT, and the refutation is
+// decisive: three of the four measured pairs are NOT dead directives —
+//   `m-17488`/`m-17524`/`m-17836` carry, VERBATIM, «SUSTAINED — the pool gate
+//   blocks EVERY dispatch, so do NOT deploy inspectors now: inspect IN-HEAD at
+//   your next real wake (this directive is DURABLE but was NOT woken — it drains
+//   at your next real wake) @ <instant>» — AN OPEN ORDER addressed to the live
+//   recipient, plus the ANNOTATION of the gate's own refusal. Sweeping them to
+//   `terminal` DELETES THE EVIDENCE AND KILLS THE ORDER. (`m-17466` is a
+//   different class — a turn-error of the recipient's OWN session — and is the
+//   only closed one.)
+// ⇒ THE CLASSIFICATION IS BY CONTENT, NEVER BY AGE, EMITTER OR KIND. What this
+// module keeps from the lane is only what survives that reading: the pair's
+// ARMED no-wake intent (`noWakeIntentTs`) and the evidence of a HANDOFF THE SEAM
+// REFUSED (`noWakeFailuresSince`). NO status is written from them — an armed
+// pair with a refused handoff is precisely the class that must be PRESERVED,
+// DRAINED or REPORTED, never silently closed. The remainder of the fix lives in
+// the delivery seam (the intent channel + the gate-refusal ledger), see the
+// operator note in `deliveryGroundOf`'s lane.
+
+/** PURE (fb-2160) — the pair's ARMED no-wake intent: the ts of the FIRST row of
+ * the CURRENT run that carries the explicit `noWake` flag (m-707 semantics — the
+ * only row-level evidence of the sender's no-wake ORDER), or undefined when the
+ * pair carries none. The manifest is read over the pair's WHOLE row history for
+ * the reason the measured class proves: the seal is a property of the pair's
+ * INTENT, and the re-drive seam does NOT forward it (`deps.deliver` has no
+ * intent channel — see the doc of that dep), so a pair whose latest row lost the
+ * flag is still an armed no-wake pair. The run boundary is the SAME success class
+ * the attempt counter and the compaction use (`delivered`/`resumed`/`self`): a
+ * pair that actually RECOVERED stops being armed. */
+export function noWakeIntentTs(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number | undefined {
+  let intentTs: number | undefined
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (isDeliverySuccess(row.status)) {
+      intentTs = undefined // the run ended in a real delivery: the old order is spent
+      continue
+    }
+    if (row.noWake === true && intentTs === undefined) intentTs = row.ts
+  }
+  return intentTs
+}
+
+/** PURE (fb-2160) — THE HANDOFF THE SEAM REFUSED: the ts of the FIRST `failed`
+ * row of the pair's current run, or undefined when the run has not failed yet.
+ * This is the MEASURED evidence that separates an armed queue from an armed
+ * DIRECTIVE IN TROUBLE: the four measured pairs each carry 9–11 `failed`
+ * rejections INTERLEAVED with the sealed row (a `failed` at 08:10:51 sits 0,4 s
+ * after the `prepared` of 08:10:50 whose seal is `noWake:true`) — the sender DID
+ * hand the record over and the seam REJECTED it, every cycle. A pair whose only
+ * failure-class row is its own `prepared` write-ahead has NOT been handed over
+ * yet: it is a queue waiting for its recipient.
+ *
+ * ⚠️ THIS PREDICATE REPORTS, IT NEVER CLOSES (see the block comment above): the
+ * enmienda established that three of the four measured pairs carry a LIVE
+ * durable order, so the correct response to «armed + refused» is to PRESERVE,
+ * DRAIN or REPORT them — the pair is the evidence of a gate refusal that has no
+ * other ledger. Callers use it for observability/classification only. */
+export function noWakeFailuresSince(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number | undefined {
+  let firstFailure: number | undefined
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (isDeliverySuccess(row.status)) {
+      firstFailure = undefined // a real delivery opened a new run
+      continue
+    }
+    if (row.status === 'failed' && firstFailure === undefined) firstFailure = row.ts
+  }
+  return firstFailure
+}
+
+/** PURE (fb-2160) — THE ARMING THAT WENT WRONG: whether an ARMED no-wake pair
+ * has been HANDED OVER AND REFUSED (both `noWakeIntentTs` and
+ * `noWakeFailuresSince` resolve) while STILL needing (re-)delivery — i.e. the
+ * exact state the measured churn sits in: a directive that neither drains nor
+ * closes, retried on the 10-min clock forever.
+ *
+ * ⚠️ IT IS A CLASSIFIER, NOT A SENTENCE — and that is the whole enmienda. The
+ * FIRST CUT of this lane turned this predicate into «settle to `terminal` after
+ * a TTL», which the head's re-reading of the ROWS' OWN TEXT refuted: THREE of
+ * the four measured pairs carry a LIVE durable order («do NOT deploy inspectors
+ * now: inspect IN-HEAD at your next real wake … DURABLE but was NOT woken»), so
+ * closing them would DELETE THE EVIDENCE and KILL THE ORDER. The classification
+ * is BY CONTENT, never by age/emitter/kind. Callers must PRESERVE the pair and
+ * route it to a drain or to the gate-refusal ledger — never write `terminal`. */
+export function isRefusedNoWakeHold(rows: readonly DeliveryRow[], messageId: string, recipientId: string): boolean {
+  if (noWakeIntentTs(rows, messageId, recipientId) === undefined) return false
+  if (noWakeFailuresSince(rows, messageId, recipientId) === undefined) return false
+  let latest: DeliveryRow | undefined
+  for (const row of rows) {
+    if (row.messageId === messageId && row.recipientId === recipientId) latest = row
+  }
+  return latest !== undefined && needsRedelivery(latest.status)
+}/** FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
  * the per-invocation cap of `DeliveryRedeliverer.drainRecipientQueue` (the
  * FIFO head-first drain of a recipient's 'prepared' queue at its next REAL
  * wake). At most this many pairs are re-driven per fire — the remaining pairs
@@ -2063,6 +2177,20 @@ export class DeliveryRedeliverer {
         }
         logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) — B3 dormancy hold BYPASSED (fb-467): "${row.recipientId}" is an ORPHAN ADDRESS (the re-route successor already took another pair's content) and can never wake; the re-drive re-routes instead of holding forever`)
       }
+      // ★ fb-2160 — THE REVERTED TTL SETTLE, AND WHY IT MUST NOT COME BACK.
+      // The first cut of this lane settled an aged armed no-wake pair to
+      // `terminal` HERE (before the P2 hold below, whose `return` is what made
+      // the pair immortal). THE HEAD'S ENMIENDA refuted it by reading the rows'
+      // OWN TEXT: THREE of the four measured pairs carry a LIVE durable order
+      // («do NOT deploy inspectors now: inspect IN-HEAD at your next real wake —
+      // this directive is DURABLE but was NOT woken»), so the settle would DELETE
+      // THE EVIDENCE and KILL THE ORDER. Accepted outputs are ONLY «it drains» or
+      // «it is preserved into an AUDITABLE artifact» — never a silent `terminal`.
+      // The refusal evidence this lane measured (`isRefusedNoWakeHold`) is a
+      // CLASSIFIER for the operator/ledger, never a settlement trigger. The
+      // branch that used to stand here wrote exactly:
+      //   `markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')`
+      // — and it is GONE.
       // P2 (fb-131 — WAKE-SEAM lane): the no-wake-until-wake guard — a row whose
       // LATEST transition carries the explicit `noWake` flag (m-707 write-ahead
       // semantics) is the sender's ORDERED no-wake intent: it must drain at the

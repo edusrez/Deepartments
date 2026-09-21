@@ -55,6 +55,13 @@ export type { BusMemberProfile, BusCatalogLens } from './acl.js'
 
 export * from './registry.js'
 export * from './messages.js'
+// fb-2160 (2026-09-21): the NO-WAKE provenance predicates the gate-refusal
+// ledger consumes. `messages.js` is `export *` above, so these names ALREADY
+// reach a direct `dshd-core` consumer — this NAMED re-export exists because the
+// compiled `lib/invoke.js` superset is built by tsc's CommonJS interop, which
+// does NOT forward a star-export automatically: the bundle's drop-in surface
+// would otherwise miss them (and `dshd-health` imports them from `dshd-core`).
+export { noWakeIntentTs, noWakeFailuresSince, isRefusedNoWakeHold } from './messages.js'
 export * from './delivery.js'
 export * from './wakepack.js'
 export * from './lifecycle.js'
@@ -694,7 +701,9 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
     stateDir,
     logger: ctx.logger,
     markPrepared: (record, recipientId, opts) => markDelivery(stateDir, record.id, recipientId, 'prepared', undefined, opts?.noWake),
-    markFinal: (record, recipientId, status, opts) => markDelivery(stateDir, record.id, recipientId, status, undefined, opts?.noWake),
+    // fb-2160 (2026-09-21): `opts.reason` rides into the sidecar row's CAUSE
+    // column — additive (absent → the pre-fb-2160 row, byte-identical).
+    markFinal: (record, recipientId, status, opts) => markDelivery(stateDir, record.id, recipientId, status, undefined, opts?.noWake, opts?.reason),
     // fb-117 (fold-in batch A — the FIFO-gate predicate): whether the recipient
     // has an EARLIER seq whose delivery pair is still 'prepared' (non-final).
     // Uses the store's per-recipient seq index (§3.3) + the sidecar's LATEST row

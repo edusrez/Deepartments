@@ -4183,7 +4183,7 @@ export const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
   'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
   'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
   'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec', 'dept_zstd_read',
-  'dept_feedback', 'dept_feedback_list', 'dept_feedback_update',
+  'dept_feedback', 'dept_feedback_candidates', 'dept_feedback_list', 'dept_feedback_update',
   'secretary'
 ])
 

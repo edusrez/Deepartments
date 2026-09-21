@@ -313,8 +313,13 @@ export interface DeliveryEngineDeps {
    * input (a recipient receiving only no-wakes stays idle). */
   markPrepared(record: MessageRecord, recipientId: string, opts?: { noWake?: boolean }): Promise<unknown>
   /** The write-ahead sidecar FINAL status mark (settled — spec §4.4).
-   * `opts.noWake: true` (m-707) marks the final row no-wake (see above). */
-  markFinal(record: MessageRecord, recipientId: string, status: DeliveryStatus, opts?: { noWake?: boolean }): Promise<unknown>
+   * `opts.noWake: true` (m-707) marks the final row no-wake (see above).
+   * `opts.reason` (fb-2160, 2026-09-21) is the ADDITIVE CAUSE COLUMN of a
+   * 'failed' row — the ground this engine classified (`BusDeliveryFailedGround`)
+   * so the ledger stops hiding why a delivery failed. Optional and only ever
+   * written for a 'failed' status: an absent value keeps every other row
+   * byte-identical (R6). */
+  markFinal(record: MessageRecord, recipientId: string, status: DeliveryStatus, opts?: { noWake?: boolean; reason?: string }): Promise<unknown>
   /** The subagent continuation service (optional — absent in minimal
    * compositions, disabling the child route). */
   subagents?: unknown
@@ -580,6 +585,33 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
   return {
     async deliverOrQueue(recipientId, record, opts = {}): Promise<DeliveryStatus> {
       const framed = frameBusRecord(record)
+      /** fb-2160 (2026-09-21) — THE CAUSE COLUMN. The engine already CLASSIFIES
+       * every failure (`BusDeliveryFailedGround`, fb-198/T1) but only ever hands
+       * the classification to the CALLER's observer — and the re-drive/boot/sweep
+       * paths pass no observer, so the ground died with the call and the ledger
+       * row stayed `{messageId, recipientId, status, ts}` ALONE. MEASURED
+       * consequence: `m-17466`/`m-17488`/`m-17524`/`m-17836` → `quality-head`
+       * wrote 9–11 `failed` rows each, with NO indication of why. The wrapper
+       * below captures the ground INSIDE the engine and forwards it unchanged to
+       * the caller's observer (semantics untouched, R6): the local copy is what
+       * the 'failed' marks below persist. */
+      let failedGroundOf: BusDeliveryFailedGround | undefined
+      const callerFailedGround = opts.failedGround
+      const optsWithGroundCapture: DeliverOrQueueOptions = {
+        ...opts,
+        failedGround: (ground: BusDeliveryFailedGround): void => {
+          failedGroundOf = ground
+          callerFailedGround?.(ground)
+        }
+      }
+      /** The mark options of ONE sidecar final mark: the pair's no-wake seal
+       * (unchanged, m-707) plus — ONLY for a 'failed' status — the captured
+       * CAUSE. `markFinal` ignores `reason` for every other status, so the
+       * non-failed marks stay byte-identical to the pre-fb-2160 row. */
+      const finalMarkOpts = (status: DeliveryStatus, noWake: boolean, reason?: string): { noWake?: boolean; reason?: string } => ({
+        ...(noWake ? { noWake: true } : {}),
+        ...(reason !== undefined && status === 'failed' ? { reason } : {})
+      })
       /** DRENAJE (2026-09-10 — the ORPHAN closure): the route KIND of THIS
        * delivery, reported by `catalogRoute` (undefined for the child route /
        * a minimal composition). The final-mark seam below keys the
@@ -990,10 +1022,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             // IS durable — persisted before the route). The observer never gates.
             if (status === 'failed') opts.failedGround?.('child')
           } else {
-            status = await catalogRoute(deps, recipientId, record, framed, opts, routeOut)
+            status = await catalogRoute(deps, recipientId, record, framed, optsWithGroundCapture, routeOut)
           }
         } else {
-          status = await catalogRoute(deps, recipientId, record, framed, opts, routeOut)
+          status = await catalogRoute(deps, recipientId, record, framed, optsWithGroundCapture, routeOut)
         }
         // DRENAJE (2026-09-10 — the ORPHAN closure, class-general). THIS is the
         // pair's real FINAL mark (the one that shadows every earlier row). A
@@ -1041,7 +1073,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         // the same dead session: the fb-150 spool class). The deferral IS a
         // deliberate no-wake-until-wake, so it carries the same `noWake` seal.
         const sealNoWake = opts.noWake === true || routeOut.deferred === true
-        await deps.markFinal(record, recipientId, retiredReroute ? 'terminal' : status, retiredReroute || sealNoWake !== true ? undefined : { noWake: true })
+        // fb-2160 (2026-09-21) — THE CAUSE COLUMN OF THE FINAL MARK. A `failed`
+        // status here is the TERMINAL class the engine classified on the way in
+        // ('unknown' / 'retired' / 'acl' / 'reroute' / 'child') and, for the
+        // wake class, the ground the delivery primitive reported through the
+        // `failedGround` observer the wrapper above captures. Until this change
+        // the row persisted NONE of it. `unreported` is the honest value for a
+        // 'failed' whose ground nobody classified — it is a DECLARED gap, never
+        // a fabricated cause.
+        await deps.markFinal(
+          record,
+          recipientId,
+          retiredReroute ? 'terminal' : status,
+          finalMarkOpts(retiredReroute ? 'terminal' : status, retiredReroute ? false : sealNoWake, status === 'failed' ? (failedGroundOf ?? 'unreported') : undefined)
+        )
         // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
         // AFTER the final mark (the current pair is settled, so the drain can
         // never re-drive it). Fire-and-forget + non-fatal: an absent hook → a
@@ -1075,7 +1120,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
           // what the sweep/drain/health read; a bare row would silently
           // re-classify a deliberate no-wake as crash-class. Consistency is
           // also what R6 requires of the two marks.
-          await deps.markFinal(record, recipientId, 'failed', opts.noWake === true ? { noWake: true } : undefined)
+          // fb-2160 (2026-09-21): this is the ONE 'failed' row the engine writes
+          // for a THROW — the crash class. It is marked with the DECLARED ground
+          // `unreported` (never a fabricated class): the primitive's ground, when
+          // it named one before throwing, is preferred.
+          await deps.markFinal(record, recipientId, 'failed', finalMarkOpts('failed', opts.noWake === true, failedGroundOf ?? 'unreported'))
         } catch (markError: unknown) {
           deps.logger.warn(`[deepartments] bus delivery 'failed' mark for ${record.id} → ${recipientId} could not be persisted (the sidecar write itself failed): ${markError instanceof Error ? markError.message : String(markError)}`)
         }
