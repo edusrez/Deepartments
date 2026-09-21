@@ -265,13 +265,31 @@ export function readCmdline(pid) {
   return raw.split('\0').filter((s) => s.length > 0)
 }
 
+/** Whether `arg` is a DSH ENTRYPOINT: the `dsh` bin (a `dsh`-named shim, e.g.
+ * `/usr/bin/dsh`) OR the package's own `lib/bin.js`. Both are the same program
+ * — `/usr/bin/dsh` is a symlink to `.../@deepseek-ai/dsh/lib/bin.js` — but the
+ * ARGV0 differs: through the shim the entrypoint arg is named `dsh`, while a
+ * unit repointed at a VERSIONED TREE execs the target directly, so argv is
+ * `node <...>/@deepseek-ai/dsh/lib/bin.js ...` and **no arg is named `dsh`**.
+ * Measured 2026-09-21: the daemon relaunched in that second form and the old
+ * `dsh`-only test matched NOTHING — the sampler went blind (215 samples with
+ * `daemon: no pid`, `rssKb=n/a`, heap band inert). PURE. */
+export function isDshEntrypoint(arg) {
+  if (typeof arg !== 'string' || arg.length === 0) return false
+  const base = arg.slice(arg.lastIndexOf('/') + 1)
+  if (base === 'dsh') return true
+  return base === 'bin.js' && /(@deepseek-ai\/dsh|\/dsh)\/lib\/bin\.js$/.test(arg)
+}
+
 /** Whether a cmdline belongs to the DSH daemon of `profile` (the systemd unit
- * runs `node /usr/bin/dsh --profile <profile> ...`). `dsh web` is a SEPARATE
- * process WITHOUT --profile and an agent session never carries --profile, so
- * the match is unambiguous. PURE (exported for the hermetic test). */
+ * runs `node <dsh entrypoint> --profile <profile> ...`, in EITHER of the two
+ * entrypoint forms above). `dsh web` is a SEPARATE process WITHOUT --profile
+ * and an agent session never carries --profile, so the match is unambiguous —
+ * and it is the `--profile` test, not the entrypoint test, that excludes
+ * `dsh web`. PURE (exported for the hermetic test). */
 export function cmdlineMatchesDaemon(args, profile) {
   if (!Array.isArray(args) || args.length === 0) return false
-  if (!args.some((a) => a === 'dsh' || a.endsWith('/dsh'))) return false
+  if (!args.some((a) => isDshEntrypoint(a))) return false
   return args.includes(`--profile=${profile}`) || (args.includes('--profile') && args.includes(String(profile)))
 }
 

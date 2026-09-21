@@ -25,6 +25,7 @@ import {
   HEAP_BAND,
   HEAP_CEILING_MB,
   cmdlineMatchesDaemon,
+  isDshEntrypoint,
   countLines,
   daemonBlock,
   daemonPressure,
@@ -115,6 +116,29 @@ test('cmdlineMatchesDaemon: the unit profile matches, `dsh web` and other profil
   assert.equal(cmdlineMatchesDaemon(['node', '/usr/bin/dsh', '--profile=deepartments-dev'], 'deepartments-dev'), true)
   assert.equal(cmdlineMatchesDaemon(['node', '/usr/bin/dsh', '--profile', 'deepartments-dev-headless'], 'deepartments-dev'), false)
   assert.equal(cmdlineMatchesDaemon([], 'deepartments-dev'), false)
+})
+
+test('cmdlineMatchesDaemon: the VERSIONED-TREE form matches too (argv has no arg named `dsh`)', () => {
+  // Measured 2026-09-21: the unit relaunched the daemon as
+  // `node <tree>/node_modules/@deepseek-ai/dsh/lib/bin.js --profile deepartments-dev ...`
+  // and the `dsh`-only test matched NOTHING — 215 samples carried
+  // `daemon: no pid for --profile deepartments-dev` (`rssKb=n/a`, heap band inert).
+  const viaTree = [
+    'node',
+    '/opt/dsh/trees/deepartments-dev-0.1.5-rc.2/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    '--profile',
+    'deepartments-dev',
+    '--port',
+    '3090',
+  ]
+  assert.equal(cmdlineMatchesDaemon(viaTree, 'deepartments-dev'), true)
+  // The other entrypoint form (the `dsh` shim IS this same file) still matches.
+  assert.equal(cmdlineMatchesDaemon(['node', '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js', '--profile=deepartments-dev'], 'deepartments-dev'), true)
+  // The profile test is what excludes `dsh web` — never the entrypoint test.
+  assert.equal(cmdlineMatchesDaemon(['node', '/opt/dsh/trees/x/node_modules/@deepseek-ai/dsh/lib/bin.js', 'web', '--port', '3080'], 'deepartments-dev'), false)
+  assert.equal(cmdlineMatchesDaemon(['node', '/opt/dsh/trees/x/node_modules/@deepseek-ai/dsh/lib/bin.js', '--profile', 'deepartments-dev-headless'], 'deepartments-dev'), false)
+  // An unrelated bin.js (some other package) is NOT a DSH entrypoint.
+  assert.equal(cmdlineMatchesDaemon(['node', '/opt/other/node_modules/@acme/thing/lib/bin.js', '--profile', 'deepartments-dev'], 'deepartments-dev'), false)
 })
 
 // --- the file-level helpers --------------------------------------------------
