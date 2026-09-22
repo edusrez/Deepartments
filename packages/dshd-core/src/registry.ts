@@ -53,7 +53,18 @@ export const REGISTRY_ANOMALY = {
   /** fb-946: a HOST-SHAPED sender the catalog cannot classify (an impossible
    * state in a healthy process) — the Asistente is MUTE (every recipient is
    * denied by the conservative `unclassified-sender` branch). */
-  MUTE_HOST_SENDER: 'mute-host-sender'
+  MUTE_HOST_SENDER: 'mute-host-sender',
+  /** fb-2432: the host `dept_sleep` ROTATION could not run, so the LEGACY
+   * in-place reset was taken. Before this row existed the reason was computed
+   * and handed ONLY to `ctx.logger.error`, which is the cordis EXPORTER logger:
+   * it never reaches stdout/journald (src/index.ts:32-34) and is not the session
+   * transcript — so the fallback fired with NO durable trace at all and the
+   * failure mode had to be inferred from its side effects (hosts.json carrying
+   * `webUiCleanupPending: true` + a boundarySeq in the low thousands instead of
+   * the rotation's success markers). This row is that trace: greppable, dated,
+   * and carrying the VERBATIM `reason` of whichever of the five S1.5b-S2.2
+   * refusal paths returned `{rotated:false}`. */
+  HOST_ROTATION_FALLBACK: 'host-rotation-fallback'
 } as const
 
 /** ONE registry-anomaly row. */

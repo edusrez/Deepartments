@@ -37,7 +37,7 @@ import type { DeliveryEngine } from './delivery.js'
 // RETIRED HOST MEMBER id (host-<oldSession> — reroutable to the live
 // successor) from the raw retired session id. The reroutable in-flight rows
 // are NOT settled terminal — the (non-boot) re-drive re-routes them.
-import { readDurableHostEntries, followRotationChainToLive, HOST_ID_PREFIX } from './registry.js'
+import { readDurableHostEntries, followRotationChainToLive, HOST_ID_PREFIX, appendRegistryAnomalyRow, REGISTRY_ANOMALY } from './registry.js'
 import type { PostEntry, HostEntry } from './registry.js'
 import type {
   RotationPersistenceLike,
@@ -733,6 +733,27 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
         // cannot run (missing/partial persistence seam or a re-key / seed-
         // persist failure — spec §3.6 crash tolerance).
         ctx.logger.error(`[deepartments] dept_sleep: host session ROTATION could not run (${rotation.reason}); falling back to the legacy in-place reset (journal append + deferred fold + webUiCleanupPending)`)
+        // fb-2432 (i) — THE DURABLE, NAMED TRACE OF THE FALLBACK. The reason
+        // above is computed here but the logger it goes to is the cordis
+        // EXPORTER logger: it never reaches stdout/journald (src/index.ts:32-34)
+        // and it is NOT the session transcript, so on 2026-09-22 this fallback
+        // fired leaving NO durable row ANYWHERE — the diagnosis had to be
+        // reconstructed from side effects. Emit it to the append-only state
+        // channel the registry layer already owns and consumers already read
+        // (the SAME file/kind taxonomy as REGISTRY_ANOMALY.MUTE_HOST_SENDER; ONE
+        // row per event, dedupe-free by design — a fallback IS the event). The
+        // `reason` is the VERBATIM discriminant of the five refusal paths
+        // (`session-rotation.ts` S1.5b journal re-key / re-keyed write / S2
+        // persistence seam / S2 create-append / S2.2 workspace attach), so a
+        // bare `grep host-rotation-fallback` names WHICH one fired.
+        // NEVER THROWS and never blocks: a failed emission loses the row, never
+        // the sleep (appendRegistryAnomalyRow swallows its own I/O errors).
+        appendRegistryAnomalyRow(ctx.stateDir, {
+          ts: Date.now(),
+          kind: REGISTRY_ANOMALY.HOST_ROTATION_FALLBACK,
+          memberId: hostId,
+          reason: rotation.reason
+        })
         // Step 2 — register/refresh the durable host identity.
         ctx.ensureHost(sessionId, existing?.roomId ?? 'board')
         const hostEntry = ctx.hosts.get(hostId) as HostEntry
