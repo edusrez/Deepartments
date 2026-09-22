@@ -470,6 +470,49 @@ interface SessionHeaderWithOrigin {
   }
 }
 
+// ---------------------------------------------------------------------------
+// GUI-MAILBOX (drain lane, 2026-09-22) — the batch unit at MODULE scope, because
+// the exported `DeliveryFactoryDeps` surface must name it (the factory-internal
+// mirrors are not visible to src/invoke.ts). See the factory's GUI-MAILBOX block
+// for the full rationale.
+//
+// DISCRIMINATED UNION, NOT AN OPTIONAL FIELD (host decision (a)): an owner prompt
+// submitted through the GUI never crosses the bus, so it has NO `messages.jsonl`
+// record. The bus flush writes `deliveryStatus`/`markDelivery` rows keyed by
+// `record.id`; running those for a GUI prompt would put a `delivered` row in the
+// ledger for a message that never crossed the bus — the «ghost in the ledger» the
+// host rejected. Making `record` a member of ONE branch (and its absence a
+// different branch) makes that mistake UNREPRESENTABLE rather than discouraged:
+// a consumer that reads `.record` without narrowing `kind === 'bus'` does not
+// type-check. The owner channel's record is the SESSION LOG (decision (a)).
+//
+// `rpcId` is the GUI identity, NOT `record.id`: our own `inbox.remove` takes the
+// message out of `nextTurn`/`nextStep`, which is exactly what the harness's
+// `hasPromptRequest` (api-session-controller:940-951) consults — so a GUI retry
+// with the same `requestId` would re-admit a prompt still waiting in our batch.
+// ---------------------------------------------------------------------------
+/** The bus variant: the durable record + its framed text + the sender session. */
+export interface BusBatchItem {
+  kind: 'bus'
+  record: MessageRecord
+  framed: string
+  senderSessionId?: string
+}
+
+/** The owner-prompt variant (no bus record — see the block above). */
+export interface OwnerBatchItem {
+  kind: 'gui'
+  /** The prompt's identity = `source.rpcId` (never a bus record id). */
+  rpcId: string
+  /** The prompt content, verbatim (the delta's frames are built from it). */
+  content: UserMessage['content']
+  /** The source to re-emit on the batch delta. */
+  source: UserMessage['source']
+}
+
+/** The batch's unit: a bus record OR an owner prompt. */
+export type DrainBatchItem = BusBatchItem | OwnerBatchItem
+
 /** The apply-scope bindings the delivery zone captures (src/invoke.ts closures
  * + the shared mutable state), passed BY REFERENCE — the factory reads and
  * mutates the SAME maps/registries the rest of applyInvoke uses (AGENTS.md
@@ -706,17 +749,19 @@ export interface DeliverySurface {
    * — the inversion the gate protects is impossible for a batched delivery);
    * false/undefined → the gate applies (the pre-batch behavior). */
   recipientRunningLive?: (recipientId: string) => boolean | undefined
-  /** VALLE 09-07 (BATCH-DRAIN): queue ONE batch-eligible record for a RUNNING
+  /** VALLE 09-07 (BATCH-DRAIN): queue ONE batch-eligible item for a RUNNING
    * session (only the ALWAYS-WAKE no-interrupt send ever calls it — via
-   * busDeliverToPost/Host). Returns whether the record was queued (a defensive
-   * record.id dedupe rejects a double-queue). */
-  queueBatchFor: (sessionId: string, item: { record: MessageRecord; framed: string; senderSessionId?: string }) => boolean
+   * busDeliverToPost/Host; the GUI-MAILBOX listener is the other caller, with an
+   * owner-prompt item). Returns whether the item was queued (a defensive
+   * per-variant identity dedupe — bus `record.id` / owner `rpcId` — rejects a
+   * double-queue). */
+  queueBatchFor: (sessionId: string, item: DrainBatchItem) => boolean
   /** VALLE 09-07 (BATCH-DRAIN): FLUSH the pending batch of ONE session in a
    * single followup (`withFirst` = the W9-b interruptor, presented first). The
    * settle hook (ctx.on('agent/status') running→idle) + the interrupt drain
-   * call it; a test may call it directly. Returns the number of records
+   * call it; a test may call it directly. Returns the number of items
    * presented (0 = no-op / handle-gone / all-already-settled). NEVER throws. */
-  flushBatchFor: (sessionId: string, opts?: { withFirst?: { record: MessageRecord; framed: string; senderSessionId?: string } }) => Promise<number>
+  flushBatchFor: (sessionId: string, opts?: { withFirst?: DrainBatchItem }) => Promise<number>
   /** VALLE 09-07 (BATCH-DRAIN): the sessions with a PENDING batch (test probe
    * + observability — the batch is in-memory/apply-scoped, nothing durable
    * lives here beyond the 'prepared' rows). */
@@ -1780,23 +1825,91 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     senderSessionId?: string
   }
 
-  /** The apply-scoped batch accumulator: sessionId (the LIVE handle's session
-   * id) → the pending always-wake records in ARRIVAL (seq) order. */
-  const batchDrain = new Map<string, BatchItem[]>()
+  // ---------------------------------------------------------------------------
+  // GUI-MAILBOX (drain lane, 2026-09-22) — the owner's own prompts (`kind:'user'`
+  // submissions through api-session-controller) take the SAME drain-on-settle path
+  // as the bus, WITHOUT a durable bus record.
+  //
+  // WHY A DISCRIMINATED UNION AND NOT AN OPTIONAL FIELD (decision (a), host):
+  // an owner prompt NEVER crosses the bus, so it has NO `messages.jsonl` record.
+  // The bus flush calls `deliveryStatus(stateDir, item.record.id, memberId)` and
+  // `markDelivery(...,'delivered')` (:1883/:1904) — running those for an owner
+  // prompt would write a `delivered` row for a message that never crossed the bus
+  // (the exact «ghost in the ledger» the host rejected). So the GUI variant has NO
+  // `record` member AT ALL: a consumer CANNOT read it by mistake — the type makes
+  // the mistake unrepresentable rather than merely discouraged. Its record IS the
+  // session's own log (the insertion + the batch insertion), per decision (a).
+  //
+  // Identity: `dedupeKey` is the prompt's `source.rpcId` — NOT `record.id`.
+  // REQUIRED because our own removal (`inbox.remove`) takes the message out of
+  // BOTH `nextTurn` and `nextStep`, which is precisely what
+  // `hasPromptRequest` (api-session-controller:940-951) consults (plus the durable
+  // log) to reject a re-submitted `requestId`. A GUI retry with the same rpcId
+  // while the prompt waits in our batch would therefore RE-ADMIT it and deliver it
+  // twice; the rpcId dedupe closes that window (the harness itself already treats
+  // `rpcId` as the identity — :1173 extracts `{ rpcId }` from the source).
+  // ---------------------------------------------------------------------------
+  /** ONE accumulated OWNER prompt (no bus record — see the block above). The
+   * module-scope `OwnerBatchItem` (its `kind:'gui'` tag is the discriminant). */
+  type GuiBatchItem = OwnerBatchItem
 
-  /** Queue one batch-eligible record for a RUNNING session. Defensive dedupe
-   * by record.id (the sweep's re-drive of a >10-min 'prepared' batch row must
-   * never double-queue a record — the flush additionally filters already-
-   * settled rows, see flushBatchFor). */
-  const queueBatchFor = (sessionId: string, item: BatchItem): boolean => {
+  /** The batch's unit: EITHER a bus record OR an owner prompt. The MODULE-scope
+   * `DrainBatchItem` union (see the GUI-MAILBOX block above the deps interface)
+   * — declared there because the exported deps surface names it. */
+  type DrainItem = DrainBatchItem
+
+  /** The item's dedupe identity: the bus record id, or the prompt rpcId. */
+  const drainItemKey = (item: DrainItem): string => (item.kind === 'bus' ? item.record.id : item.rpcId)
+
+  /** The apply-scoped batch accumulator: sessionId (the LIVE handle's session
+   * id) → the pending always-wake records in ARRIVAL (seq) order. Holds BOTH
+   * variants (bus + owner prompt) in one arrival order, so a settle delta carries
+   * them in the order they actually arrived. */
+  const batchDrain = new Map<string, DrainItem[]>()
+
+  /** Queue one batch-eligible item for a RUNNING session. Defensive dedupe by
+   * the item's OWN identity (`drainItemKey`: the bus record id, or the owner
+   * prompt's rpcId — see the GUI-MAILBOX block for why the rpcId is mandatory).
+   * The sweep's re-drive of a >10-min 'prepared' batch row must never
+   * double-queue a record — the flush additionally filters already-settled rows,
+   * see flushBatchFor. */
+  const queueBatchFor = (sessionId: string, item: DrainItem): boolean => {
     const existing = batchDrain.get(sessionId) ?? []
-    if (existing.some((i) => i.record.id === item.record.id)) {
-      ctx.logger.warn(`[deepartments] batch-drain queue dedupe: record ${item.record.id} already queued for session "${sessionId}" — skipped (defensive; the batch presents each record once)`)
+    const key = drainItemKey(item)
+    if (existing.some((i) => drainItemKey(i) === key)) {
+      ctx.logger.warn(`[deepartments] batch-drain queue dedupe: ${item.kind === 'bus' ? 'record' : 'owner prompt'} ${key} already queued for session "${sessionId}" — skipped (defensive; the batch presents each item once)`)
       return false
     }
     batchDrain.set(sessionId, [...existing, item])
-    ctx.logger.info(`[deepartments] batch-drain: record ${item.record.id} queued for running session "${sessionId}" (${existing.length + 1} pending — delivered in ONE followup at the settle)`)
+    ctx.logger.info(`[deepartments] batch-drain: ${item.kind === 'bus' ? `record ${key}` : `owner prompt ${key}`} queued for running session "${sessionId}" (${existing.length + 1} pending — delivered in ONE followup at the settle)`)
     return true
+  }
+
+  /** The ONE durable trace of a mailbox drain (the owner's `drainedAt`): WHICH
+   * session drained, WHEN, and HOW MANY items the single followup carried. The
+   * owner needs this because the routing is CONDITIONAL (a prompt either waits in
+   * the mailbox or opens its own turn) and because the flush's own
+   * `ctx.logger.info` line (:1909 below) is NOT durable: the bundle's exporter is
+   * `levels: { default: 0 }` (src/index.ts), which admits `error` only — so
+   * `warn`/`info` never reach journald. Without this row the drain is invisible
+   * and «worked, no window» is indistinguishable from «still broken».
+   * `appendRegistryAnomalyRow` is SYNCHRONOUS and never throws (a persistence
+   * failure loses the ROW, never the flush) — the same channel the host used for
+   * the rotation trail (b4d3701). */
+  const publishDrainedAt = (sessionId: string, count: number, variant: 'settle' | 'interrupt'): void => {
+    try {
+      const memberId = postIdForChild(sessionId) ?? hostIdForSession(sessionId)
+      appendRegistryAnomalyRow(stateDir, {
+        ts: Date.now(),
+        kind: REGISTRY_ANOMALY.MAILBOX_DRAINED,
+        memberId: memberId ?? `session:${sessionId}`,
+        reason: variant,
+        detail: `${count} item(s) in ONE followup (drainedAt ${new Date().toISOString()})`
+      })
+    } catch {
+      /* never throws into the settle path (appendRegistryAnomalyRow swallows its
+         own I/O errors; this guard covers a resolver throw) */
+    }
   }
 
   /** The drain-on-settle DELTA for one session: the N pending frames in ONE
@@ -1844,6 +1957,63 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     })
   }
 
+  /** The ONE delta for a batch that contains OWNER prompts (the GUI-MAILBOX
+   * lane). Built with the SAME `createUserMessage` discipline as the bus delta
+   * above (a stable `data.id` — the «more than one start Match» fix): the frames
+   * are joined into ONE content, so N owner prompts cost ONE turn / ONE context
+   * re-send instead of N.
+   *
+   * THE SOURCE IS DELIBERATELY NOT A BUS SOURCE: no `messageId`/`messageIds`
+   * (those are bus record ids and an owner prompt has none — writing them would
+   * claim a durable `messages.jsonl` identity that does not exist). The rpcIds
+   * are carried instead, so the batch is still auditable from the session log
+   * AND IT IS DELIBERATELY NOT `kind:'user'` — load-bearing, not cosmetic. The
+   * feeder listens for `agent/inbox/inserted` and intercepts `kind:'user'`; this
+   * delta is ITSELF delivered through `followup`, i.e. it re-fires that very
+   * event. Were the delta tagged `kind:'user'`, the feeder could re-ingest its own
+   * output and re-park the batch it just drained. The `status !== 'running'` guard
+   * covers the settle path (the flush runs at running→idle), but NOT the interrupt
+   * path, where the flush runs while the session is still running (`flushBatchFor`
+   * with `withFirst`) — so the loop is reachable, not hypothetical. Tagging it
+   * `kind:'plugin'` makes the batch unmistakably NOT an owner prompt, so the
+   * feeder's discriminator rejects it BY CONSTRUCTION. Same shape as the
+   * wake-pack notice (`dshd-core/src/wakepack.ts:273-277`). The frames still carry
+   * the owner's text verbatim.
+   * DECLARED COST: the drained batch renders as a deepartments notice rather than
+   * as bare user messages (the per-prompt `source.kind` is not preserved). That is
+   * the price of closing the loop hazard; declared, not hidden. */
+  const ownerBatchUserMessage = (items: readonly GuiBatchItem[]): UserMessage => {
+    const frames = items.map((item) => {
+      const text = item.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+      return sanitizePromptLiterals(text)
+    }).join('\n')
+    return createUserMessage({
+      content: [{ type: 'text', text: frames } as const],
+      source: jsonSafeMessageSource({
+        kind: 'plugin',
+        plugin: 'deepartments',
+        form: 'notice',
+        summary: boundContextSummary(`${items.length} owner prompt(s) delivered together at the settle (mailbox drain).`),
+        rpcIds: items.map((item) => item.rpcId),
+        batch: true,
+        receivedAt: Date.now()
+      } as never)
+    })
+  }
+
+  /** Build the one delta for a mixed batch: the bus frames keep their exact
+   * historical shape (`busBatchUserMessage`), and any owner prompts ride in ONE
+   * additional delta message. Two deltas at most, never N — a pure-bus batch is
+   * byte-identical to before this lane. */
+  const buildBatchDeltas = (items: readonly DrainItem[]): UserMessage[] => {
+    const bus = items.filter((item): item is { kind: 'bus' } & BatchItem => item.kind === 'bus')
+    const gui = items.filter((item): item is { kind: 'gui' } & GuiBatchItem => item.kind === 'gui')
+    const out: UserMessage[] = []
+    if (bus.length > 0) out.push(busBatchUserMessage(bus))
+    if (gui.length > 0) out.push(ownerBatchUserMessage(gui))
+    return out
+  }
+
   /** FLUSH the pending batch of ONE session in a single followup (the settle
    * hook + the W9-b interrupt drain). `opts.withFirst` = an additional item
    * presented FIRST (the interruptor — its record was delivered through the
@@ -1862,13 +2032,21 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
    * Crash between the followup and the marks → rows stay 'prepared' → re-drive
    * 1:1 (the same write-ahead class of today; no loss). NEVER throws.
    * Returns the number of records presented (0 = no-op). */
-  const flushBatchFor = async (sessionId: string, opts?: { withFirst?: BatchItem }): Promise<number> => {
+  const flushBatchFor = async (sessionId: string, opts?: { withFirst?: DrainItem }): Promise<number> => {
     try {
       const pending = batchDrain.get(sessionId) ?? []
-      const all = opts?.withFirst !== undefined ? [opts.withFirst, ...pending] : pending
+      const all: DrainItem[] = opts?.withFirst !== undefined
+        ? [opts.withFirst, ...pending]
+        : pending
       if (all.length === 0) return 0
+      // The member id resolves the CATALOG recipient — only the bus variant needs
+      // it (it keys the sidecar rows). A GUI-only batch needs no member id: the
+      // owner prompts are not in any sidecar, so their delivery is the session
+      // log itself (decision (a)). Resolving it anyway keeps the bus semantics
+      // byte-identical; the GUI branch below simply never uses it.
       const memberId = postIdForChild(sessionId) ?? hostIdForSession(sessionId)
-      if (memberId === undefined) {
+      const hasBus = all.some((item) => item.kind === 'bus')
+      if (hasBus && memberId === undefined) {
         ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}": no catalog member id resolves (postIdForChild/hostIdForSession) — rows stay 'prepared' for the re-drive (no marks, no loss)`)
         batchDrain.delete(sessionId)
         return 0
@@ -1876,11 +2054,18 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // Re-drive guard: an item whose LATEST sidecar row is already FINAL was
       // delivered 1:1 by the sweep (a >10-min turn raced the batch) — exclude
       // it from the delta (never present the same message twice).
-      const toPresent: BatchItem[] = []
+      // ONLY the bus variant participates: an owner prompt has NO sidecar row, so
+      // there is no re-drive to guard against and no row to read (decision (a) —
+      // and reading `item.record.id` here is impossible by TYPE, not by care).
+      const toPresent: DrainItem[] = []
       for (const item of all) {
+        if (item.kind === 'gui') {
+          toPresent.push(item)
+          continue
+        }
         let st: DeliveryStatus | null = null
         try {
-          st = await deliveryStatus(stateDir, item.record.id, memberId)
+          st = await deliveryStatus(stateDir, item.record.id, memberId as string)
         } catch (error: unknown) {
           ctx.logger.warn(`[deepartments] batch-drain flush: delivery-status read failed for ${item.record.id} → ${memberId} (item included — fail-open: the read is a de-dupe guard only): ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -1894,19 +2079,31 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         // The handle died before the flush — never mark 'delivered' without a
         // splice (spec §5.1: a mark without the delivery = message loss). The
         // rows stay 'prepared' → the boot re-drive / sweep delivers them 1:1.
-        ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}": the live handle is GONE (retired/rotated/disposed) — ${toPresent.length} record(s) left 'prepared' for the 1:1 re-drive (no loss, degraded)`)
+        // (Owner prompts have no rows; their content stays in the session log —
+        // see the batch's own §LIMITS note at the GUI-MAILBOX block.)
+        ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}": the live handle is GONE (retired/rotated/disposed) — ${toPresent.length} item(s) left for the 1:1 re-drive (no loss, degraded)`)
         return 0
       }
-      const delta = busBatchUserMessage(toPresent)
-      live.followup(delta)
+      // ONE followup per variant (never N): a pure-bus batch is exactly the old
+      // single delta; a batch with owner prompts adds ONE delta carrying all of
+      // them, so N prompts cost ONE turn / ONE context re-send.
+      const deltas = buildBatchDeltas(toPresent)
+      for (const delta of deltas) live.followup(delta)
+      // Sidecar marks: BUS ONLY (an owner prompt has no row — writing one is the
+      // ghost the host rejected).
       for (const item of toPresent) {
+        if (item.kind !== 'bus') continue
         try {
-          await markDelivery(stateDir, item.record.id, memberId, 'delivered')
+          await markDelivery(stateDir, item.record.id, memberId as string, 'delivered')
         } catch (markError: unknown) {
           ctx.logger.warn(`[deepartments] batch-drain flush: 'delivered' mark for ${item.record.id} → ${memberId} failed (non-fatal — the row stays 'prepared' for the re-drive): ${markError instanceof Error ? markError.message : String(markError)}`)
         }
       }
-      ctx.logger.info(`[deepartments] batch-drain FLUSHED session "${sessionId}": ${toPresent.length} record(s) in ONE followup → 'delivered' (${opts?.withFirst !== undefined ? 'with the interruptor first' : 'drain-on-settle'})`)
+      // THE DURABLE TRACE (the owner's `drainedAt`): ONE row per drain with the
+      // count, so mensajes-por-volcado is answerable from the ledger instead of
+      // only from a filtered log line.
+      publishDrainedAt(sessionId, toPresent.length, opts?.withFirst !== undefined ? 'interrupt' : 'settle')
+      ctx.logger.info(`[deepartments] batch-drain FLUSHED session "${sessionId}": ${toPresent.length} item(s) in ${deltas.length} followup(s) (${toPresent.filter((i) => i.kind === 'bus').length} bus / ${toPresent.filter((i) => i.kind === 'gui').length} owner) (${opts?.withFirst !== undefined ? 'with the interruptor first' : 'drain-on-settle'})`)
       return toPresent.length
     } catch (error: unknown) {
       // Never throws: a flush failure leaves the rows 'prepared' (re-driveable).
@@ -1930,6 +2127,103 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     void flushBatchFor(sessionId).catch((error: unknown) => {
       ctx.logger.warn(`[deepartments] batch-drain settle flush for session "${sessionId}" rejected: ${error instanceof Error ? error.message : String(error)}`)
     })
+  })
+
+  /** GUI-MAILBOX FEEDER (drain lane, 2026-09-22) — the owner's own prompts take
+   * the mailbox instead of the one-turn-each queue.
+   *
+   * THE DEFECT THIS CLOSES (measured, head round 2): an owner prompt goes
+   * api-session-controller:773-774 → `agent.followup` → `next-turn`, i.e. ONE
+   * message per turn. Five prompts arriving in 3.2 s sat together for 4 m 36 s and
+   * were then consumed ONE PER TURN (five separate `inserted=1` splices, one
+   * claimed per turn) — each turn re-sending the whole context. The batch mailbox
+   * already existed and already worked for the BUS; owner prompts simply never
+   * reached it (`queueBatchFor` had exactly two callers, both on the bus route).
+   *
+   * WHY A LISTENER AND NOT A PATCH (host decision (b)): this is 100% [NUESTRO].
+   * `api-session-controller` stays PRISTINE — patching it would break its manifest
+   * md5 chain and bypass the org's re-apply script.
+   *
+   * WHY IT WORKS — the ordering, MEASURED: `Inbox.mutate` appends the durable
+   * `agent/inbox/spliced` FIRST and emits `agent/inbox/inserted` AFTER, while
+   * `send` only calls `wakeDriver()` once the splice returned
+   * (dsh-agent-loop:206-208 vs :783-787). So by the time this listener runs the
+   * message IS in the inbox projection (readable) and the driver has NOT yet been
+   * woken: we can remove it and re-queue it without racing a claim.
+   *
+   * THE SOURCE DISCRIMINATOR IS A HARD REQUIREMENT (the host's reason, verbatim:
+   * «sin ese discriminador interceptaríamos TODO … y arriesgaríamos romper lo que
+   * no está roto»): only `source.kind === 'user'` (the owner). `kind:'agent'` is
+   * the bus and already has its working route — never touched.
+   *
+   * ONLY `next-turn` IS INTERCEPTED. `next-step` is `steer`'s landing list («join
+   * the turn in progress») and is left untouched — the drip this lane fixes is the
+   * `followup` one, and the interrupt mapping stays out of scope (host round 4 §4).
+   *
+   * DECLARED COSTS (host decision (1) — accept and declare):
+   *   - `inbox.remove` writes a durable `outcome:'canceled'` splice
+   *     (dsh-agent-loop:146-151 → :160-162 → :197) and the harness's own
+   *     accounting reads it as `droppedUnrun` while the prompt is parked here.
+   *     That is TRANSITORY, not a false record: the prompt IS delivered (by the
+   *     settle flush, which leaves its own positive insertion in the SAME log),
+   *     and `droppedUnrun` self-corrects to false on the batch turn's step. Unlike
+   *     the `delivered` row the host rejected in (a), the delivered fact here
+   *     really happens.
+   *   - a crash before the flush does not re-drive the delivery (batchDrain is
+   *     in-memory, :1785); the CONTENT is safe (it is in the insertion event) and
+   *     is recoverable by replaying the log — see the lane report for the exact
+   *     route. Declared, not hidden. */
+  const GUI_MAILBOX_MAX_PARKED = 200
+  ctx.on('agent/inbox/inserted', ({ agent, message }: { agent?: unknown; message?: unknown }) => {
+    try {
+      const live = agent as { id?: string; status?: string; inbox?: { nextTurn?: readonly { id?: string }[]; remove?: (id: string) => boolean } } | undefined
+      const sessionId = String(live?.id ?? '')
+      if (sessionId === '') return
+      const msg = message as { id?: string; source?: { kind?: string; rpcId?: string }; content?: unknown } | undefined
+      // THE HARD DISCRIMINATOR: owner prompts only. The bus route is untouched.
+      if (msg?.source?.kind !== 'user') return
+      const rpcId = typeof msg.source.rpcId === 'string' ? msg.source.rpcId : undefined
+      const messageId = typeof msg.id === 'string' ? msg.id : undefined
+      if (rpcId === undefined || messageId === undefined) return
+      // ONLY next-turn (the followup drip). next-step is steer's list.
+      const inNextTurn = (live?.inbox?.nextTurn ?? []).some((m) => m.id === messageId)
+      if (!inNextTurn) return
+      // The mailbox only accumulates while the session is RUNNING (the design
+      // condition — an idle session has no turn to coalesce into, and its prompt
+      // must open a turn as today).
+      if (live?.status !== 'running') return
+      if (!batchDrain.has(sessionId) && batchDrain.size >= GUI_MAILBOX_MAX_PARKED) {
+        ctx.logger.warn(`[deepartments] mailbox drain: ${GUI_MAILBOX_MAX_PARKED} sessions already hold a batch — owner prompt ${rpcId} left on the normal queue (bounded memory)`)
+        return
+      }
+      const existing = batchDrain.get(sessionId) ?? []
+      // rpcId dedupe: a REDUNDANT copy of a request we already hold (a GUI retry
+      // of the same `requestId`) is SWALLOWED out of the inbox — it must neither
+      // be parked twice NOR be left queued, because a queued copy would open its
+      // own turn and deliver the same prompt a SECOND time (once here, once in
+      // the batch delta). Swallowing the duplicate is exactly the harness's own
+      // semantic: `hasPromptRequest` (api-session-controller:940-951) answers
+      // «already admitted» and never re-admits. Removal is what makes the
+      // delivery exactly-once.
+      if (existing.some((i) => i.kind === 'gui' && i.rpcId === rpcId)) {
+        live?.inbox?.remove?.(messageId)
+        return
+      }
+      const parked = existing.filter((i) => i.kind === 'gui').length
+      const removed = live?.inbox?.remove?.(messageId) === true
+      if (!removed) return // could not take it out: leave the normal route intact
+      queueBatchFor(sessionId, {
+        kind: 'gui',
+        rpcId,
+        content: (msg.content ?? []) as UserMessage['content'],
+        source: msg.source as UserMessage['source']
+      })
+      if (parked === 0) ctx.logger.info(`[deepartments] mailbox drain: owner prompt ${rpcId} parked for running session "${sessionId}" (delivered with the batch at the settle — ONE turn for N prompts)`)
+    } catch (error: unknown) {
+      // NEVER throws onto the harness's insert path (a mailbox failure must not
+      // break prompt admission): the prompt simply stays on the normal route.
+      ctx.logger.warn(`[deepartments] mailbox drain listener failed (the prompt stays on the normal queue): ${error instanceof Error ? error.message : String(error)}`)
+    }
   })
 
   /** FB-198 (T1, 2026-09-07) — classify a wake primitive's caught error into
@@ -1972,7 +2266,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // followup below wakes the recipient as today (the first message wakes;
       // the batch NEVER delays a settle — no starvation by construction).
       if (opts?.batchEligible === true && live !== void 0 && live.status === 'running' && !(entry.sleepEpoch === void 0 && isHeadStuck(sessionId, live))) {
-        queueBatchFor(sessionId, { record, framed, senderSessionId })
+        queueBatchFor(sessionId, { kind: 'bus', record, framed, senderSessionId })
         return 'prepared'
       }
       // Fix A2 stuck-head resilience (verbatim): a live-but-running post with
@@ -2018,7 +2312,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // No pending batch → the byte-identical plain followup (idle/dormant/non-
       // batch deliveries — the settle hook flushes the rest at running→idle).
       if (batchDrain.has(sessionId)) {
-        await flushBatchFor(sessionId, { withFirst: { record, framed, senderSessionId } })
+        await flushBatchFor(sessionId, { withFirst: { kind: 'bus', record, framed, senderSessionId } })
       } else {
         target.followup(busUserMessage(record, framed, senderSessionId))
       }
@@ -2185,7 +2479,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // running check. Idle/dormant hosts are NOT affected (the followup
           // below wakes as today — D4 resume).
           if (opts?.batchEligible === true && live.status === 'running') {
-            queueBatchFor(sessionId, { record, framed, senderSessionId })
+            queueBatchFor(sessionId, { kind: 'bus', record, framed, senderSessionId })
             ctx.logger.info(`[deepartments] bus delivery to host "${hostEntry.hostId}": running + batch-eligible → record ${record.id} queued for the drain-on-settle batch`)
             return { status: 'prepared' }
           }
@@ -2211,7 +2505,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // [interruptor, ...pendientes] in ONE delta; no batch → the plain
           // followup (unchanged).
           if (batchDrain.has(sessionId)) {
-            await flushBatchFor(sessionId, { withFirst: { record, framed, senderSessionId } })
+            await flushBatchFor(sessionId, { withFirst: { kind: 'bus', record, framed, senderSessionId } })
           } else {
             live.followup(busUserMessage(record, framed, senderSessionId))
           }

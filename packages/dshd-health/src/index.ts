@@ -57,6 +57,12 @@
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import { mkdir, readFile, writeFile, rename, appendFile, copyFile, rm } from 'node:fs/promises'
+// ★ LANE `heap-band-truth` (2026-09-22): V8's own heap statistics — the ONLY
+// source of this process's `heap_size_limit` (the hard wall) that `heapMb`'s
+// `limit` publishes. Static import like every other node: module of this file;
+// no dynamic import because the health tick is a HOT PATH (every 60 s) and the
+// datum must cost a getter, never a module resolution.
+import { getHeapStatistics } from 'node:v8'
 import path from 'node:path'
 import {
   parseDeliveryRows,
@@ -171,9 +177,11 @@ export interface PostErrorEntry {
   /** fb-235 — the key's workspace within the pool (`ws-<N>`, from the same
    * lastBare400 join). Absent → omitted (R6). */
   keyWorkspace?: string
-  /** fb-235 — the LAST `assistant/chunk` USAGE the session saw BEFORE the
-   * failed turn/end (the usage pair of the request that errored; fb-251: a
-   * rejected request reports usage(0,0) — never a real consumption). Absent →
+  /** fb-235 — the LAST USAGE the session saw BEFORE the failed turn/end (the
+   * usage pair of the request that errored; fb-251: a rejected request reports
+   * usage(0,0) — never a real consumption). LANE dead-reader-usage (2026-09-22):
+   * read from the LIVE carrier `assistant/message.data.usage`, with the retired
+   * `assistant/chunk` chunk-usage shape kept as a legacy fallback. Absent →
    * omitted (R6). */
   lastUsage?: TurnErrorLastUsage
 }
@@ -237,12 +245,14 @@ function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
   return out
 }
 
-/** fb-235 — the last `assistant/chunk` USAGE the session observed BEFORE the
- * failed turn/end: the request-level usage pair the harness persists verbatim
- * ({type:'usage', usage:{inputTokens, outputTokens, cacheReadTokens?}} —
- * dsh-agent-loop lib:621-625, the TokenUsage shape). Trace fb-251: a REJECTED
- * request reports usage(0,0) — never a real consumption — so this pair is the
- * failed request's own accounting, not session consumption evidence. */
+/** fb-235 — the last USAGE the session observed BEFORE the failed turn/end: the
+ * request-level usage pair the harness persists on the assembled assistant
+ * message (`assistant/message.data.usage` — dsh-session types:309-317,
+ * dsh-agent-loop lib/index.js:1108-1114, the TokenUsage shape; LANE
+ * dead-reader-usage: the retired `assistant/chunk` chunk-usage shape is also
+ * still accepted as a legacy fallback). Trace fb-251: a REJECTED request
+ * reports usage(0,0) — never a real consumption — so this pair is the failed
+ * request's own accounting, not session consumption evidence. */
 export interface TurnErrorLastUsage {
   /** The usage `inputTokens` (finite number when the provider reported it). */
   inputTokens?: number
@@ -541,6 +551,69 @@ export interface HealthHeartbeat {
    * the scan did not run (a composition with the axis disabled — never
    * synthesized). */
   starvation?: StarvationHealthState
+  /** ★ LANE `heap-band-truth` (2026-09-22) — THE DAEMON'S OWN V8 HEAP, MB.
+   *
+   * WHY IT LIVES HERE AND NOWHERE ELSE: `heapUsed`/`heapTotal` are RUNTIME
+   * datums. They come from `process.memoryUsage()` INSIDE the process, and
+   * `/proc` has no such field (`VmRSS` is KERNEL process memory — a DIFFERENT
+   * and larger quantity: at the 2026-09-16T14:43:47Z `FATAL ERROR: Reached heap
+   * limit` the daemon's RSS was 3261 MB = 156 % of its 2096 MB heap ceiling, and
+   * another incarnation lived 62,8 h at 3917 MB of RSS). NO external reader —
+   * the host sampler included — can turn RSS into "the heap is at X". This tick
+   * is the ONE place the datum can be born: it runs IN the daemon process
+   * (`src/invoke.ts` runs it on the daemon's own interval; the plugin path runs
+   * it in-process too).
+   *
+   * `used`/`total` = `process.memoryUsage()` heapUsed/heapTotal; `limit` = V8's
+   * `heap_size_limit` (the hard wall the process cannot exceed — the only
+   * quantity that is a CEILING in the strict sense). All three MB, integers.
+   *
+   * ABSENT → the producer could not read them; the consumer must then fall back
+   * to a REFERENCE upper bound and SAY SO (never synthesize — the house's
+   * "ABSENT → the tick never guesses" rule, the same one `sweep`/`starvation`
+   * follow). */
+  heapMb?: { used: number; total: number; limit: number }
+}
+
+/** ★ LANE `heap-band-truth` (2026-09-22) — the DAEMON'S OWN V8 HEAP as the
+ * heartbeat datum, MB (integers). The ONLY birthplace of this datum in the
+ * whole system: it is a RUNTIME reading and this function runs INSIDE the daemon
+ * process (the health tick). PURE with respect to its inputs (it reads the live
+ * process, nothing else) and NEVER throws: any failure returns `undefined`, so
+ * the caller OMITS `heapMb` and the heartbeat stays truthful.
+ *
+ * `limit` is V8's `heap_size_limit` — the process's HARD wall, the one number
+ * that can be exceeded only by dying. It is NOT the same quantity as the
+ * sampler's `HEAP_CEILING_MB` constant (2096 MB measured on this host): this one
+ * is what THIS process actually has right now, which is why publishing it
+ * retires the sampler's assumption whenever the two differ (e.g. a
+ * `--max-old-space-size` in a deployment).
+ *
+ * WHY MB AND ROUNDED: the heartbeat is a small JSON file rewritten every tick
+ * and `fb-16`-clean (numbers and fixed labels only — no content, no secrets); MB
+ * integers carry all the decision-relevant precision the band needs (1 MB of
+ * 2096 is 0,05 %) and stay readable.
+ *
+ * MODULE-PRIVATE ON PURPOSE (the export-parity lock, 349 runtime names): the
+ * ONLY caller is the tick below, and the datum is verified through the REAL tick
+ * path (`runHealthDaemonTick` → the heartbeat file → `readHealthHeartbeatFile`),
+ * which is stronger evidence than a unit test of this helper would be. A new
+ * runtime export would also ride the `src/core/health.ts` star bridge into
+ * `lib/invoke.js` and move the frozen surface — a deliberate act this lane does
+ * not need to take. */
+function readOwnHeapMb(): { used: number; total: number; limit: number } | undefined {
+  try {
+    const usage = process.memoryUsage()
+    const limit = getHeapStatistics().heap_size_limit
+    if (!Number.isFinite(usage.heapUsed) || !Number.isFinite(usage.heapTotal) || !Number.isFinite(limit) || limit <= 0) return undefined
+    return {
+      used: Math.round(usage.heapUsed / 1048576),
+      total: Math.round(usage.heapTotal / 1048576),
+      limit: Math.round(limit / 1048576)
+    }
+  } catch {
+    return undefined
+  }
 }
 
 /** FINISHER (2026-09-04, addendum 4 — m-812): the redelivery-sweep health
@@ -676,6 +749,19 @@ export function readHealthHeartbeatFile(stateDir: string, opts?: StoreFileReadOp
           if (typeof star.oldestAbsenceMs === 'number') starState.oldestAbsenceMs = star.oldestAbsenceMs
           if (typeof star.oldestHeldMs === 'number') starState.oldestHeldMs = star.oldestHeldMs
           heartbeat.starvation = starState
+        }
+      }
+      // ★ LANE `heap-band-truth` (2026-09-22): the daemon's own heap read back
+      // verbatim — only when the producer wrote all THREE finite numbers (a
+      // partial/torn block is NOT a datum: a half-read `{used}` without `limit`
+      // would let a consumer band against a ceiling the daemon never declared).
+      if (parsed.heapMb !== undefined && typeof parsed.heapMb === 'object' && parsed.heapMb !== null) {
+        const heap = parsed.heapMb as Record<string, unknown>
+        const used = Number(heap.used)
+        const total = Number(heap.total)
+        const limit = Number(heap.limit)
+        if (Number.isFinite(used) && Number.isFinite(total) && Number.isFinite(limit) && limit > 0) {
+          heartbeat.heapMb = { used, total, limit }
         }
       }
       return heartbeat
@@ -2147,7 +2233,9 @@ export interface TurnErrorCapture {
   keyId?: string
   /** fb-235 — the key's pool workspace (`ws-<N>`, the same lastBare400 join). */
   keyWorkspace?: string
-  /** fb-235 — the LAST `assistant/chunk` usage BEFORE the failed turn/end. */
+  /** fb-235 — the LAST USAGE BEFORE the failed turn/end (LANE dead-reader-usage:
+   * the LIVE `assistant/message.data.usage` carrier, legacy `assistant/chunk`
+   * usage still accepted). */
   lastUsage?: TurnErrorLastUsage
   /** A stable dedupe key for the captured (postId, turn) pair — a turn that
    * already produced a post-error row is never double-captured. */
@@ -2241,9 +2329,11 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
  * the turn/end index it finds the LAST `request/header` event (→ route =
  * `data.header.config.provider/model` — dsh-agent-loop lib:733-741), the LAST
  * event carrying a session cwd (→ workspace — the session event's TOP-LEVEL
- * `cwd`, dsh-session lib), and the LAST `assistant/chunk` usage event (→
- * lastUsage — the harness persists the stream chunk verbatim, lib:621-625,
- * `chunk.usage={inputTokens, outputTokens, cacheReadTokens?}`); then joins the
+ * `cwd`, dsh-session lib), and the LAST USAGE event (→ lastUsage — LANE
+ * dead-reader-usage: the LIVE `assistant/message.data.usage` the harness
+ * appends with the assembled message, dsh-agent-loop lib/index.js:1108-1114 /
+ * dsh-session types:309-317; the retired `assistant/chunk` chunk-usage shape is
+ * still accepted as a legacy fallback); then joins the
  * pooler's durable `lastBare400` record when its ts ≈ the turn/end ts
  * (TURN_ERROR_POOLER_JOIN_WINDOW_MS — the pooler writes it at the bare-400,
  * dsh-key-pooler proxy.ts:2298-2303). PURE, never throws: every malformed
@@ -2273,18 +2363,55 @@ export function deriveTurnErrorAttribution(
     if (workspace === undefined && typeof event.cwd === 'string' && event.cwd !== '') {
       workspace = event.cwd
     }
-    if (lastUsage === undefined && event.type === 'assistant/chunk') {
+    // LANE dead-reader-usage (2026-09-22) — THE LIVE CARRIER. The reader used to
+    // require ONLY `assistant/chunk` + `data.chunk.type==='usage'`, a vocabulary
+    // the harness STOPPED emitting: MEASURED (pattern `"type":"assistant/chunk"`
+    // over 60 session logs, largest-first, /opt/dsh/.dsh-dev/sessions +
+    // sessions-cold) the v3 logs carry 0 chunk events while carrying 4,016
+    // `assistant/message.data.usage`; the host's own transcript has
+    // assistant/message 1376 · assistant/attempt 149 · assistant/chunk 0. The
+    // result was SILENCE — indistinguishable from "no usage to measure".
+    // Now the LIVE carrier is read: `assistant/message.data.usage` (dsh-session
+    // types:309-317 'assistant/message' declares `usage?: TokenUsage`;
+    // dsh-agent-loop lib/index.js:1108-1114 appends it as `live.usage`).
+    // MEASURED: 15,114 / 15,126 assistant/message events carry `data.usage`, and
+    // 15,114 / 15,114 of those carry inputTokens>0 AND outputTokens>0, with
+    // cacheReadTokens in 15,039 (sample {inputTokens:709,outputTokens:397,
+    // cacheReadTokens:9728}).
+    // The LEGACY shape (`assistant/chunk` + `data.chunk.type==='usage'`) is KEPT
+    // for a session log that still carries only the retired vocabulary (the v2
+    // corpus holds 20,555 chunk-usage events over 55 files — R6: additive, a
+    // legacy log keeps working, never a regression).
+    // NOT read, and deliberately so: `assistant/attempt.data.stream[].chunk.usage`
+    // — it is the FAILED attempt's OWN stream (dsh-agent-loop lib/index.js:
+    // 1083-1087 appends `stream` on the error path) and it is MEASURED ALL-ZERO
+    // (152 / 152 usage chunks, 0 with non-zero input/output), i.e. exactly the
+    // rejected-request usage(0,0) the fb-251 trace describes — reading it would
+    // restore the useless zero THIS lane exists to remove.
+    // DECLARED SEMANTICS (not a side effect): for a request rejected BEFORE
+    // generation the failing turn settles an `assistant/attempt` and never an
+    // `assistant/message`, so the last `assistant/message` before the turn/end
+    // belongs to the last COMPLETED step of the session. That is exactly what
+    // this field has always meant — «the last usage the session SAW before the
+    // failure» (fb-235 notas: «capturar último usage inputTokens+cacheReadTokens
+    // previo al fallo») — the real consumption in flight when the turn died, not
+    // the failed request's own zero. Reported as such, never relabelled.
+    if (lastUsage === undefined && (event.type === 'assistant/message' || event.type === 'assistant/chunk')) {
       const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
-      const chunk = (typeof data.chunk === 'object' && data.chunk !== null ? data.chunk : {}) as Record<string, unknown>
-      if (chunk.type === 'usage') {
-        const usage = (typeof chunk.usage === 'object' && chunk.usage !== null ? chunk.usage : {}) as Record<string, unknown>
-        const inputTokens = typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens) ? usage.inputTokens : undefined
-        const cacheReadTokens = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : undefined
-        if (inputTokens !== undefined || cacheReadTokens !== undefined) {
-          lastUsage = {
-            ...(inputTokens !== undefined ? { inputTokens } : {}),
-            ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {})
-          }
+      let usageRaw: unknown
+      if (event.type === 'assistant/message') {
+        usageRaw = data.usage
+      } else {
+        const chunk = (typeof data.chunk === 'object' && data.chunk !== null ? data.chunk : {}) as Record<string, unknown>
+        if (chunk.type === 'usage') usageRaw = chunk.usage
+      }
+      const usage = (typeof usageRaw === 'object' && usageRaw !== null ? usageRaw : {}) as Record<string, unknown>
+      const inputTokens = typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens) ? usage.inputTokens : undefined
+      const cacheReadTokens = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : undefined
+      if (inputTokens !== undefined || cacheReadTokens !== undefined) {
+        lastUsage = {
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {})
         }
       }
     }
@@ -9499,6 +9626,11 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // when the wiring provided them (best-effort — ABSENT → omitted, never
     // synthesized). The boot-crash sidecar's clear is CONSUMED by the NEXT
     // boot's stamp (a heartbeat with THIS bootId = healthy marker).
+    // ★ LANE `heap-band-truth` (2026-09-22): the daemon's OWN heap, resolved ONCE
+    // into a local before the write (the `gatedIdleHeld` pattern) — a per-tick
+    // reading of THIS process, undefined when unreadable (→ the field is
+    // omitted, the consumer's declared fallback takes over). NEVER throws.
+    const ownHeap = readOwnHeapMb()
     await writeHealthHeartbeatFile(deps.stateDir, {
       ts: nowMs,
       bootId: deps.bootId,
@@ -9516,7 +9648,17 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       // the scan read the ledger and found no held/starved recipient). ABSENT
       // only when the scan did not run (the axis disabled / a build without the
       // seam) — never synthesized.
-      ...(starvationDatum !== undefined ? { starvation: starvationDatum } : {})
+      ...(starvationDatum !== undefined ? { starvation: starvationDatum } : {}),
+      // ★ LANE `heap-band-truth` (2026-09-22): the daemon's OWN heap, read HERE
+      // — inside the daemon process, the only place it is readable at all. This
+      // is the datum the host sampler relays to band the heap instead of falling
+      // back to RSS-as-upper-bound; while it is absent every sample of the series
+      // says `source: 'rss-upper-bound'` and the band compares a PROCESS number
+      // against a HEAP ceiling (measured 2026-09-22: 100 % of 8910 samples were
+      // RSS-based, and 6385 of them read >100 % of that ceiling — an everyday
+      // state, not an anomaly). ABSENT → omitted (never synthesized), the
+      // consumer's declared fallback.
+      ...(ownHeap !== undefined ? { heapMb: ownHeap } : {})
     })
     // POST-INCIDENTE 2026-09-04: the surface gate's BOOT LOG — the FIRST tick
     // of a new process reports the detected session surface + the breaker

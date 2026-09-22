@@ -64,7 +64,17 @@ export const REGISTRY_ANOMALY = {
    * the rotation's success markers). This row is that trace: greppable, dated,
    * and carrying the VERBATIM `reason` of whichever of the five S1.5b-S2.2
    * refusal paths returned `{rotated:false}`. */
-  HOST_ROTATION_FALLBACK: 'host-rotation-fallback'
+  HOST_ROTATION_FALLBACK: 'host-rotation-fallback',
+  /** Drain lane (2026-09-22): ONE mailbox drain — the owner's own prompts
+   * (`kind:'user'`) that a RUNNING session accumulated were delivered to the
+   * session as ONE followup carrying N frames instead of N one-per-turn turns.
+   * This is the `drainedAt` publication the owner asked for: the routing is
+   * CONDITIONAL (a prompt either waits in the mailbox or opens its own turn), so
+   * without this row «drained and had no window» is indistinguishable from
+   * «still broken». `detail` carries the count; the row is the ONLY durable trace
+   * (the flush's own `ctx.logger.info` is filtered out by the bundle's
+   * error-only exporter). Emitted by `publishDrainedAt` (dshd-orchestration). */
+  MAILBOX_DRAINED: 'mailbox-drained'
 } as const
 
 /** ONE registry-anomaly row. */

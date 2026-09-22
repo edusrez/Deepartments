@@ -91,9 +91,7 @@ class StubPersistenceWithRoot {
     throw new Error('injected session-create failure (the S2 refusal the live incident took)')
   }
 
-  async append() {}
   async list() { return [] }
-  async readRaw() { return undefined }
 }
 
 /** Boot the REAL Loader + the bundle with the stub persistence (mirrors
@@ -219,19 +217,22 @@ test('fb-2432 (i): THE DISCRIMINANT DISCRIMINATES — a DIFFERENT refusing path 
     const sessionsRoot = path.join(stateDir, 'sessions')
     // A WORKING sessionPersistence (registered as the REAL service id, so
     // `ctx.deptGet('sessionPersistence')` resolves): the rotation now gets PAST
-    // S1.5b AND past S2, and refuses LATER — at S2.2, because this harness
-    // registers no `workspaceRegistry` entity to attach to. Same lifecycle
-    // branch, same row kind, DIFFERENT reason.
+    // S1.5b AND past S2 (the seed handle completes), and refuses LATER — at
+    // S2.2, because this harness registers no `workspaceRegistry` entity to
+    // attach to. Same lifecycle branch, same row kind, DIFFERENT reason.
+    // POST-MIGRATION (v2→v3, 2026-09-21) HANDLE shape: `create(header)` returns
+    // the owned write handle (the SERVICE exposes no `append(id, events)`).
     class WorkingPersistence extends Service {
       constructor(ctx) {
         super(ctx, 'sessionPersistence')
         this.root = sessionsRoot
         this.created = []
       }
-      async create(meta) { this.created.push(meta) }
-      async append() {}
+      async create(meta) {
+        this.created.push(meta)
+        return { append: async () => {}, flush: async () => {}, close: async () => {} }
+      }
       async list() { return [] }
-      async readRaw() { return undefined }
     }
     const root = new Context()
     const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
@@ -262,5 +263,59 @@ test('fb-2432 (i): THE DISCRIMINANT DISCRIMINATES — a DIFFERENT refusing path 
     } finally {
       await loaderFiber.dispose()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fb-2432 (i) SECOND HALF — THE CHANNEL ITSELF: `ctx.logger.error` must be
+// reachable by the SAME `grep` on the service journal that today returns ZERO.
+//
+// THE MEASURED DEFECT (2026-09-22, HEAD 846cf40, dev profile): the ONLY default
+// exporter on `ctx.logger` is cordis's in-memory RING BUFFER (a GUI-console
+// feed, `bufferSize = 1e3`) — NOT stdout. So every `ctx.logger.*` line was
+// unreachable from journald, and `console.log` was the only thing that ever
+// appeared. Proven empirically: with no exporter, `ctx.logger.error(…)` emits
+// zero bytes while `console.log` appears.
+//
+// THE REAL CASE THIS PINS (the host's two-half control, measured by the IPH):
+//   * POSITIVE half (the backstop RAN): an `fb-946 mute-host-sender` row exists
+//     in `/.deepartments/registry-anomalies.jsonl` with a real timestamp.
+//   * NEGATIVE half (the WARNING did not surface): `grep "HOST MUTE ANOMALY"`
+//     over journald returns ZERO.
+//   i.e. a backstop whose entire job is to warn that a HOST IS MUTE was
+//   warning over a MUTE CHANNEL.
+//
+// This test drives the REAL bundle and asserts the two halves TOGETHER: the
+// `error` line reaches stdout AND `warn`/`info` do NOT (no flood). It fails
+// pre-change because nothing was ever exported.
+test('fb-2432 (i): the bundle\'s `ctx.logger.error` IS reachable on the service journal (the channel the fallback diagnosis needs), while `warn`/`info` stay filtered — measured against the REAL bundle through stdout, the only stream journald sees', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Capture stdout exactly as journald would receive it.
+    const captured = []
+    const realLog = console.log
+    console.log = (...args) => { captured.push(args.join(' ')); }
+    let root
+    let dispose
+    try {
+      ({ root, dispose } = await bootPlugin(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') }))
+      // The bundle is mounted: its export path must be live for the REAL
+      // `ctx.logger` of this composition.
+      root.logger.error('[deepartments] PROBE-ERROR-must-be-visible-in-journald')
+      root.logger.warn('[deepartments] PROBE-WARN-must-NOT-flood-stdout')
+      root.logger.info('[deepartments] PROBE-INFO-must-NOT-flood-stdout')
+    } finally {
+      console.log = realLog
+      if (dispose !== undefined) await dispose()
+    }
+
+    const isErrorVisible = captured.some((line) => line.includes('PROBE-ERROR-must-be-visible-in-journald'))
+    const isWarnVisible = captured.some((line) => line.includes('PROBE-WARN-must-NOT-flood-stdout'))
+    const isInfoVisible = captured.some((line) => line.includes('PROBE-INFO-must-NOT-flood-stdout'))
+
+    // THE CRITERION: the `error` line is greppable in the journal.
+    assert.equal(isErrorVisible, true, `the ctx.logger.error line reached stdout (journald's only stream) — captured=${JSON.stringify(captured)}`)
+    // THE GUARD: no flood (181 of the bundle's 236 ctx.logger sites are `warn`).
+    assert.equal(isWarnVisible, false, 'warn is FILTERED OUT of the exporter (no stdout flood)')
+    assert.equal(isInfoVisible, false, 'info is FILTERED OUT of the exporter (no stdout flood)')
   })
 })

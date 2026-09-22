@@ -160,8 +160,15 @@ class StubAgents extends Service {
 
 class StubPersistence extends Service {
   constructor(ctx) { super(ctx, 'sessionPersistence'); this.createCalls = []; this.appendCalls = [] }
-  async create(meta) { this.createCalls.push(meta) }
-  async append(id, events) { this.appendCalls.push({ id, events }) }
+  async create(header) {
+    this.createCalls.push(header)
+    const id = header.id
+    return {
+      append: async (events) => { this.appendCalls.push({ id, events }) },
+      flush: async () => {},
+      close: async () => {}
+    }
+  }
   async inspect(childId) {
     const parentSession = postAdoption.get(childId)
     if (parentSession === undefined) throw new Error('stub persistence: no stored session')

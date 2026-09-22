@@ -585,6 +585,14 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           seededJournal: seeded,
           journalsDir: path.join(ctx.stateDir, 'journals'),
           workspacePath: (agent.session?.header as { cwd?: string } | undefined)?.cwd ?? process.cwd(),
+          // The header `version` the RUNNING backend validates against is read
+          // from the LIVE session's own header — never this package's own
+          // `@deepseek-ai/dsh-session` constant, which can be a different
+          // generation than the harness that loaded the plugin (measured
+          // 2026-09-22: plugin peer 0.1.2-rc.1 → version 0 vs harness
+          // 0.1.5-rc.2 → version 3, and the codec refuses a mismatched header
+          // with "encodeCurrent requires Session format vN").
+          sessionFormatVersion: (agent.session?.header as { version?: number } | undefined)?.version,
           boundarySeq: boundarySeqAtSleep,
           persistence: deptSleepPersistence,
           workspaceRegistry: ctx.deptGet('workspaceRegistry') as WorkspaceRegistryLike | undefined,
