@@ -19,10 +19,12 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  ABOVE_REFERENCE_LEVEL,
   DEFAULT_INTERVAL_SEC,
   DEFAULT_KEEP_LINES,
   DEFAULT_MAX_LINES,
   HEAP_BAND,
+  HEAP_BASIS,
   HEAP_CEILING_MB,
   cmdlineMatchesDaemon,
   isDshEntrypoint,
@@ -40,6 +42,8 @@ import {
   parseProcStat,
   parseProcStatus,
   readHeartbeatHeap,
+  referenceBandLevel,
+  renderStatus,
   rotateIfNeeded,
   tick,
 } from '../scripts/host-sampler.mjs'
@@ -569,6 +573,42 @@ test('heapBand: NORMAL below 80%, WARN at 80%, CRITICAL at 90% of the ceiling', 
   assert.equal(heapBand(100, 0), null)
 })
 
+test('referenceBandLevel: the SAME thresholds over a REFERENCE denominator, with no terminal claim', () => {
+  // The two thresholds are shared with the wall (a reference is not a different
+  // alarm system — it is the same early warning), but the vocabulary STOPS at
+  // WARN: >= 100 % is the reference being passed, never a death claim. Measured
+  // reason: pid 810027 survived 62,8 h at 187 % of the ceiling.
+  assert.equal(referenceBandLevel(79.9), 'NORMAL')
+  assert.equal(referenceBandLevel(79.96), 'NORMAL', 'the UNROUNDED ratio decides (1676/2096)')
+  assert.equal(referenceBandLevel(80), 'WARN')
+  assert.equal(referenceBandLevel(90), 'WARN')
+  assert.equal(referenceBandLevel(99.9), 'WARN')
+  assert.equal(referenceBandLevel(100), ABOVE_REFERENCE_LEVEL)
+  assert.equal(referenceBandLevel(160.9), ABOVE_REFERENCE_LEVEL) // the series peak, measured
+  assert.equal(referenceBandLevel(Number.NaN), null)
+  // THE INVARIANT: no reference reading ever reads CRITICAL, at ANY value.
+  for (const pct of [0, 50, 79.99, 80, 89.99, 90, 99.99, 100, 107.4, 250, 1000]) {
+    assert.notEqual(referenceBandLevel(pct), 'CRITICAL', `reference ${pct}% must never claim the hard wall`)
+  }
+})
+
+test('THE ROUNDING TRAP: the unrounded ratio decides, on BOTH bases (the threshold must not move)', () => {
+  // The decision is made on the UNROUNDED ratio; the rounding is for the reader.
+  // 1676/2096 = 79,959… → NORMAL, and the row still PRINTS 80.0. This pin exists
+  // because this lane's own first draft re-derived a level from the rounded
+  // `usedPct` and fired WARN on a reading under the band — the exact defect the
+  // code's comment warns about. Both bases and the publish path are pinned.
+  const under = daemonPressure(1676 * 1024, null)
+  assert.equal(under.usedPct, 80, 'the printed value rounds UP to 80,0 …')
+  assert.equal(under.level, 'NORMAL', '… but the DECISION stays NORMAL (79,96 % is under the band)')
+  assert.equal(under.rssLevel, 'NORMAL', 'and the side-by-side reference level agrees')
+  assert.equal(referenceBandLevel(heapBand(1676).rawPct), 'NORMAL', 'the helper reads the raw ratio')
+  // 1677/2096 = 80,00 % → WARN, exactly as before the lane.
+  assert.equal(heapBand(1677).level, 'WARN')
+  assert.equal(daemonPressure(1677 * 1024, null).level, 'WARN')
+  assert.equal(referenceBandLevel(heapBand(1677).rawPct), 'WARN')
+})
+
 test('THE CEILING IS THE MEASURED 2096 MB, never the 5,8 G CGROUP peak (fb-1587)', () => {
   assert.equal(HEAP_CEILING_MB, 2096)
   // The defect this pins: with a 5,8 G denominator the fatal daemon's 3261 MB
@@ -608,9 +648,24 @@ test('daemonBlock: an unresolvable daemon is a null block; a relayed heap names 
   const live = parseArgs(['--state-dir', '/nonexistent-fixture', '--quiet'])
   const withHeap = daemonBlock(live, null, { usedMb: 2000, limitMb: 2096 })
   if (withHeap.block === null) return // no daemon resolvable in this environment
-  assert.deepEqual(withHeap.block.pressure, { source: 'heapUsed', usedMb: 2000, ceilingMb: 2096, usedPct: 95.4, level: 'CRITICAL' })
+  // LANE heap-band-truth: the REAL figure drives BOTH the level and the basis,
+  // and the row publishes the reference upper bound SIDE BY SIDE (not instead).
+  const p = withHeap.block.pressure
+  assert.equal(p.source, 'heapUsed')
+  assert.equal(p.basis, 'heapUsed')
+  assert.equal(p.usedMb, 2000)
+  assert.equal(p.ceilingMb, 2096)
+  assert.equal(p.usedPct, 95.4)
+  assert.equal(p.level, 'CRITICAL')
+  assert.equal(p.heapMb, 2000, 'the REAL datum is published as heapMb')
+  assert.equal(p.heapLimitMb, 2096, 'and with its own denominator (the hard wall)')
+  assert.ok(p.rssMb > 0, 'the RSS upper bound is ALSO published (same row, no join needed)')
+  assert.equal(p.rssCeilingMb, HEAP_CEILING_MB)
+  assert.ok(typeof p.basisNote === 'string' && p.basisNote.length > 0, 'the basis is DECLARED as prose (criterion 3)')
   const rssOnly = daemonBlock(live, null, null)
   assert.equal(rssOnly.block.pressure.source, 'rss-upper-bound')
+  assert.equal(rssOnly.block.pressure.basis, 'rss-upper-bound')
+  assert.equal(rssOnly.block.pressure.heapMb, null, 'no heap published → heapMb is null, not a fake number')
   assert.equal(rssOnly.block.pressure.ceilingMb, HEAP_CEILING_MB)
   assert.ok(Math.abs(rssOnly.block.pressure.usedMb - rssOnly.block.rssKb / 1024) < 0.01)
 })
@@ -624,12 +679,105 @@ test('NO EMPTY SLOT: with no reading at all, the band is OMITTED — never a nul
   assert.equal(daemonPressure(Number.NaN, null), null)
   // One reading is enough, and the source names WHICH datum was banded.
   // rssKb is in kB: 2 GiB of RSS = 2097152 kB = 2048 MB — banded against the
-  // MEASURED ceiling that is 97,7 % (the real shape of this host's daemon).
-  assert.deepEqual(daemonPressure(2097152, null), { source: 'rss-upper-bound', usedMb: 2048, ceilingMb: HEAP_CEILING_MB, usedPct: 97.7, level: 'CRITICAL' })
-  assert.deepEqual(daemonPressure(1024 * 1024, null), { source: 'rss-upper-bound', usedMb: 1024, ceilingMb: HEAP_CEILING_MB, usedPct: 48.9, level: 'NORMAL' })
-  assert.deepEqual(daemonPressure(null, { usedMb: 1900, limitMb: 2096 }), { source: 'heapUsed', usedMb: 1900, ceilingMb: 2096, usedPct: 90.6, level: 'CRITICAL' })
+  // MEASURED ceiling that is 97,7 % — a REFERENCE, so the level is NOT CRITICAL
+  // (see the criterion-2 test below for the measured reason).
+  const rss2gib = daemonPressure(2097152, null)
+  assert.equal(rss2gib.source, 'rss-upper-bound')
+  assert.equal(rss2gib.basis, 'rss-upper-bound')
+  assert.equal(rss2gib.usedMb, 2048)
+  assert.equal(rss2gib.ceilingMb, HEAP_CEILING_MB)
+  assert.equal(rss2gib.usedPct, 97.7)
+  assert.equal(rss2gib.level, 'WARN')
+  const rss1gib = daemonPressure(1024 * 1024, null)
+  assert.equal(rss1gib.usedPct, 48.9)
+  assert.equal(rss1gib.level, 'NORMAL')
+  const heap = daemonPressure(null, { usedMb: 1900, limitMb: 2096 })
+  assert.equal(heap.source, 'heapUsed')
+  assert.equal(heap.basis, 'heapUsed')
+  assert.equal(heap.usedPct, 90.6)
+  assert.equal(heap.level, 'CRITICAL', 'the HEAP basis keeps CRITICAL: its denominator IS the hard wall')
   // The daemon's own heap WINS over RSS when both exist (it is the real datum).
   assert.equal(daemonPressure(9999, { usedMb: 100, limitMb: 2096 }).source, 'heapUsed')
+})
+
+// ---------------------------------------------------------------------------
+// LANE `heap-band-truth` (2026-09-22) — THE THREE ACCEPTANCE CRITERIA.
+// ---------------------------------------------------------------------------
+
+test('criterion 1: BOTH figures and their provenance are published (real heap + reference upper bound)', () => {
+  // The real datum AND the upper bound, in the SAME row, each with its own
+  // denominator — a reader never has to join two sources to tell them apart.
+  const withBoth = daemonPressure(2097152, { usedMb: 1900, limitMb: 2096 })
+  assert.equal(withBoth.heapMb, 1900, "THE REAL FIGURE (the daemon's own heap)")
+  assert.equal(withBoth.heapLimitMb, 2096, "the real figure's own denominator (the hard wall)")
+  assert.equal(withBoth.rssMb, 2048, 'the reference UPPER BOUND, published side by side')
+  assert.equal(withBoth.rssCeilingMb, HEAP_CEILING_MB, 'and the reference denominator')
+  assert.equal(withBoth.rssUsedPct, 97.7)
+  // Without the real datum the reference still carries everything it can, and
+  // the PROVENANCE of each figure is explicit rather than implied by a key name.
+  const refOnly = daemonPressure(2097152, null)
+  assert.equal(refOnly.heapMb, null, 'the absent real datum is null — never a substitute number')
+  assert.equal(refOnly.usedMb, 2048)
+  assert.match(refOnly.basisNote, /UPPER BOUND/)
+  assert.match(daemonPressure(null, { usedMb: 1900, limitMb: 2096 }).basisNote, /HARD WALL/)
+})
+
+test('criterion 2: the level is derived from the REAL figure, and `CRITICAL` is reserved to it', () => {
+  // A KNOWN relation between the real figure and the ceiling decides the level.
+  // heap 1900 / limit 2096 = 90,6 % → CRITICAL, and the basis says WHY that
+  // word is allowed here: the denominator is V8's heap_size_limit (a hard wall).
+  const wall = daemonPressure(null, { usedMb: 1900, limitMb: 2096 })
+  assert.equal(wall.level, 'CRITICAL')
+  assert.equal(wall.basis, 'heapUsed')
+  assert.equal(wall.usedPct, 90.6)
+  // The SAME ratio read against the REFERENCE basis is NOT the same claim: RSS
+  // is an upper bound and its denominator is a number the process can exceed, so
+  // the terminal word is not available — it reads WARN (a legitimate early
+  // warning), never CRITICAL.
+  const ref = daemonPressure(1900 * 1024, null)
+  assert.equal(ref.usedPct, 90.6, 'same ratio, deliberately')
+  assert.equal(ref.level, 'WARN', 'the reference basis cannot claim the wall is near')
+  assert.notEqual(ref.level, wall.level, 'the SAME number under the two bases must not read the same claim')
+  // ABOVE 100 % of the reference is an EVERYDAY state on this host (measured:
+  // 6385 of 8910 samples) — and the norm's OWN table proves RSS does not decide
+  // the heap: pid 810027 lived 62,8 h at 187 % of the ceiling while pid 1191415
+  // died at 156 % of it. It is named for what it is, not for a death it cannot
+  // predict.
+  const above = daemonPressure(2250 * 1024, null)
+  assert.equal(above.usedPct, 107.3)
+  assert.equal(above.level, ABOVE_REFERENCE_LEVEL)
+  assert.notEqual(above.level, 'CRITICAL')
+  assert.equal(above.rssLevel, ABOVE_REFERENCE_LEVEL, 'the side-by-side reference level says the same thing')
+  // The WARN threshold itself is UNTOUCHED — 79,96 % stays NORMAL (the rounding
+  // decision in heapBand is deliberate: rounding first would move the threshold).
+  assert.equal(daemonPressure(1676 * 1024, null).level, 'NORMAL')
+  assert.equal(daemonPressure(1677 * 1024, null).level, 'WARN')
+  // A reading ABOVE the hard wall (the fatal 3261 MB) is still CRITICAL when the
+  // HEAP is what is being banded: there the ceiling is a wall.
+  assert.equal(daemonPressure(null, { usedMb: 3261, limitMb: 2096 }).level, 'CRITICAL')
+})
+
+test('criterion 3: the render DECLARES which of the two it is publishing (the `basis:` rule)', () => {
+  const refRow = {
+    iso: '2026-09-22T19:00:00.000Z',
+    load1: 1,
+    tickMs: 4,
+    psi: { cpu: { some: { avg60: 1 } }, io: { some: { avg60: 1 } }, memory: { some: { avg60: 0 } } },
+    daemon: { rssKb: 2048 * 1024, pressure: daemonPressure(2097152, null) },
+  }
+  const refLine = renderStatus(refRow, 7)
+  assert.match(refLine, /basis=rss-upper-bound/, 'the render says WHICH datum it publishes')
+  assert.match(refLine, /REFERENCE, not the heap/, 'and it says what that denominator is NOT')
+  assert.match(refLine, /rss=\d+MB/, 'and carries the published figure explicitly')
+  // With the real datum the render declares the OTHER basis and the hard wall.
+  const heapRow = {
+    ...refRow,
+    daemon: { rssKb: 2048 * 1024, pressure: daemonPressure(2097152, { usedMb: 1900, limitMb: 2096 }) },
+  }
+  const heapLine = renderStatus(heapRow, 8)
+  assert.match(heapLine, /basis=heapUsed/)
+  assert.match(heapLine, /HARD WALL/)
+  assert.doesNotMatch(heapLine, /REFERENCE, not the heap/)
 })
 
 test('THE BAND IS IN THE ROW: --once publishes daemon.pressure of the DECLARED keys, with NO null slot', (t) => {
@@ -640,15 +788,25 @@ test('THE BAND IS IN THE ROW: --once publishes daemon.pressure of the DECLARED k
   if (row.daemon === null) return // no resolvable daemon on this host: nothing to pin here
   // EXACT key set: a renamed/added field breaks the readers, so it breaks here too
   assert.deepEqual(Object.keys(row.daemon), ['unit', 'profile', 'pid', 'rssKb', 'vmSizeKb', 'threads', 'state', 'cpuTicks', 'pressure'])
-  assert.deepEqual(Object.keys(row.daemon.pressure), ['source', 'usedMb', 'ceilingMb', 'usedPct', 'level'])
+  // LANE `heap-band-truth` (2026-09-22): the declared pressure key set — the
+  // basis declaration + BOTH figures (real heap, reference upper bound).
+  assert.deepEqual(Object.keys(row.daemon.pressure), [
+    'source', 'basis', 'basisNote', 'usedMb', 'ceilingMb', 'usedPct', 'level',
+    'heapMb', 'heapLimitMb', 'rssMb', 'rssCeilingMb', 'rssUsedPct', 'rssLevel',
+  ])
   assert.equal(row.daemon.pressure.source, 'heapUsed')
+  assert.equal(row.daemon.pressure.basis, 'heapUsed')
   assert.equal(row.daemon.pressure.usedMb, 2000)
   assert.equal(row.daemon.pressure.ceilingMb, 2096)
   assert.equal(row.daemon.pressure.usedPct, 95.4)
   assert.equal(row.daemon.pressure.level, 'CRITICAL')
-  // THE LAW: no heap field anywhere may be an empty slot. RSS-based or
-  // heap-based, the band is always a READING — never `null`.
-  for (const k of ['source', 'usedMb', 'ceilingMb', 'usedPct', 'level']) {
+  assert.equal(row.daemon.pressure.heapMb, 2000, 'the REAL figure is the published heapMb')
+  assert.equal(row.daemon.pressure.basisNote, HEAP_BASIS.heapUsed, 'the basis is declared verbatim')
+  // THE LAW: no READING field may be an empty slot. The `heapMb`/`heapLimitMb`
+  // pair is NOT a reading on the reference basis — it is the declared absence of
+  // one (null, with `basis` naming the substitute), which is why the two are
+  // checked per basis and never blanket-asserted non-null.
+  for (const k of ['source', 'basis', 'basisNote', 'usedMb', 'ceilingMb', 'usedPct', 'level', 'rssMb', 'rssCeilingMb', 'rssUsedPct', 'rssLevel']) {
     assert.notEqual(row.daemon.pressure[k], null, `pressure.${k} must never be a null slot`)
   }
 })
@@ -656,17 +814,35 @@ test('THE BAND IS IN THE ROW: --once publishes daemon.pressure of the DECLARED k
 test('THE ALERT: a WARN/CRITICAL crossing is written to the sampler log (once per crossing)', (t) => {
   const dir = fixtureDir(t)
   const log = path.join(dir, 'sampler.log')
+  // (a) the REAL datum (the daemon published its heap) → CRITICAL is allowed
+  // and the line declares the basis (lane heap-band-truth, criterion 3).
   writeFileSync(path.join(dir, 'health-heartbeat.json'), '{"ts":1,"bootId":"x","heapMb":{"used":2000,"total":2048,"limit":2096}}')
   const opts = parseArgs(['--state-dir', dir, '--quiet', '--log', log])
   const state = { daemonPid: null, stateDirBlock: null, ticks: 0, bandLevel: null }
   const sample = tick(opts, state)
   if (sample.daemon === null) return // no resolvable daemon on this host
   const text = readFileSync(log, 'utf8')
-  assert.match(text, /HEAP CRITICAL \(heapUsed\): 2000 MB of a 2096 MB heap ceiling = 95\.4%/)
+  assert.match(text, /HEAP CRITICAL \(basis=heapUsed\): 2000 MB of 2096 MB = 95\.4%/)
+  assert.match(text, /HARD WALL/)
   assert.match(text, /INVESTIGATE/)
   assert.match(text, /Reached heap limit/)
   // ONCE per crossing, not once per tick (the log is AUXILIARY, norm §6)
   tick(opts, state)
   const after = readFileSync(log, 'utf8').split('HEAP CRITICAL').length - 1
   assert.equal(after, 1, 'the CRITICAL line must not repeat every tick')
+  // (b) THE REFERENCE BASIS: with NO heap published the line must NOT claim the
+  // hard wall — it declares the basis and says what the denominator is not.
+  // This is the lane's own regression pin: the old line read
+  // «HEAP CRITICAL (rss-upper-bound) … this daemon can die with FATAL ERROR».
+  const dir2 = fixtureDir(t)
+  const log2 = path.join(dir2, 'sampler.log')
+  const opts2 = parseArgs(['--state-dir', dir2, '--quiet', '--log', log2])
+  const state2 = { daemonPid: null, stateDirBlock: null, ticks: 0, bandLevel: null }
+  const sample2 = tick(opts2, state2)
+  if (sample2.daemon === null || sample2.daemon.pressure === undefined) return
+  const text2 = readFileSync(log2, 'utf8')
+  assert.match(text2, /basis=rss-upper-bound/, 'the reference basis declares itself')
+  assert.match(text2, /NOT a wall/, 'and says the denominator is not a hard wall')
+  assert.doesNotMatch(text2, /Reached heap limit/, 'never the wall`s death sentence on a reference reading')
+  assert.doesNotMatch(text2, /HEAP CRITICAL \(basis=rss-upper-bound\)/, 'CRITICAL is not in the reference vocabulary')
 })

@@ -105,7 +105,7 @@ authoritative list; this table is the reader's contract):
 | `mem.swapTotalKb` `swapFreeKb` `swapUsedKb` `dirtyKb` `writebackKb` | swap + writeback (evidence, not criteria) |
 | `psi.{cpu,io,memory}.{some,full}.{avg10,avg60,avg300,totalUs}` | `/proc/pressure/*` verbatim: percent-of-window + the **cumulative** microsecond counter (the only way to reconstruct a window retroactively) |
 | `daemon.{unit,profile,pid,rssKb,vmSizeKb,threads,state,cpuTicks}` | the `node` process of the unit `dsh-deepartments-dev` (`/proc/<pid>/status` VmRSS, `/proc/<pid>/stat` utime+stime); `null` = not resolvable this tick |
-| `daemon.pressure.{source,usedMb,ceilingMb,usedPct,level}` | **THE HEAP BAND** — §4.6. `source` = `heapUsed` (the daemon's OWN heap, relayed from its `health-heartbeat.json`) or `rss-upper-bound` (`rssKb` = VmRSS, an **upper bound** on the heap). **ABSENT when there is no reading — never a `null` slot** (§4.7) |
+| `daemon.pressure.{source,basis,basisNote,usedMb,ceilingMb,usedPct,level,heapMb,heapLimitMb,rssMb,rssCeilingMb,rssUsedPct,rssLevel}` | **THE HEAP BAND** — §4.6/§4.6.2. `source`/`basis` = `heapUsed` (the daemon's OWN heap, relayed from its `health-heartbeat.json`) or `rss-upper-bound` (`rssKb` = VmRSS, an **upper bound** on the heap); `basisNote` DECLARES in prose which of the two is published and what its denominator is (§4.6.2, criterion 3). **BOTH figures travel side by side** (criterion 1): `heapMb`/`heapLimitMb` = the REAL datum and its HARD WALL (null while the daemon has not published `heapMb`); `rssMb`/`rssCeilingMb`/`rssUsedPct`/`rssLevel` = the reference upper bound and its REFERENCE denominator. **ABSENT when there is no reading — never a `null` slot** (§4.7); the null `heapMb` on the reference basis is a DECLARED ABSENCE, not a slot |
 | `disk.{path,totalBytes,usedBytes,availBytes,usedPct,inodesUsedPct}` | `/` with **df semantics** (`usedPct = used/(used+avail)`) |
 | `stateDir.{path,bytes,files,bytesAt,ageSec,truncated,skipped}` | apparent-size sum of the stateDir tree (`du -sb` semantics), computed at most every 15 min |
 | `tickMs` | the sampler's own overhead |
@@ -295,8 +295,9 @@ late; it never warns.
 | `ceilingMb` | **2096 MB** (`HEAP_CEILING_MB`), or the daemon's own `limit` when it publishes one | V8's `heap_size_limit`: the hard wall. **The CGROUP peak is NOT a ceiling** |
 | `usedMb` | the daemon's heap when relayed; else `rssKb / 1024` | see §4.7 — **RSS ≥ V8 heap**, always |
 | `usedPct` | `usedMb / ceilingMb x 100` | compared **unrounded**; the rounding is for the reader, not the decision |
-| **`WARN`** | `usedPct >= 80 %` (**1677 MB**) | the "act soon" line |
-| **`CRITICAL`** | `usedPct >= 90 %` (**1886 MB**) | the "this daemon can die with `Reached heap limit`" line |
+| **`WARN`** | `usedPct >= 80 %` (**1677 MB**) | the "act soon" line — on BOTH bases |
+| **`CRITICAL`** | `usedPct >= 90 %` (**1886 MB**) | the "this daemon can die with `Reached heap limit`" line — **HEAP BASIS ONLY** (§4.6.2) |
+| **`ABOVE-REFERENCE`** | `usedPct >= 100 %` on the **reference** basis | the declared reference was passed. **NOT a death sentence** (§4.6.2) |
 | `NORMAL` | `< 80 %` | silent |
 
 **The reading rule (what is NORMAL, what is INVESTIGATE).**
@@ -308,12 +309,20 @@ late; it never warns.
 - **`WARN` (>= 80 %) ⇒ INVESTIGATE.** Name the incarnation (`daemon.pid`) and
   read `daemon.cpuTicks` (§4.5) next: heap near the ceiling **with the loop
   saturated** is the OOM lane (§4.5's `ratio near 1,0`), not a sizing lane.
-- **`CRITICAL` (>= 90 %) ⇒ INVESTIGATE, and expected within hours-to-minutes.**
-  Measured on the fatal incarnation (`pid 1191415`, 17,0 h): it crossed **80 %
+- **`CRITICAL` (>= 90 %, heap basis) ⇒ INVESTIGATE, and expected within
+  hours-to-minutes.** Measured on the fatal incarnation (`pid 1191415`, 17,0 h): it crossed **80 %
   16,8 h** and **90 % 16,4 h** before its last sample — i.e. the band would have
   been open **~16 h before the crash**, and the crash itself was a **puntual
   event on an already-saturated base** (Mark-Compact freed 0,1 MB of 2027 MB: a
   periodic message blew a heap that was 99,6 % live).
+- **`ABOVE-REFERENCE` (>= 100 %, reference basis) ⇒ THE REAL DATUM IS MISSING.**
+  This is not an alarm about the daemon: it is an alarm about the INSTRUMENT. The
+  actionable item is that `health-heartbeat.json` carries no `heapMb`, so the band
+  is comparing an upper bound against a number the process never had to respect
+  (§4.6.2). **Fix the datum, not the daemon** — and do NOT read
+  `ABOVE-REFERENCE` as «worse than `CRITICAL`»: it is the ABSENCE of a
+  measurement, and it is the state this host was in for **100 %** of its series
+  until the daemon-side publication below.
 - **The band's alert is written to `host-sampler.log`** (`HEAP CRITICAL ...`)
   **once per crossing** — never once per tick. The AUTHORITATIVE record is the
   sample's `daemon.pressure`; the log line is the notification. See §4.6.1.
@@ -400,44 +409,93 @@ on the heap (RSS ≥ heap), which can therefore warn **early or unnecessarily,
 never late**. **The relay is the whole handoff: this lane needs NO change to
 receive the datum.**
 
-**THE PIECE THAT MUST BE ASKED FOR OUTSIDE THIS LANE (declared, NOT
-implemented here).** One file, three additions, in
-**`packages/dshd-health/src/index.ts`** — *outside this lane; the head and the
-host decide*:
+**★ IMPLEMENTED (lane `heap-band-truth`, 2026-09-22).** The daemon-side piece
+below was a DECLARED request until this lane; it is now IN THE TREE and verified
+through the REAL tick path (`runHealthDaemonTick` → `health-heartbeat.json` →
+`readHealthHeartbeatFile` → the sampler's `readHeartbeatHeap` →
+`source: 'heapUsed'`). See §4.6.2 for the band's own contract. The four additions
+in **`packages/dshd-health/src/index.ts`** (listed by CONTENT — this lane's tree
+is shared and the line numbers move; the host's gate commit `d4a9358` is the
+surface being extended):
 
-1. **`:506` — the `HealthHeartbeat` interface:** add one optional field, in
-   the same "ABSENT → the tick never guesses" style the other optional fields
-   already use:
+1. **The `HealthHeartbeat` interface** — one optional field in the house's
+   "ABSENT → the tick never guesses" style:
    ```ts
-   /** The daemon's OWN V8 heap, MB (process.memoryUsage(): heapUsed/heapTotal,
-    * and v8.getHeapStatistics().heap_size_limit). The ONLY place this datum can
-    * be born: it is a RUNTIME datum and no external reader can obtain it from
-    * /proc. ABSENT → unreadable. */
    heapMb?: { used: number; total: number; limit: number }
    ```
-2. **`:7667` — the `writeHealthHeartbeatFile(...)` object:** one spread, the
-   exact pattern of the lines already there:
+2. **The producer** (`readOwnHeapMb`, MODULE-PRIVATE on purpose — the
+   export-parity lock stays at 349 runtime names, since the only caller is the
+   tick inside this file and the datum is verified through the real tick path):
    ```ts
-   ...(heapMb() !== undefined ? { heapMb: heapMb() } : {}),
+   const usage = process.memoryUsage()
+   const limit = getHeapStatistics().heap_size_limit   // static node:v8 import
+   return { used: Math.round(usage.heapUsed / 1048576), total: Math.round(usage.heapTotal / 1048576), limit: Math.round(limit / 1048576) }
    ```
-   (resolve it once into a local, the way `gatedIdleHeld` is resolved above.)
-3. **The producer** — a tiny helper next to the other health datums:
+3. **The `runHealthDaemonTick` write** — resolved ONCE into a local before the
+   heartbeat write (the `gatedIdleHeld` pattern), then one spread:
    ```ts
-   const m = process.memoryUsage()
-   const limit = (await import('node:v8')).getHeapStatistics().heap_size_limit
-   return { used: Math.round(m.heapUsed / 1048576), total: Math.round(m.heapTotal / 1048576), limit: Math.round(limit / 1048576) }
+   ...(ownHeap !== undefined ? { heapMb: ownHeap } : {})
    ```
+4. **`readHealthHeartbeatFile`** — reads the block back VERBATIM, and only when
+   all THREE numbers are finite (`limit > 0`): a torn/partial block is not a
+   datum, so a consumer can never band against a ceiling the daemon did not
+   declare.
 
-**`used`/`total`/limit MB, integers: no secret, no content, and `fb-16`-clean.**
+**`used`/`total`/`limit` MB, integers: no secret, no content, and `fb-16`-clean.**
 
-**One caveat the head must weigh, measured:** the heartbeat file is written
-**non-atomically** (`writeFile`, not tmp+rename) and the sampler reads it
-**every 45 s**. A torn read is therefore possible and was **observed** while
-measuring this report; `readHeartbeatHeap()` handles it (`null` → the band
-falls back to RSS for that tick, no error, no hole). **If the daemon adopts this
-field, an atomic write (tmp + rename, the pattern `rotateIfNeeded` already uses
-in this lane) is worth requesting at the same time** — otherwise a tick can
-silently lose the datum it was added for.
+**The atomic-write caveat, MEASURED and still open:** the heartbeat is written
+**non-atomically** (`writeFile`, not tmp+rename) while the sampler reads it every
+45 s, so a torn read is possible and was observed. `readHeartbeatHeap()` handles
+it (`null` → the band falls back to RSS **for that tick only**, no error, no
+hole), and the four-field reader above refuses a partial `heapMb` block — so the
+degradation is safe, but a tick can still lose the datum it was added for. **An
+atomic write (tmp + rename, the `rotateIfNeeded` pattern) remains a worthwhile
+follow-up and is NOT part of this lane.**
+
+### 4.6.2 THE BAND'S HONESTY CONTRACT (lane `heap-band-truth`, 2026-09-22)
+
+**The defect.** Until this lane, `host-health.jsonl` had `source:
+'rss-upper-bound'` in **100 %** of its 8.910 pressure-bearing samples, and its
+`level` was computed by comparing that upper bound against `HEAP_CEILING_MB` —
+so a reading of **107,4 %** (measured peak; **6.385 of 8.941** samples read
+> 100 %) was published as `CRITICAL`. **`> 100 %` of a limit is arithmetically
+impossible**, which is enough to prove the denominator was never a limit: it is a
+**REFERENCE the process can and does exceed**. `CRITICAL` therefore did not mean
+«this daemon is in danger»; it meant «superó una cifra declarada» — which is why
+**144 `CRITICAL` samples in ~3 h moved nobody**. (No causal claim: the 107,4 %
+peak belongs to pid 1721430, last sample 17:31:40Z; the 17:32 crash-loop is a
+SEPARATE measured fact.)
+
+**The three rules this lane makes binding.**
+
+1. **BOTH FIGURES, WITH PROVENANCE.** The row publishes the REAL datum
+   (`heapMb`/`heapLimitMb`) AND the reference upper bound
+   (`rssMb`/`rssCeilingMb`/`rssUsedPct`/`rssLevel`) side by side — never one
+   instead of the other. A reader never has to join two sources to tell a heap
+   from an RSS, and an absent real datum is an explicit `null`, never a
+   substitute number.
+2. **THE LEVEL NAMES WHAT IT MEASURES.** `CRITICAL` is reserved to the **heap
+   basis** (denominator = V8's `heap_size_limit`, a HARD WALL the process cannot
+   exceed and live). On the reference basis the vocabulary stops at **`WARN`**
+   and **`ABOVE-REFERENCE`** — measured reason: pid 810027 **survived 62,8 h at
+   187 %** of the ceiling while pid 1191415 **died at 156 %** of it, so RSS does
+   not determine the heap and the terminal word is unprovable on that basis.
+   `WARN` is KEPT on the reference basis: RSS ≥ heap, so it warns **early, never
+   late**.
+3. **THE RENDER DECLARES ITS BASIS.** The row carries `basis` + `basisNote`, and
+   both the log line and the loop status render say `basis=…` (the same
+   declarative rule the capacity gate's `basis:` already uses). The rounding rule
+   is UNTOUCHED: the comparison stays **unrounded** (1676/2096 = 79,96 % is
+   `NORMAL` even though it prints «80.0»), and `heapBand` now returns `rawPct` for
+   exactly this reason — a caller that re-derives a level from the ROUNDED
+   `usedPct` reintroduces the moved threshold (this lane's own first draft did
+   that, and its test caught it).
+
+**The test that FAILS before and PASSES after:**
+`test/heap-band-truth-2ebbc0de.test.js` (3 cases, run against the PRE-change
+sampler from `git show HEAD:scripts/host-sampler.mjs` → **3 fail**; against the
+tree → **3 pass**), plus `test/host-sampler.test.js` (`criterion 1/2/3` cases and
+the rounding-trap pin).
 
 ## 5. The recipe (the command the owner asked for)
 

@@ -48,6 +48,9 @@ anchors:
   - /home/esuarez/projects/deepartments/packages/dshd-orchestration/src/delivery.ts:3194
   - /home/esuarez/projects/deepartments/src/invoke.ts:4256
   - /home/esuarez/projects/deepartments/src/invoke.ts:5299
+  - /home/esuarez/projects/deepartments/src/invoke.ts:1431
+  - /home/esuarez/projects/deepartments/test/invoke.test.js:25081
+  - /etc/systemd/system/dsh-deepartments-dev.service:15
   - /etc/systemd/system/dsh-deepartments-dev.service:7
   - /etc/systemd/system/dsh-deepartments-dev.service:11
   - /etc/systemd/system/dsh-deepartments-dev.service:12
@@ -292,6 +295,73 @@ This section saves more time than the five above.
   ⇒ **Narrow the path; name the file when you know it; use `read` with `offset`
   on the cited line.** A verification command that walks a big tree is not a
   verification command.
+
+### The canonical path table — and the ONE-LETTER trap (read this before probing a path)
+
+> **THE RULE: cite ABSOLUTE canonical paths and NEVER retype them — copy them
+> from a live listing (`ls`/`glob`/`read`).** If a path is NEW, confirm it
+> exists by another route *before* using it as a probe argument, and give the
+> control a DIFFERENT path than the one probed.
+
+The difference between the real name and the trap is **one letter** (`e`).
+There is **no** `departments-dev` spelling on disk: the canonical spelling is
+`deepartments-dev`.
+
+| Path | Exists? | What it is |
+|---|---|---|
+| `/opt/dsh/.dsh-dev/profiles/deepartments-dev` | **YES** | the LIVE profile |
+| `/opt/dsh/.dsh-dev/profiles/departments-dev` | **NO** | the typo that gets typed constantly |
+| `/opt/dsh/trees/deepartments-dev-0.1.5-rc.2` | **YES** | the tree that RUNS (`node_modules` only — **no sources**, `fb-2437`; the sources are in the repo, `src/invoke.ts` at the root) |
+| `/opt/dsh/trees/departments-dev-0.1.5-rc.2` | **NO** | the same typo |
+| `/home/esuarez/projects/deepartments` | **YES** | **THE REPOSITORY** (git; `src/`, `packages/`, `docs/`) |
+| `/home/esuarez/projects/departments` | **YES — and it DOES NOT ERROR** | **the GHOST sibling**: not a git repo; holds only `.dsh/reports/builder/` (4 orphan reports, 2026-09-16) and now a `README.md` signpost |
+| systemd units | — | 6 occurrences of `deepartments-dev`, **0** of `departments-dev` (the units are correct — `/etc/systemd/system/dsh-deepartments-dev.service:15`) |
+
+**And there is more than one repository in this house:** `deepartments` (this
+one), `/home/esuarez/projects/dsh-smart-restart` (the canary — a **different**
+repo), and the harness. Never infer identity from a similar name.
+
+#### Why this is worse than a typo: it produces a PLAUSIBLE result
+
+Because the ghost sibling **exists**, a `not found`/`no files found` over it is
+**indistinguishable from a broken instrument** — and a positive control run
+against the *same* wrong path will "contradict" the probe while **both are
+saying the same thing about the same object**. The reader then concludes
+"instrument anomaly" instead of "one letter".
+
+**Measured cost (this class is expensive, not hypothetical):**
+
+- **A Quality Head lost an ENTIRE turn.** 8 calls she reported as an
+  "instrument anomaly" were **CORRECT**; her own positive control (`glob /home`)
+  listed **the ghost** (the sibling carrying the name she was asking for), so
+  she read "the two probes contradict each other" and stayed blocked, unable to
+  read her own existing D-Q3 report
+  (`.dsh/reports/quality/2026-09-22-dq3-rotacion-head-internal-programming-head-956cf9fa-ee591a2f.md`,
+  43 899 B).
+- **`fb-2443`** — the host declared `src/invoke.ts` non-existent after a search
+  whose scope was limited to `packages/**`; the file exists at the repo root.
+- **The vector lives in THIS repository, in two comments:** `src/invoke.ts:1431`
+  and `test/invoke.test.js:25081` both cite
+  `profiles/departments-dev/cordis.patch.yml:151` — that path **does not exist**;
+  the real one is `profiles/deepartments-dev/…`. They are comments (no
+  behaviour), but a reader copies them and lands in the ghost. *(Lines measured
+  at HEAD `d2da32d`, 2026-09-22; the SYMBOL/string is the durable anchor.)*
+- **`fb-1974`** — a `write` landed in the non-repo sibling because the tool
+  silently created the missing path instead of failing.
+- **`fb-2219`** — the one-letter control itself.
+
+#### Cards this section consolidates
+
+**`fb-1024`** (the trap with a design cause) · **`fb-1472`** (a runbook that
+prescribed a non-existent path — the *deployment* artefact variant: the typo
+does not degrade, it `203/EXEC`s and STOPS the unit) · **`fb-1974`** · **`fb-2219`**
+· **`fb-2437`** · **`fb-1785`**.
+
+**Proposed remedy — `fb-1785` (a TOOL improvement, NOT implemented here):** when
+a `not found` occurs **and the parent directory exists**, suggest the **nearest
+sibling** (same directory, few characters apart). That is a change to the tool /
+`seam` side (Quality Department), cited here as the natural fix for this class;
+it is deliberately **not** implemented in this repository.
 
 ## 7. Linked registers (not duplicated here)
 

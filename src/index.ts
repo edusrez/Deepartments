@@ -33,6 +33,57 @@ export function apply(ctx: Context, config: Config) {
   // never reaches stdout; journald only sees raw stdout, so also print the
   // boot line the way dsh-smooth-stream does (console.log with a prefix).
   console.log('[deepartments] online')
+  // ---------------------------------------------------------------------------
+  // fb-2432 — THE MISSING SINK: make the bundle's `ctx.logger.error` line
+  // REACHABLE (journald), so a diagnosis the code emits can actually be read.
+  //
+  // MEASURED (2026-09-22, HEAD 846cf40, dev profile), and this is the honest
+  // discrimination the lane asked for — it is NONE of «level filter», «wrong
+  // object» or «buffering»:
+  //   * `ctx.logger` had NO durable sink AT ALL. The ONLY default exporter is
+  //     cordis's own in-memory RING BUFFER (`LoggerService` ctor:
+  //     `export: (message) => { self.buffer.push(message) … }`, `bufferSize =
+  //     1e3`) — a GUI-console feed, never stdout/journald. Its default levels
+  //     entry is `default: 1`, so a plain `warn` (level 2) is not even retained.
+  //     Empirically proven: with no exporter registered, `ctx.logger.info(…)`
+  //     AND `ctx.logger.error(…)` both emit ZERO bytes; `console.log` appears.
+  //   * The TWO `[deepartments]` lines journald DOES show («online» + «channel
+  //     mounted») are `console.log` — and from TWO DIFFERENT PACKAGES
+  //     (src/index.ts:35 and packages/dshd-gui/src/index.ts:839), NOT from
+  //     `ctx.logger`. So «the logger works at startup» was an artifact of
+  //     attributing a `console.log` to the logger: the visible prefix is shared,
+  //     the channel is not. This is why EVERY `ctx.logger.*` call site in the
+  //     bundle (measured: 236, of which 4 `error`) was invisible — including
+  //     `lifecycle.ts` «ROTATION could not run» and `delivery.ts`'s
+  //     «HOST MUTE ANOMALY (fb-946)» backstop, a warning about a mute host
+  //     delivered over a mute channel.
+  //
+  // THE FIX — the sink the logger's OWN contract documents
+  // (`LoggerService.exporter(exporter)`: «the sink that receives structured log
+  // messages»). It is deliberately `error`-ONLY via `levels.default: 0`
+  // (`Logger._method` skips an exporter when
+  // `(exporter.levels?.[name] ?? exporter.levels?.default ?? level) < level`):
+  //   * `error` (level 0) → exported → journald.
+  //   * `warn` (2) / `info` (1) / `debug` (3) → FILTERED OUT, so this adds NO
+  //     stdout flood (the bundle has 236 `ctx.logger` call sites, 181 of them
+  //     `warn`) and cannot regress stdout-sensitive surfaces.
+  // `levels.default` is set for EVERY logger name (not a per-name key) on
+  // purpose: the diagnosis must not depend on which sub-logger emitted it.
+  // One line per message; `console.log` (not `.error`) matches how the other
+  // plugins that ARE visible in journald write (`[key-pooler]`,
+  // `[smart-restart]`, `[dsh-guard-toolpair]`).
+  // SCOPE: this repairs the CHANNEL. Whether anything SCANS the durable
+  // `registry-anomalies.jsonl` is the detector's decision and is NOT this lane
+  // (declared, not silently closed).
+  ctx.logger.exporter({
+    levels: { default: 0 },
+    colors: 0,
+    export: (message) => {
+      const args = (message as { args?: unknown[] }).args ?? []
+      const text = args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ')
+      console.log(`[deepartments] ${text}`)
+    }
+  })
 
   // Task 4: the organization config (schema + department/agent catalog) lives
   // in ./org.ts — a pure configuration module since the board cutover (Batch

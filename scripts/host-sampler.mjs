@@ -65,7 +65,9 @@
 //                cpuTicks is what separates "the daemon was COMPUTING" from
 //                "the daemon was WAITING": its delta over a window divided by
 //                the window's wall time is the CPU-core share it burned.
-//   daemon.pressure { source, usedMb, ceilingMb, usedPct, level } | absent
+//   daemon.pressure { source, basis, basisNote, usedMb, ceilingMb, usedPct,
+//                     level, heapMb, heapLimitMb, rssMb, rssCeilingMb,
+//                     rssUsedPct, rssLevel } | absent
 //                THE BAND (norm §4.6) — and the reason it is here at all:
 //                **the V8 heap of the daemon is NOT readable from outside the
 //                process.** `heapUsed`/`heapTotal` are RUNTIME datums that only
@@ -76,19 +78,32 @@
 //                3261 MB against a 2096 MB heap ceiling = 156 %). So this
 //                sampler CANNOT publish the heap itself, and it publishes the
 //                band over the BEST datum it can reach:
-//                  source = 'heapUsed'  → the daemon's OWN heap, relayed from
-//                           `<stateDir>/health-heartbeat.json` (the daemon's
+//                  source = basis = 'heapUsed'  → the daemon's OWN heap, relayed
+//                           from `<stateDir>/health-heartbeat.json` (the daemon's
 //                           health tick writes it from inside — the natural
 //                           home of the datum; norm §4.7). The block appears
 //                           ONLY when that file carries it, NEVER as a null
 //                           slot.
-//                  source = 'rss-upper-bound' → no heap published yet: the band
-//                           over VmRSS of the daemon, which is an UPPER BOUND on
-//                           its heap (RSS ≥ heap) and therefore never warns
-//                           LATE — it can warn EARLY/unnecessarily.
+//                  source = basis = 'rss-upper-bound' → no heap published: the
+//                           band over VmRSS of the daemon, which is an UPPER
+//                           BOUND on its heap (RSS ≥ heap) and therefore never
+//                           warns LATE — it can warn EARLY/unnecessarily.
+//                ★ LANE `heap-band-truth` (2026-09-22): the row now publishes
+//                BOTH figures with their provenance. `heapMb`/`heapLimitMb` are
+//                the REAL datum and its hard wall (null while unpublished);
+//                `rssMb`/`rssCeilingMb`/`rssUsedPct`/`rssLevel` are the upper
+//                bound and its REFERENCE denominator, ALWAYS present when RSS is
+//                readable. `basis` + `basisNote` DECLARE which one `level` came
+//                from (criterion 3 — the same declarative `basis:` the capacity
+//                gate uses). `level` is derived from the REAL figure when it
+//                exists; on the reference basis a reading ≥ 100 % is
+//                `ABOVE-REFERENCE`, never `CRITICAL` — a reference the process
+//                can and does exceed (6385 of 8910 samples measured > 100 %) is
+//                not a wall, so the wall's vocabulary must not be applied to it.
 //                ceilingMb = V8's `heap_size_limit` (2096 MB measured on this
 //                host, norm §4.6) — the daemon's own limit when it reports one.
-//                level: NORMAL < 80 % · WARN >= 80 % · CRITICAL >= 90 %.
+//                level: NORMAL < 80 % · WARN >= 80 % · CRITICAL >= 90 %
+//                (heap basis) · ABOVE-REFERENCE >= 100 % (reference basis).
 //   disk         { path: '/', totalBytes, usedBytes, availBytes, usedPct,
 //                  inodesUsedPct } — df semantics (usedPct = used/(used+avail))
 //   stateDir     { path, bytes, files, bytesAt, ageSec, truncated, skipped }
@@ -152,13 +167,74 @@ export const HEAP_CEILING_MB = 2096
 /** The BAND (norm §4.6): thresholds as a percentage of the heap ceiling. */
 export const HEAP_BAND = { warnPct: 80, criticalPct: 90 }
 
+/** ★ LANE `heap-band-truth` (2026-09-22) — THE MEASUREMENT BASIS, declared as
+ * prose (criterion 3, the `basis:` the capacity gate already uses). The band's
+ * `level` is only interpretable next to WHICH figure was banded and WHAT the
+ * denominator is: the two denominators are NOT the same KIND of number, and
+ * conflating them is the whole defect this lane fixes.
+ *   - `heapUsed` — the daemon's OWN heap vs its V8 `heap_size_limit`: a HARD
+ *     WALL. The process cannot exceed it and live (`FATAL ERROR: Reached heap
+ *     limit`), so a reading at/above 90 % genuinely means «this daemon can die».
+ *   - `rss-upper-bound` — VmRSS (KERNEL process memory, ≥ the V8 heap) vs
+ *     `HEAP_CEILING_MB`: a REFERENCE. Measured on the 6-day series
+ *     (2026-09-22): 6385 of 8941 samples read **> 100 %** of it — an everyday
+ *     state, never a breach. A number whose denominator can be exceeded by a
+ *     healthy process is not a ceiling, and a band that calls it `CRITICAL` is
+ *     measuring «superó una cifra declarada», not «está en peligro». */
+export const HEAP_BASIS = {
+  heapUsed:
+    'heapUsed (process.memoryUsage, read inside the daemon) vs v8 getHeapStatistics().heap_size_limit — a HARD WALL the process cannot exceed and live',
+  rssUpperBound:
+    'rss (VmRSS — an UPPER BOUND on the V8 heap, not the heap) vs HEAP_CEILING_MB — a REFERENCE the process can and does exceed (>100% is an everyday state, not a breach)'
+}
+
+/** ★ The level of a REFERENCE-basis reading: `CRITICAL` is NOT in this
+ * vocabulary, and that is a MEASURED decision, not a stylistic one.
+ *
+ * `CRITICAL` (norm §4.6) claims «this daemon can die with `FATAL ERROR: Reached
+ * heap limit`» — a claim about the HEAP. On the RSS basis the denominator is a
+ * reference and the numerator is an upper bound, so that claim is UNPROVEN BY
+ * CONSTRUCTION, and the norm's OWN measured table proves it (norm §4.7):
+ *   - pid 1191415 died at the heap FATAL with RSS 3261 MB (156 % of the
+ *     ceiling);
+ *   - pid 810027 lived **62,8 h** at RSS **3917 MB** (187 % of the ceiling).
+ * Two daemons, and the one that DIED had LESS RSS than the one that survived.
+ * RSS therefore does not determine the heap: `CRITICAL` on this basis would be
+ * a terminal claim the number cannot support — which is exactly why 144
+ * `CRITICAL` alerts in ~3 h moved nobody. `WARN` stays: it is a proportionate
+ * «INVESTIGATE» early warning (RSS ≥ heap, so it can warn early, never late).
+ * The wall's `CRITICAL` is reserved to the heap basis, where the denominator IS
+ * the hard wall. */
+export const ABOVE_REFERENCE_LEVEL = 'ABOVE-REFERENCE'
+
 const PSI_RESOURCES = ['cpu', 'io', 'memory']
+
+/** The level of a REFERENCE-basis reading, from its UNROUNDED ratio (%). PURE.
+ * The SAME two thresholds, minus the terminal claim:
+ *   NORMAL < 80 % · WARN >= 80 % (INVESTIGATE early — legitimate, RSS ≥ heap)
+ *   · ABOVE-REFERENCE >= 100 % (the reference was passed).
+ * `CRITICAL` never appears here — see `ABOVE_REFERENCE_LEVEL` for the measured
+ * reason (a daemon that survived 62,8 h at 187 % of the ceiling).
+ *
+ * ⚠️ THE INPUT IS `rawPct`, NEVER `usedPct`: the comparison must see the
+ * unrounded ratio (1676/2096 = 79,96 % is NORMAL, and the rounded «80.0» would
+ * move the threshold). This function takes the number, so the caller cannot pass
+ * the rounded one by accident — that mistake is a real one this lane made once. */
+export function referenceBandLevel(rawPct) {
+  if (!Number.isFinite(rawPct)) return null
+  return rawPct >= 100 ? ABOVE_REFERENCE_LEVEL : rawPct >= HEAP_BAND.warnPct ? 'WARN' : 'NORMAL'
+}
 
 /** The BAND: the level of a memory reading (MB) against a heap ceiling (MB).
  * PURE (exported for the hermetic test). `NORMAL` (silent) below `warnPct`,
  * `WARN` at/above `warnPct`, `CRITICAL` at/above `criticalPct`. Returns null for
- * a non-finite reading, so the caller OMITS the block instead of publishing a
- * null slot. */
+ * a non-finite reading, so the caller OMITS the block of a null slot.
+ *
+ * NOTE (lane `heap-band-truth`, 2026-09-22): this function is the pure RATIO
+ * rule and deliberately knows NOTHING about which figure it was handed — that
+ * decision (and the basis declaration that rides with it) belongs to
+ * `daemonPressure`, which is the only caller. Keeping the ratio rule pure is
+ * what lets the hermetic test pin the thresholds exactly. */
 export function heapBand(usedMb, ceilingMb = HEAP_CEILING_MB) {
   if (!Number.isFinite(usedMb) || !Number.isFinite(ceilingMb) || ceilingMb <= 0) return null
   // Compare the UNROUNDED ratio. Rounding first MOVES THE THRESHOLD: 1676/2096
@@ -168,7 +244,12 @@ export function heapBand(usedMb, ceilingMb = HEAP_CEILING_MB) {
   const rawPct = (usedMb / ceilingMb) * 100
   const usedPct = Number(rawPct.toFixed(1))
   const level = rawPct >= HEAP_BAND.criticalPct ? 'CRITICAL' : rawPct >= HEAP_BAND.warnPct ? 'WARN' : 'NORMAL'
-  return { usedMb, ceilingMb, usedPct, level }
+  // `rawPct` is returned so EVERY caller can decide on the unrounded ratio —
+  // the whole point of the paragraph above. A caller that re-derives a level
+  // from the ROUNDED `usedPct` silently reintroduces the moved threshold (this
+  // lane's own first draft did exactly that: 1676 MB read back as 80,0 and
+  // fired WARN). It is returned, never published as a row field.
+  return { usedMb, ceilingMb, rawPct, usedPct, level }
 }
 
 /** Read a small /proc file as UTF-8 text; null when absent/unreadable. */
@@ -317,10 +398,17 @@ export function resolveDaemonPid(profile, cachedPid) {
 
 /** The daemon's OWN V8 heap, as the DAEMON published it — relayed, never
  * invented. The daemon's health tick writes `<stateDir>/health-heartbeat.json`
- * FROM INSIDE the process (`packages/dshd-health/src/index.ts:611-613`, called
- * from the tick at `:7667`), which is the ONLY place the heap datum can be born:
- * `heapUsed`/`heapTotal` come from `process.memoryUsage()` and no external
- * reader (this sampler included) can obtain them from `/proc`.
+ * FROM INSIDE the process (`packages/dshd-health/src/index.ts`, the
+ * `writeHealthHeartbeatFile` call in `runHealthDaemonTick`, which is the tick the
+ * bundle runs in-process at `src/invoke.ts`), which is the ONLY place the heap
+ * datum can be born: `heapUsed`/`heapTotal` come from `process.memoryUsage()`
+ * and no external reader (this sampler included) can obtain them from `/proc`.
+ * ★ LANE `heap-band-truth` (2026-09-22): the daemon NOW publishes the block
+ * (`heapMb` = `{ used, total, limit }`, MB integers, via `readOwnHeapMb()`), so
+ * this relay stops being a hope and starts being the normal path. While it
+ * carried no `heapMb`, EVERY sample of the series fell back to
+ * `rss-upper-bound` (measured: 8910/8910) and the band compared a PROCESS
+ * number against a HEAP ceiling.
  *
  * Reads the `heapMb` block when the daemon publishes one — `{ used, total,
  * limit? }`, MB — and returns `null` for: file absent, file unparseable (the
@@ -381,12 +469,69 @@ export function parseProcStat(text) {
  * The datum's priority is honest about what is reachable FROM OUTSIDE the
  * daemon: its OWN heap when it published one (`heartbeat`, relayed from
  * `health-heartbeat.json`) — otherwise `rssKb`, which is an UPPER BOUND on the
- * heap (RSS >= heap) and can therefore only warn EARLY, never late. */
+ * heap (RSS >= heap) and can therefore only warn EARLY, never late.
+ *
+ * ★ LANE `heap-band-truth` (2026-09-22) — THE TWO FIXES THIS LANE CARRIES, both
+ * about the same lie of vocabulary:
+ *
+ * (1) BOTH FIGURES AND THEIR PROVENANCE ARE PUBLISHED, ALWAYS. The row now
+ * carries `basis` (which figure the level was derived from — criterion 3, the
+ * `basis:` the capacity gate already uses), `heapMb` (the daemon's own heap when
+ * it published one, else null) and `rssMb` (the upper bound, always, since we
+ * read /proc anyway). Before this, a reader holding `usedMb: 1850` could not
+ * tell whether that was a HEAP (a real datum, vs a hard wall) or an RSS (an
+ * upper bound, vs a reference) — the two were the same shape and the same name.
+ *
+ * (2) THE LEVEL SAYS WHAT IT MEASURES. `CRITICAL` on the reference basis claimed
+ * the hard wall was near, and that claim is FALSE BY CONSTRUCTION — measured two
+ * ways: 6385 of 8910 samples read >100 % of that reference (a healthy process
+ * exceeding a number it never had to respect), and pid 810027 SURVIVED 62,8 h at
+ * 187 % of the ceiling while pid 1191415 DIED at 156 % of it. So the reference
+ * basis uses `referenceBandLevel`, whose vocabulary has no `CRITICAL`: below
+ * 100 % it keeps `WARN` (a legitimate EARLY warning — RSS ≥ heap, so it can warn
+ * early and never late), at/above 100 % it reports `ABOVE-REFERENCE`. When the
+ * REAL datum exists the basis says `heapUsed` and `CRITICAL` means what it says:
+ * the hard wall is near.
+ *
+ * ⚠️ The unrounded-ratio threshold decision in `heapBand` is NOT touched (nor
+ * is its `CRITICAL`/`WARN` boundary): 1676/2096 = 79,96 % must stay NORMAL. This
+ * function only refuses to apply the WALL's vocabulary to a REFERENCE. */
 export function daemonPressure(rssKb, heartbeat = null) {
-  const usedMb = heartbeat !== null ? heartbeat.usedMb : typeof rssKb === 'number' ? rssKb / 1024 : null
+  const hasHeap = heartbeat !== null
+  const usedMb = hasHeap ? heartbeat.usedMb : typeof rssKb === 'number' ? rssKb / 1024 : null
   const ceilingMb = heartbeat?.limitMb ?? HEAP_CEILING_MB
   const band = heapBand(usedMb, ceilingMb)
-  return band === null ? null : { source: heartbeat !== null ? 'heapUsed' : 'rss-upper-bound', ...band }
+  if (band === null) return null
+  const rssMb = typeof rssKb === 'number' ? rssKb / 1024 : null
+  // The baseline (RSS/ceiling) band is ALWAYS computed when RSS exists — even
+  // when the real heap supplies the level — so a reader can compare the two
+  // figures in the SAME row instead of joining two sources.
+  const rssBand = rssMb === null ? null : heapBand(rssMb, HEAP_CEILING_MB)
+  const basis = hasHeap ? 'heapUsed' : 'rss-upper-bound'
+  // (2) the label repair: on the reference basis the level comes from
+  // `referenceBandLevel`, whose vocabulary has NO `CRITICAL` — the numerator is
+  // an upper bound and the denominator a reference, so the wall's terminal claim
+  // is unprovable (measured: pid 810027 survived 62,8 h at 187 % of the
+  // ceiling). The heap basis keeps `heapBand`'s CRITICAL/WARN verbatim: there
+  // the denominator IS the hard wall.
+  const level = hasHeap ? band.level : referenceBandLevel(band.rawPct)
+  return {
+    source: basis,
+    basis,
+    basisNote: hasHeap ? HEAP_BASIS.heapUsed : HEAP_BASIS.rssUpperBound,
+    usedMb: band.usedMb,
+    ceilingMb: band.ceilingMb,
+    usedPct: band.usedPct,
+    level,
+    // Both figures, side by side, each with its own denominator: the REAL one
+    // (null until the daemon publishes it) and the reference upper bound.
+    heapMb: hasHeap ? band.usedMb : null,
+    heapLimitMb: hasHeap ? band.ceilingMb : null,
+    rssMb,
+    rssCeilingMb: HEAP_CEILING_MB,
+    rssUsedPct: rssBand === null ? null : rssBand.usedPct,
+    rssLevel: rssBand === null ? null : referenceBandLevel(rssBand.rawPct)
+  }
 }
 
 /** The daemon block of a sample (block null when the PID cannot be resolved).
@@ -789,22 +934,31 @@ export function tick(opts, state) {
   appendFileSync(opts.out, `${JSON.stringify(sample)}\n`, 'utf8')
   const rot = rotateIfNeeded(opts.out, { maxLines: opts.maxLines, keepLines: opts.keepLines, maxBytes: opts.maxBytes })
   if (rot.rotated) logLine(opts, `rotated ${opts.out}: ${rot.lines} -> ${rot.keep} lines (caps ${opts.maxLines} lines / ${opts.maxBytes} bytes)`)
-  // The BAND's own log line (norm §4.6): WARN/CRITICAL are logged ONCE per
-  // crossing (state.bandLevel latches the last level), not once per tick — the
-  // log is AUXILIARY (§6) and a line every 45 s would only churn it. The
-  // AUTHORITATIVE record of the level is the sample's `daemon.pressure`.
+  // The BAND's own log line (norm §4.6): WARN/CRITICAL/ABOVE-REFERENCE are
+  // logged ONCE per crossing (state.bandLevel latches the last level), not once
+  // per tick — the log is AUXILIARY (§6) and a line every 45 s would only churn
+  // it. The AUTHORITATIVE record of the level is the sample's `daemon.pressure`.
+  //
+  // ★ LANE `heap-band-truth` (2026-09-22), criterion 3: the line DECLARES WHICH
+  // figure it is publishing (`basis=`) and never lets the reference case borrow
+  // the hard wall's words. `ABOVE-REFERENCE` is not a death sentence: it says
+  // the RSS upper bound passed a REFERENCE number, and it names the real datum's
+  // absence as the reason (the actionable part: the daemon has not published its
+  // heap — that is the thing to fix, not the daemon).
   const level = sample.daemon?.pressure?.level ?? null
   if (level !== null && level !== state.bandLevel) {
     if (level !== 'NORMAL') {
       const p = sample.daemon.pressure
+      const onWall = p.basis === 'heapUsed'
       logLine(
         opts,
-        `HEAP ${level} (${p.source}): ${p.usedMb.toFixed(0)} MB of a ${p.ceilingMb.toFixed(0)} MB heap ceiling = ${p.usedPct}% ` +
-          `(band: WARN >= ${HEAP_BAND.warnPct}%, CRITICAL >= ${HEAP_BAND.criticalPct}% — norm §4.6: INVESTIGATE, this daemon can die with ` +
-          `'FATAL ERROR: Reached heap limit')`,
+        `HEAP ${level} (basis=${p.basis}): ${p.usedMb.toFixed(0)} MB of ${p.ceilingMb.toFixed(0)} MB = ${p.usedPct}% ` +
+          `[${onWall ? 'HEAP vs the HARD WALL (V8 heap_size_limit)' : `RSS upper bound vs the REFERENCE ceiling (${HEAP_CEILING_MB} MB) — NOT a wall`}] ` +
+          `(band: WARN >= ${HEAP_BAND.warnPct}%, CRITICAL >= ${HEAP_BAND.criticalPct}%` +
+          `${onWall ? ` — norm §4.6: INVESTIGATE, this daemon can die with 'FATAL ERROR: Reached heap limit'` : ` — the wall's CRITICAL vocabulary is NOT applied to a reference; fix: the daemon must publish heapMb so the real datum can be banded`})`,
       )
     } else if (state.bandLevel !== undefined && state.bandLevel !== null) {
-      logLine(opts, `HEAP NORMAL again: ${sample.daemon.pressure.usedPct}% of the ceiling`)
+      logLine(opts, `HEAP NORMAL again: ${sample.daemon.pressure.usedPct}% (basis=${sample.daemon.pressure.basis})`)
     }
     state.bandLevel = level
   }
@@ -816,14 +970,26 @@ export function tick(opts, state) {
   return sample
 }
 
-/** Compact one-line status render (used by the loop log). */
+/** Compact one-line status render (used by the loop log). ★ LANE
+ * `heap-band-truth` (2026-09-22), criterion 3: the render DECLARES the basis it
+ * is publishing, so a reader of the log never has to guess whether `77.2%` was
+ * a HEAP against a hard wall or an RSS upper bound against a reference. When
+ * the real datum is absent the line says `basis=rss-upper-bound` AND carries the
+ * reference figure side by side (`rss=…`), so the two numbers are never
+ * conflated in the human channel either. */
 export function renderStatus(sample, ticks) {
   const p = sample.daemon?.pressure
+  const heap =
+    p === undefined
+      ? 'n/a'
+      : p.basis === 'heapUsed'
+        ? `${p.level} ${p.usedPct}% of ${p.ceilingMb} MB heap (basis=heapUsed, vs the HARD WALL)`
+        : `${p.level} ${p.usedPct}% of ${p.ceilingMb} MB (basis=rss-upper-bound: RSS upper bound vs a REFERENCE, not the heap; rss=${p.rssMb === null ? 'n/a' : `${p.rssMb.toFixed(0)}MB`})`
   return (
     `tick ${ticks} ts=${sample.iso} load1=${sample.load1} ` +
     `cpu.some60=${sample.psi.cpu?.some?.avg60 ?? 'n/a'} io.some60=${sample.psi.io?.some?.avg60 ?? 'n/a'} ` +
     `mem.some60=${sample.psi.memory?.some?.avg60 ?? 'n/a'} rssKb=${sample.daemon?.rssKb ?? 'n/a'} ` +
-    `heap=${p === undefined ? 'n/a' : `${p.level} ${p.usedPct}%(${p.source})`} tickMs=${sample.tickMs}`
+    `heap=${heap} tickMs=${sample.tickMs}`
   )
 }
 
