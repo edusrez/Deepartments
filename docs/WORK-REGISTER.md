@@ -540,6 +540,104 @@
 > **fb-332** (clase/handle stranded + apply parcial) · **fb-337** (detección) ·
 > **fb-42** (familia; pendiente de anotar la subclase C1) · **fb-167** (SPOF del
 > host amplificado).
+> **ENTRADA 2026-09-22 — EL DÍA DE LOS COMMITS, EL DEPLOY DE LAS 17:48 Y LO QUE
+> QUEDÓ EN VIGOR (IPD `builder-468`, lane `work-register-sync`, docs-only; encargo
+> del HOST, `m-1261` 19:45Z)** — **por qué existe esta entrada**: al abrir la lane,
+> este registro tenía **mtime 2026-09-21 19:12:11.988Z (116.988 B)** y **0 menciones
+> de `2026-09-22`, 0 de `drainedAt`, 0 de `doc-drift`** (medido con `grep -c` antes de
+> escribir: 0/0/0) ⇒ la semilla de un relevo era un registro de ayer. **VENTANA DE
+> MEDICIÓN de esta entrada: 2026-09-22T20:13Z–20:23Z**; cada cifra con su fuente y su
+> instante. **ÁRBOLES DECLARADOS**: `/home/esuarez/projects/deepartments` (HEAD
+> `d2da32d`, 20:07:59Z, al cerrar la ventana), `/home/esuarez/projects/dsh-key-pooler`
+> (HEAD `1095e4a`), `/home/esuarez/projects/dsh-smart-restart` (HEAD `dbceb31`),
+> stateDir **`/.deepartments`**, DEV home **`/opt/dsh/.dsh-dev`**, workspace de la
+> lane **`/root/.deepartments/departments/internal-programming`** (⚠️ DOS raíces de
+> stateDir en juego: `/.deepartments` es el stateDir del daemon y
+> `/root/.deepartments` el árbol del departamento — la trampa está medida, `m-1278`).
+> **LOS 6 COMMITS DEL ENCARGO, verificados uno a uno con `git log`/`git show`**:
+> `846cf40` **19:25:19** `deepartments` — el guard de pairing de pi-ai queda
+> REGISTRADO en el manifiesto (`patches/deepartments-maintenance.tsv`: +1 fila
+> `pi-ai-tool-pairing-guard` → `/opt/dsh/trees/departments-dev-0.1.5-rc.2/…/@earendil-works/pi-ai`
+> `dist/api/openai-completions.js`, más el patch de 159 líneas) ⇒ **versionado:
+> sobrevive a un `dsh upgrade`** · `d4a9358` **19:16:55** `deepartments` — GATE de
+> capacidad: el rótulo nombra la causa con **`missing:`/`basis:`/`remedy:`**
+> (el `basis:` es `SERVING_PATH_BASIS` = «Go keys (usable = not invalid, not blocked,
+> past cooldown) + declared channels (enabled && !halted && past cooldown)»,
+> `packages/dshd-health/src/index.ts:5862`; presente también en el bundle compilado,
+> `lib/index.js:4101`), **el predicado NO se toca** y el consumo preexistente
+> (`delivery.ts:/pool:|at quota|dispatch delayed/i`) se conserva + **el lector
+> `officialBlocked` (A)**: el campo queda DECLARADO en el contrato del lector
+> (`src/index.ts:5261`) y EXCLUIDO por el predicado único `poolerServingChannels`
+> (`:5358`, con `:5287` en la cadena) · `804e87d` **19:17:06** `deepartments` — el
+> literal PEAK del test sigue el rótulo nuevo (`test/jobs.test.js`, +4/-1; el
+> anti-storm O3-b casa por la familia `[deepartments] pool: …`, que se conserva) ·
+> `dbceb31` **19:11:47** **`dsh-smart-restart`** — el sello de `fb-2418`: «the
+> outgoing session SEALS instead of blocking — the resume notice names the seat»
+> (6 ficheros, +757/-9) · `1095e4a` **19:11:47** **`dsh-key-pooler`** — el comentario
+> de `officialBlocked` nombra a su consumidor (`src/proxy.ts:2203-2210`; SOLO
+> comentario: +6/-0) · `70e779a` **18:08:34** `deepartments` — el control de
+> `POOLER_STATE_FILE` se ancla en su DEFINICIÓN (`dshd-health/src/index.ts:4795`), no
+> en el import de `tools.ts` (2 pass/1 fail → 3/0).
+> **Y 3 COMMITS MÁS en `deepartments` que el encargo NO listaba** (llegaron después de
+> escribirlo; medidos a las 20:23Z): `b4d3701` **19:52:05** (el fallback de rotación
+> del host deja traza durable y greppable — `appendRegistryAnomalyRow` con la
+> taxonomía de `MUTE_HOST_SENDER`), `dccbb1e` **20:05:34** (la denegación de
+> `dept_exec` declara la forma que SÍ admite: `-p` UNA vez con valor LISTA por comas;
+> el predicado y la whitelist, intactos) y `d2da32d` **20:07:59** (el inspector del QD
+> caza PATRONES de comportamiento por encima de incidentes; petición del owner).
+> ⇒ **hoy: `deepartments` 9 commits · `dsh-key-pooler` 3 · `dsh-smart-restart` 3**
+> (`git log --since="2026-09-22 00:00"`, medido; HEAD de cada repo declarado arriba).
+> **EL DEPLOY DE LAS 17:48 — verificado en journald, no por relato**: 17:48:23
+> `[smart-restart] smart_restart: wait: registry already IDLE (0 other sessions
+> mid-turn)` · 17:48:27 `Stopping`→`Stopped`→`Started` · 17:48:32 el pooler arranca
+> con `channel "commandcode" (enabled) -> https://api.commandcode.ai/provider/v1 ·
+> 2 key(s) [cc-2, cc-4] · peer YES` · 17:48:39 `[deepartments] online` ·
+> 17:48:45→17:49:03 avisos de resume a las 7 sesiones interrumpidas. **Fila de
+> `/.deepartments/restart-registry.jsonl` para ese arranque**: `77d1c8bb` **17:49:39.610Z**
+> `cause "deploy"` (precedida por `f0ada726` 17:46:18Z `recovery pre-tick crash
+> (streak 14)` y seguida por `e9b80d00` 19:07:49Z `unknown`).
+> **Y ANTES del deploy hubo bucle duro — hecho medido, NO causalidad adjudicada**:
+> **15 `Started` / 14 `Main process exited`** en 17:31:00→17:45:30, con **56 líneas
+> `atomic-write: timed out waiting for the writer lock at …/.credentials.yaml.lock`**
+> (todas entre 17:32:39 y 17:44:55, o sea 0 fuera de esa ventana en todo el día) —
+> es el hecho que sostiene la lane del lock (`explore-deep-142`, medición, no arreglo).
+> **QUÉ QUEDÓ EN VIGOR — cada punto con su evidencia**: **W1** (la API oficial no
+> puede entrar al pool) ⇒ `/__keypool/status` leído **20:13:29.524Z**: canal
+> `commandcode` `enabled:true` · `officialBlocked:false` · `peer:true` · `ready:true` ·
+> `keys:2`; `eligibleKeys 0` · `totalKeys 0`; `lastRotation` = `oc-15` → **ninguna**,
+> `monthly-100 deleted`, reset **2026-10-03T12:20:28.154Z** · **W2** (el 400 de cliente
+> deja de cargar un canal sano) ⇒ las dos agujas literales están en
+> `dsh-key-pooler/lib/config.js` (`DEFAULT_REQUEST_REJECTED_VOCAB`), y en journald
+> **112 líneas `answered 400 (request-rejected)` hasta 19:05:46Z y 0 desde el arranque
+> de 19:06:38Z** · **W3** (el detector) ⇒ las dos claves de dedupe por modo
+> `pooler-capacity:official-api:declared` y `:legacy` presentes en
+> `packages/dshd-health/lib/index.js` (**mtime 18:50:30.814Z**), y ese paquete es el
+> MISMO que ejecuta el daemon (symlink `profiles/deepartments-dev/node_modules/dshd-health`
+> → `packages/dshd-health`) · **W9** (un `dept_feedback_update` sin campo de escritura
+> se rechaza) ⇒ `no update field applied` en `src/tools.ts:6152` y en el lib `:5363`,
+> con el ancla de runtime `Object.keys(input).length === 0` (`src:6281` / `lib:5501`) ·
+> **guard de pairing VIVO** ⇒ líneas `dsh-guard-toolpair`: **0 antes de 19:06:34 y 314
+> después de 19:06:38** (primera de todas, 19:07:14), y la firma
+> `Messages with role 'tool' must be a response…` **114 en el día con la ÚLTIMA a las
+> 19:05:46 y 0 desde 19:06:38** · **spill 7d** ⇒ `/etc/cron.d/dsh-tmp-hygiene`
+> (fichero leído): una sola regla,
+> `30 4 * * * root find /tmp -maxdepth 1 -type d -name 'dsh-spill-*' -mtime +7 -exec rm -rf {} +`,
+> y su propia cabecera declara que DSH no tiene retención propia y que el cron es
+> CONTENCIÓN, no arreglo. ⚠️ **NO medí recuento ni bytes de `/tmp/dsh-spill-*`**
+> (`dept_exec` deniega `/tmp` como cwd/ruta y `glob` no enumera directorios): **las
+> cifras del cron (155 dirs, 2,0G, leídas 09-22) se citan como DECLARADAS por ese
+> fichero, no como medición mía**; lo mide el job `server-hygiene`. Disco raíz, leído
+> por mí **20:13:29Z: 84% (30G/38G)**.
+> **LO QUE EL DEPLOY *NO* CERRÓ (para que nadie lo dé por hecho)**: el campo
+> `drainedAt` tiene **0 ocurrencias** en el repo (grep sobre `*.ts`/`*.js`/`*.md`
+> fuera de `node_modules`) y el volcado del buzón sigue ocurriendo **al cerrar el
+> TURNO, no al cerrar el PASO** (medido por el host en su propio transcript:
+> `agent/inbox/spliced` con `removed=1` por mensaje; `m-1237`/`m-1248`) ⇒ la lane del
+> drenado (`builder-470`) es la que lo cierra. Y `batchEligibleDeclared` sigue con
+> **0 filas en `/.deepartments/gate-decisions.jsonl`** — que es lo CORRECTO por
+> diseño (es log-only; su casa es la línea del log `FB467_INSTRUMENTATION_STAMP`,
+> que a su vez tiene **0 ocurrencias en el journal del día**): quien lo busque en el
+> ledger concluirá «el fix no cargó» teniéndolo cargado (§8.4).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -552,6 +650,81 @@
 > (settlements / push+verify del host — clase settlement-wait fb-167, convención
 > ya adoptada en el registro). El watchdog work-register-idle v2 (fb-184) lee
 > este campo para notificar «next-actor-idle» al actor nombrado.
+
+### ⏱️ COLA VIVA DEL IPD al 2026-09-22T20:23Z — esto es lo que un relevo necesita leer
+PRIMERO (lo de arriba en §1 es histórico del 09-06→09-10 y NO es la cola de hoy)
+
+- **EN VUELO — las 5 del encargo del host + las nacidas después** (estado de `dept_who`
+  leído **20:23Z**, y `ts` del envío en `/.deepartments/messages.jsonl`; la misión en
+  UNA línea, con el id del worker):
+  - `builder-465` (enviado 19:19:15.487Z) — **D40**: el docstring de `accountedWaitMs`
+  -  la cifra BRUTA del presupuesto de espera + el aserto con TOLERANCIA, y la etiqueta
+    de **«downtime» que publica un uptime** (`dsh-smart-restart/src/boot.ts:41-43`:
+    `downtimeMs = nowMs − prevBoot` = el UPTIME del ciclo anterior).
+  - `builder-466` (19:24:49.673Z) — **Lane A**: por qué NO corre la rotación del host +
+    el `ctx.logger` del bundle, que es **MUDO** (medido: **20 líneas `[deepartments]`
+    en 24 h**, TODAS de arranque — 17 `online` + 3 `channel mounted`, p. ej. **2** en
+    las 1 h 18 min del pid 1858100 — contra **9.654** del pooler en el mismo periodo).
+  - `explore-deep-142` (19:28:10.742Z) — el **lock de `atomic-write`/credentials**:
+    MEDICIÓN, no arreglo.
+  - `builder-467` (19:31:43.024Z) — **`heap-band-truth`** (hoy `idle` en `dept_who`; es
+    la única cuya ausencia no deja arreglo a medias y el host la re-despacha al otro
+    lado del relevo).
+  - `explore-deep-143` (19:38:10.365Z) — consumidores de `next-turn`.
+  - **`builder-470`** (19:54:45.096Z) — **LA LANE DEL DRENADO** (`drain-at-step-end` +
+    `drainedAt`) **con la VÍA (A) DENTRO**: enrutar, `claim` intacto.
+  - **`builder-472`** (20:03:51.687Z) — el lock huérfano del canary, 2 defectos en
+    `dsh-smart-restart`.
+  - **`builder-474`** (20:10:54.723Z) — `rotation-seam-migration`, la CURA del seam de
+    rotación (código NUESTRO, no parche de harness).
+  - **`explore-deep-146`** (20:13:11.688Z) — `token-usage-truth` (medición).
+  - **`explore-deep-147`** (20:14:41.741Z) — `report-read-receipt` (medición).
+  - **Y `builder-469`** (19:49:10.325Z) — `fb-1981`, las dos ediciones de TEXTO; **ya
+    commiteado** como `dccbb1e` 20:05:34Z.
+  - ⚠️ **DECLARADO**: los 5 del encargo del host están vivos **en el instante 20:23Z**;
+    `builder-466`, `explore-deep-142`, `explore-deep-143` y `builder-469` tienen fila en
+    `/.deepartments/posts-retired-archive.jsonl` (19:53:45.361Z, 19:53:47.111Z,
+    19:57:38.647Z, 20:03:48.331Z). **Esas cuatro filas de retirada NO las resuelvo por
+    mi cuenta**: un post retirado con handle vivo es la clase `fb-115`/`fb-301` ya
+    conocida ⇒ **lo señalo en vez de adjudicarlo** (el head lo verifica en la línea).
+- **COLA APROBADA, EN ORDEN** (host `m-1270` 19:46:35.107Z + reordenación `m-1237`
+  19:34:04.760Z + corrección `m-1276` 19:48:13.235Z): **`drain-at-step-end` +
+  `drainedAt` [YA DESPACHADA, `builder-470`, con (A) dentro] → Lane B** (diferir el
+  `append` del journal al `agent/pre-step` del wake — **va DESPUÉS de Lane A porque es
+  el MISMO fichero**; el `append` de hoy es `dshd-core/src/lifecycle.ts:750` en la
+  numeración PRE-`b4d3701`, verificado con `git show b4d3701~1:…`) → **W5** → **TRES
+  PUERTAS** → **las cinco clases** → **`heap-band-truth`** → **la política del tick** →
+  **W13/W14** → **nudge + CLI**.
+- **LOS TRES ENCARGOS DEL QD SIN DESPACHAR** (host `m-1270` §2e): **`fb-2427`** (3
+  piezas: RUTA + **ADAPTADOR DE FORMA v7→v3** + CIFRA — **NO es one-liner**; ⚠️ lo he
+  medido: el monolito `session_projcache.json` es **`version 3`** con `tables.sessions[sid].rows`
+  y la vía viva es **por registro, `version 7`, con `record.rows` y SIN `tables`** —
+  `/opt/dsh/.dsh-dev/storages/session_projcache/sessions/<sid>.json`, 712 ficheros, con
+  las DOS sesiones del head vivo presentes; el fallo de RUTA solo sigue devolviendo
+  `undefined` ⇒ el adaptador es necesario, confirmado en la línea) · **la laguna del
+  ledger de sellos** — **medición propia, 2026-09-22T20:13:29Z**:
+  `/opt/dsh/.dsh-dev/storages/session_projcache.json.seals.jsonl` tiene **125 filas**,
+  **0 con `datumTsIso` del 09-22**, **mtime 2026-09-21 15:26:53.505039243Z** y su
+  ÚLTIMA fila es **2026-09-21T15:26:53.433Z** ⇒ **28,78 h mudo** en el instante de
+  leer, con rotaciones del QH/IPH/RD ocurridas dentro de la ventana ⇒ es un hecho
+  medido, **NO adjudicado como «el mismo espejo congelado»** (por eso es medición
+  separada y no se pliega) · **`fb-2439`** (poblar el `ts` de `reasonProvenance`):
+  **medido por mí en `/.deepartments/tool-intents.jsonl`** — de **4** intents de
+  `dept_head_rotate` en el store, **3 llevan `reasonProvenance` y los 3 llevan SOLO
+  `sessionId`**; **0 llevan `ts`**; el esquema SÍ declara `ts`
+  (`dshd-orchestration/src/tools.ts:7449`, opcional). ⚠️ **CIFRA DECLARADA CON SU
+  LÍMITE**: `tool-intents.jsonl` es APPEND-ONLY y el daemon PURGA, así que el fichero
+  VIVO ya no es la población del día — el `4/3/0` es lo que hay HOY en el store vivo,
+  leído en la ventana de esta entrada (la cifra del host —«2 de 3 rotaciones»— la dejó
+  él y no la contradigo: la mía cubre otra población). **Y el campo es un emisor
+  PARCIAL: a veces viaja el sujeto y NUNCA el instante.**
+- **PARA EL REGISTRO, un hecho que cambia la lectura de «terminal»** (host `m-1101`,
+  17:00Z, y QD `m-1179`): `delivered` se escribe o NO **según el estado del destinatario
+  en el instante** (`dshd-orchestration/src/delivery.ts:1974` → `return 'prepared'` si
+  estaba `running` + batch-eligible; `:2025` `delivered`; `:3030` `batchEligible:false`
+  en la costura de recuperación) ⇒ **la fila de entrega NO es determinista** y esa es la
+  materia de W5, con dos instancias duras (`m-892`/`m-980` `terminal` SIN `delivered`
+  para un par que en `m-799` SÍ entregó).
 
 - **fb-234 (canary-vs-crash + writer restart-reason.json + incidente ALTO phantom)** — CIERRE FORMAL (absorción register-sync 09-09, IPD builder-208; no entró por la cola del día; cadena completa: `07b4f59` sidecar → `5a310ad` writer (builder-205/11c53eec) → `71d05b5` A2+A1 perimetría (builder-206/9645cbfe) → `8fb403f` deepartments GAP-2 bootId-coherence + `c20c7dd` dsh-smart-restart GAP-2 deriveLiveStateDirOverrides (builder-207)) · validación EN VIVO post-GAP-2 (canary 06:44:12Z): boot real 59c8891c recoveryCause 'canary' crashStreak 0 · marker restart-reason AUSENTE (consumido por el BOOT REAL) · fila restart-registry del sucesor = 'canary' con bootId IDÉNTICO al sidecar (guard dshd-health:6810-6811) · efímero canary 0 huellas (0 filas config → /.deepartments — acceptance 1 por construcción) · dshmarket 1.45.1 activo (doble deber) · acceptance (1)-(4) CERRADAS (reportes del día 11c53eec/d11779d1/9645cbfe/69782011/4fc62dce/34c5347d + traces 806784e2/f51a8760) · NOTA DE ATRIBUCIÓN: streak nocturna 20→21→22 (09-08T19:00Z→09-09T00:10Z) + filas 'unknown' @00:33Z/05:53Z = PRE-fix (boots marker-less) · GAP-2 re-atribuyó filas del 09-08 (d8ac0f23/549a405c → 'smart_restart canary') · «CRITICAL streak-19» digest 09-08 = PRE-fix → SUPERSEDED — next: host (commit de cierre) CUBIERTO (register-sync `6397fb5` commiteado por el host 09-09 + cadena VALLE del día `461e3fa`/`a60cb4d`/`c96b40a`/`05963b4`) / QD (verificación streak opcional) — CERRADO-absorbido (register-sync 09-09, builder-212)
 - **OLA POST-PREP (despacho host m-2077, 09-06 — DAG seriado del IPH, la ola
@@ -1019,7 +1192,10 @@ fold-ins 09-04 (7d5bb70/91bc5a8/0e2e735/3386f7b/c19cde4) · pool-grading M1
 fb-167 watchdog · fb-132 gate/wake-seam settle · P-LATCH fb-154/155/157).
 Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
-## 3. PENDIENTE-OWNER (decisiones — estado al 09-09)
+## 3. PENDIENTE-OWNER (decisiones — ⚠️ ESTADO HISTÓRICO: **los ítems de abajo son el
+estado al 09-09**; NO es la vigencia de hoy — la vigencia VIVA de las decisiones del
+owner al **2026-09-22T20:23Z** está al final de esta sección, sub-bloque «ESTADO VIVO
+2026-09-22», y §4 lleva su propio encabezado con la misma marca)
 
 - **GUI modo monitoreo (owner 09-01) — CERRADO (2026-09-04)**: decisión owner
   «SÍ (cerrada — NO reabrir)» registrada en el job doc (docs/departments/
@@ -1166,7 +1342,43 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   0 no-planificados; cierre 09-06) — el §7 NO necesita más decisiones; el
   crashStreak 9 = artefacto clase 402 (salto 5→9 señalado).
 
-## 4. CAPACIDAD (al 09-08)
+### ⚠️ ESTADO VIVO 2026-09-22 (lectura **2026-09-22T20:23Z**) — esta sub-sección SÍ es
+vigencia; todo lo de arriba en §3 es histórico al 09-09
+
+- **RECIÉN CERRADAS POR EL OWNER (hoy, 09-22)** — NO son pendientes: **JEV** ⇒ **NO se
+  adopta** (veredicto del host `m-869` 16:21:13.914Z, tras la evaluación del RD de
+  `m-796`; 3 de 4 usos inviables por límite físico del modelo o duplicación; lo ÚNICO
+  abierto = el uso 2 «valoración de logs» como preFiltro, **aparcado a la palabra del
+  owner** y con decisión de datos del host: **jamás con logs reales**, corpus
+  redactado/sintético y coste $0; handoff al head nuevo del RD en `m-1087`
+  18:02:18.018Z) · **la decisión A/B del drenado** ⇒ **VÍA (A): ENRUTAR** (host
+  `m-1276` **19:48:13.235Z**, que CORRIGE su propio `m-1270` de 19:46:35.107Z:
+  «la decisión A/B YA ESTÁ TOMADA, no preguntes por ella»; el owner la había dicho
+  textual —«nos drena todo el buzón después de cada step»— y el QH confirmó que el
+  `1` del `claim` es **CONTRATO DOCUMENTADO** del README del driver ⇒ `claim` NO se
+  toca; la vía es enrutar; el owner CONSERVA el veto y el host lo comunicaría en el
+  mismo turno). **Medición mía de la entrega de esa corrección** (porque hoy se
+  falsificó una entrega): `deliveries.jsonl` tiene para `m-1276` `terminal`
+  **19:48:14.270Z** y `delivered` **19:48:42.716Z** ⇒ llegó, y arrancó `builder-468`
+  el mismo segundo (19:48:12.955Z de envío del brief). **Y el veto NO llegó** desde
+  entonces hasta las 20:23Z (0 mensajes del host en ese hueco con la palabra veto).
+- **SIGUEN PENDIENTES DEL OWNER (3, y son suyas, no de la cola técnica)**: **volumen
+  de despacho masivo** (`m-1225`, 19:31:01.735Z) · **idioma del registro**
+  `/root/DECISIONES-HOST.md` (ídem; ⚠️ `dept_exec` me lo deniega como ruta — está
+  FUERA de los roots de la lane, así que su contenido NO lo verifiqué) · **y el piloto
+  de JEV uso 2** si algún día lo quiere, dentro de lo ya decidido. **El host declaró
+  explícitamente que no había despachado nada de eso sin su palabra** (`m-1225` §4).
+- **UN ENCARGO DEL OWNER EN VUELO, nacido hoy de su mano** (`m-1322`/`m-1345`/`m-1355`/
+  `m-1359`, entre 20:03 y 20:14Z): eficiencia de sesiones por tokens, **asegurar la
+  lectura de informes** («hay que asegurar que los informes se leen»), y el barrido
+  del servidor. **No lo inventes de memoria: está en las lanes vivas de §1.**
+- **CONTEXTO DE ESTA SUB-SECCIÓN**: la escribo con los mensajes del host leídos EN EL
+  LEDGER (`/.deepartments/messages.jsonl`) con su `ts`, no de resumen. Si algo caduca,
+  se MARCA con su fecha (política de cita del RD, `m-1087` §3) — no se borra.
+
+## 4. CAPACIDAD (⚠️ encabezado HISTÓRICO: el cuerpo de abajo es **al 09-08**; la
+vigencia viva al 2026-09-22T20:13:29.524Z va en el sub-bloque «CAPACIDAD VIVA» al
+final de esta sección)
 
 - **Pool LIVE 09-08 (m-3282 + ROADMAP 09-08; stateFile POST-revive)**:
   **4 KEYS ACTIVAS — totalKeys 4 · eligibleKeys 4** (oc-6 · oc-13 · oc-14 ·
@@ -1213,6 +1425,31 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   pooler-capacity (hardening 66399ad + M1 gradings 47a8f34) + fb-167
   settlement-wait (3db2617) + fb-184 v2 (LPC) + qi-silence (M1.1) —
   auto-observación completa del runtime.
+
+### 🔴 CAPACIDAD VIVA (lectura **2026-09-22T20:13:29.524Z**, fuente
+`GET http://127.0.0.1:4097/__keypool/status`, HTTP 200) — **el cuerpo de arriba NO
+describe esto: describe el 09-08**
+
+- **`eligibleKeys 0` · `totalKeys 0` · `halted:false`** y **`keys:[]`** en la
+  proyección de uso (`maxWeeklyPct:null`). ⇒ **hoy NO hay NI UNA key Go usable**: todas
+  las conocidas están tombstoned por `monthly-100` (`lastRotation`: `oc-15` →
+  **ninguna**, 2026-09-17T22:00:53.290Z, reset **2026-10-03T12:20:28.154Z**).
+  **El tráfico lo sirve la PATA PEER**: canal `commandcode` `enabled:true` ·
+  `peer:true` · `ready:true` · `keys:2` (`cc-2`, `cc-4`) · `usageSource:"none"` ·
+  contador de la pata **`{requests:1689, slots:1689, answered:1683}`** (ese contador
+  SÍ es medición del instante). **`officialBlocked:false`** en el canal (los 0
+  rechazados = caso sano).
+- **Y el veredicto de agotamiento tiene DOS caras que no coinciden**: el arranque de
+  17:48:32 dijo literalmente `enabled but every resolved key is tombstoned
+  (monthly-100); the proxy will answer 503 for every request` y el de 19:06:44 repitió
+  ese par de líneas **junto con** la línea del canal sano (2 keys, peer YES). La
+  conciliación medida: el aviso es sobre las claves GO (`0 key(s)` en el `listening`),
+  no sobre la pata peer que sirve ⇒ **el texto «503 for every request» es MÁS AMPLIO
+  que el hecho**; queda anotado, **sin adjudicarle el defecto**.
+- **Activos que NO caducan en este bloque**: `HALT` (m-2333) sigue siendo la ÚNICA
+  condición de pausa total y su umbral es de clave; el `reserve` es `null` y
+  `billingDown` es `null` en el instante leído. Las cifras del 09-08 de arriba
+  (46/74/74%, oc-15 41.8%) quedan **SUPERSEDED y marcadas**, no borradas.
 
 ## 5. BACKLOG
 
