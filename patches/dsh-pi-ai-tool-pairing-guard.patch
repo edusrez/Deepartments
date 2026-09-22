@@ -1,0 +1,159 @@
+# === dsh-deepartments patch: pi-ai openai-completions tool-pairing guard (stages 1+2) ===
+#
+# WHAT THIS FIXES
+#   Every turn of an affected session died at step 1 with
+#   400 "Messages with role 'tool' must be a response to a preceding message with
+#   'tool_calls'" (upstream = Vercel AI Gateway -> deepseek/deepseek-v4.1-flash,
+#   reached through the local key-pooler at 127.0.0.1:4097).
+#   Two wire shapes are rejected, and BOTH are produced above this layer:
+#     (1) ORPHAN — a `tool` message whose id no preceding assistant issued.
+#     (2) INTERLEAVED/DUPLICATE — a `tool` message that does not follow its issuing
+#         assistant consecutively, or that answers an already-answered id.
+#   LIVE EVIDENCE (host session 15f80d86, 2026-09-22): shape (2). The mailbox/journal
+#   delivery of a `dept_sleep` close lands a user message BETWEEN the assistant's
+#   tool_calls (seq 7051) and its tool result (seq 7054):
+#       assistant(tool_call dept_sleep) -> user(memo) -> user(tool-result)
+#   transformMessages' second pass then synthesizes a "No result provided" answer
+#   BEFORE that user message, so the real result is emitted afterwards as a
+#   duplicate, non-consecutive `tool` message. Because the poisoned pair stays in
+#   the model-visible surface, EVERY later turn fails at step 1 until a compaction
+#   shadows it (observed windows t64-t127 and t268-t289).
+#
+# WHAT IT DOES
+#   Mirrors the org's proven deepseek-serializer defence
+#   (dsh-llm-deepseek-orphan-sweep.patch + dsh-llm-deepseek-toolcall-strip.patch)
+#   at the only point that still knows what the request actually carries: the wire
+#   list built by convertMessages. A post-pass (__dshGuardToolPairing):
+#     - keeps clean transcripts BYTE-IDENTICAL (verified: clean case unchanged);
+#     - drops a `tool` message that is orphan, interleaved or duplicate;
+#     - strips `tool_calls` (text/reasoning kept) from an assistant whose calls have
+#       no complete CONSECUTIVE response, so it cannot trip the opposite 400
+#       ("insufficient tool messages following tool_calls");
+#     - reports findings on stderr ([dsh-guard-toolpair] ... journald) and appends
+#       them to /tmp/dsh-wire-guard/guard.jsonl. Never throws.
+#
+# TARGET FILE (0.1.5-rc.2 tree)
+#   <tree>/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js
+#
+# FINGERPRINTS (md5)
+#   6516b02e157bf51549de615a9f9854a0  pristine (pre-patch backup)
+#   3414299222fd13caeb1c8cb38c251044  patched
+#   Backup: /opt/dsh/dev-fix-20260917/openai-completions.js.bak-20260922-pre-toolpair-guard
+#   Offline verification: /tmp/guard-test.mjs (5/5 contract cases, clean case byte-identical)
+#
+# WHY NOT UPSTREAM
+#   Owner decision (same as the deepseek stages 1+2): folded as a repo patch, lives
+#   in the installed tree and is LOST on every dsh upgrade -> re-apply after upgrades.
+#
+# NOTE — this guard is a WIRE-VALIDITY backstop, not the root-cause fix. The producer
+# bug is the mailbox/journal delivery interleaving a pending tool result on the
+# dept_sleep close path; that belongs in the deepartments plugin (deliver mailbox
+# items only at turn boundaries, or after every pending tool result is recorded).
+--- a/dist/api/openai-completions.js	2026-09-15 18:46:54.470053574 +0000
++++ b/dist/api/openai-completions.js	2026-09-22 19:05:57.597375206 +0000
+@@ -77,6 +77,95 @@
+ function isToolCallBlock(block) {
+     return block.type === "toolCall";
+ }
++/* LOCAL PATCH (deepartments 2026-09-22) — wire tool-pairing guard (stages 1+2).
++   The upstream strict validator rejects two shapes with
++   400 "Messages with role 'tool' must be a response to a preceding message with
++   'tool_calls'" (or "insufficient tool messages following tool_calls"), and each
++   rejection kills a whole turn:
++     (1) ORPHAN  — a `tool` message whose id no preceding assistant issued;
++     (2) INTERLEAVED/DUPLICATE — a `tool` message that does not follow its issuing
++         assistant CONSECUTIVELY, or that answers an id already answered.
++   Both are produced ABOVE this layer. The live case (host session 15f80d86, t268+
++   onward, every turn failing at step 1) is shape (2): the mailbox/journal delivery
++   of a `dept_sleep` close lands a user message BETWEEN the assistant's tool_calls
++   and its tool result, and transformMessages' second pass then synthesizes a
++   "No result provided" answer before that user message, so the real result is
++   emitted afterwards as a duplicate, non-consecutive `tool` message.
++   This pass therefore mirrors the org's proven deepseek-serializer defence
++   (patches/dsh-llm-deepseek-orphan-sweep.patch + ...-toolcall-strip.patch) at the
++   only point that still knows what was actually emitted: the wire list itself.
++   Clean request shapes pass through byte-identical. */
++function __dshGuardToolPairing(params, compat) {
++    const out = [];
++    let active = null;    // ids del assistant actual que aún pueden responderse consecutivamente
++    let consumed = null;  // ids ya respondidos dentro de ese bloque
++    const findings = [];
++    const note = (kind, msg) => findings.push({ kind, toolCallId: msg?.tool_call_id ?? null, toolName: msg?.name ?? null });
++    for (let i = 0; i < params.length; i++) {
++        const msg = params[i];
++        if (msg.role === "assistant") {
++            const calls = msg.tool_calls ?? [];
++            active = null;
++            consumed = null;
++            if (calls.length > 0) {
++                const answered = new Set();
++                for (let j = i + 1; j < params.length && params[j].role === "tool"; j++) answered.add(params[j].tool_call_id);
++                if (calls.every((call) => answered.has(call.id))) {
++                    active = new Set(calls.map((call) => call.id));
++                    consumed = new Set();
++                    out.push(msg);
++                    continue;
++                }
++                // Sin respuesta consecutiva completa: se despoja el tool_calls (texto/razonamiento se conservan)
++                // para no dejar tampoco la clase opuesta ("insufficient tool messages following tool_calls").
++                const { tool_calls, ...kept } = msg;
++                note("strip-tool-calls-without-consecutive-results", { tool_call_id: calls.map((call) => call.id).join("|") });
++                const content = kept.content;
++                if (typeof content === "string" ? content.length > 0 : (content ?? []).length > 0) out.push(kept);
++                continue;
++            }
++            out.push(msg);
++            continue;
++        }
++        if (msg.role === "tool") {
++            if (active !== null && active.has(msg.tool_call_id) && !consumed.has(msg.tool_call_id)) {
++                consumed.add(msg.tool_call_id);
++                out.push(msg);
++                continue;
++            }
++            note(active === null ? "drop-orphan-or-interleaved-tool" : "drop-duplicate-tool", msg);
++            continue;
++        }
++        active = null;
++        consumed = null;
++        out.push(msg);
++    }
++    if (findings.length > 0) __dshGuardReport(params, findings, compat);
++    return out;
++}
++/** Registro forense del guardián: línea en stderr (journald) + append JSONL. Nunca lanza. */
++function __dshGuardReport(params, findings, compat) {
++    const summarize = (p) => p.role === "assistant" ? `assistant[tc:${(p.tool_calls ?? []).map((t) => t.id).join("|") || "-"}]` : p.role === "tool" ? `tool[${p.tool_call_id}]` : p.role;
++    const tail = params.map(summarize).slice(-16);
++    try {
++        process.stderr.write(`[dsh-guard-toolpair] ${findings.map((f) => `${f.kind}${f.toolCallId ? `:${f.toolCallId}` : ""}`).join(" ")} requiresToolResultName=${compat?.requiresToolResultName === true} wire=${params.length} tail=${tail.join(" ")}\n`);
++        import("node:fs").then(({ mkdirSync, appendFileSync }) => {
++            mkdirSync("/tmp/dsh-wire-guard", { recursive: true });
++            appendFileSync("/tmp/dsh-wire-guard/guard.jsonl", `${JSON.stringify({
++                at: new Date().toISOString(),
++                findings,
++                tail,
++                messages: params.map((p) => ({
++                    role: p.role,
++                    tool_call_id: p.tool_call_id,
++                    tool_calls: p.tool_calls?.map((t) => ({ id: t.id, name: t.function?.name })),
++                    contentLength: typeof p.content === "string" ? p.content.length : Array.isArray(p.content) ? p.content.length : 0,
++                })),
++            })}\n`);
++        }).catch(() => {});
++    }
++    catch { /* los diagnósticos nunca deben romper un request */ }
++}
+ function isImageContentBlock(block) {
+     return block.type === "image";
+ }
+@@ -1156,7 +1245,8 @@
+         }
+         lastRole = msg.role;
+     }
+-    return params;
++    /* LOCAL PATCH (deepartments 2026-09-22) — última pasada de validez de cable. */
++    return __dshGuardToolPairing(params, compat);
+ }
+ function convertTools(tools, compat) {
+     return tools.map((tool) => {
