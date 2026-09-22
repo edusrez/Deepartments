@@ -6117,19 +6117,65 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // rest of the object and `store.update` ran anyway: with the typo `notes_qh`
   // the tool applied the TERMINAL transition to `duplicado` and LOST the note —
   // it CONFIRMED what it did NOT do, over a terminal close.
+  //
+  // fb-2112 (QD, MEDIO — the SURVIVOR of the fb-775 cure; class filed 4 days
+  // before this lane, archived): fb-775 closed the door «an UNDECLARED key» and
+  // left open its SYMMETRIC twin «NO key at all». `{ id }` alone passed the
+  // whitelist (every key IS declared) and built the EMPTY `input` — and the store
+  // did NOT stay still: `FeedbackStore.update` (dshd-feedback src/index.ts:
+  // 879-880 + :894) builds `{ ...current, updatedAt: Date.now(), estado:
+  // nextEstado }` and APPENDS it UNCONDITIONALLY, so the call wrote a SPURIOUS
+  // TAIL whose ONLY change is `updatedAt`, and answered SUCCESS. It is therefore
+  // NOT a no-op: the tool confirms what it did NOT do AND leaves a trace that
+  // LOOKS like an edit — and the trace is not inert, because `updatedAt` is the
+  // SECOND SORT KEY of the duplicate-candidate block (same file:432,
+  // `score desc → updatedAt desc → id desc`), so an empty call can REORDER the
+  // very suggestions fb-1874 exists to improve. Measured effect (QD): three
+  // consecutive retries on the same record, the caller convinced the failure was
+  // transient. The fix is the SAME test as door 1, kept in the SAME validator
+  // (one message, one ordering) PLUS the runtime anchor on the constructed
+  // `input`, so an empty write can never reach the store again.
   const FEEDBACK_UPDATE_EXPECTED_FIELDS = ['id', 'estado', 'notas_qh', 'escalado', 'escalado_a', 'duplicate_of', 'related', 'triage_owner', 'resolution', 'frozen'] as const
 
+  /** fb-2112 — the WRITE fields of the SAME closed surface: every declared key
+   * EXCEPT the `id` selector. `id` NAMES the record; the rest NAME the change.
+   * A call that declares NONE of them has no transition to apply. */
+  const FEEDBACK_UPDATE_WRITE_FIELDS = FEEDBACK_UPDATE_EXPECTED_FIELDS.filter((field) => field !== 'id')
+
+  /** fb-2112 — the ONE violation the two doors of the empty update share: the
+   * message teaches the EXIT (the fields that unlock the call) so the caller
+   * corrects in the SAME cycle (the fb-223 rationale the fb-775 trailer keeps).
+   * Phrased for BOTH shapes that produce an empty `input`: `{ id }` alone (no
+   * write field), and a declared key whose value is an EMPTY SLOT
+   * (`estado`/`duplicate_of` → `''`, which the constructor's `!== ''` guard
+   * drops) — in either case the call WOULD apply zero transition. */
+  const feedbackUpdateNoFieldViolation = `no update field applied: the call would apply ZERO transition (declared update fields: ${FEEDBACK_UPDATE_WRITE_FIELDS.join(', ')})`
+
   /** PURE (never throws): enumerate EVERY violation of the dept_feedback_update
-   * args against the CLOSED-set contract — every UNDECLARED key, phrased with the
-   * legacy harness fragment the memo validator keeps
+   * args against the CLOSED-set contract. Door 1 (fb-775): every UNDECLARED key,
+   * phrased with the legacy harness fragment the memo validator keeps
    * (`"<key>" is not a declared property (additionalProperties: false)`) so the
-   * house assertions match one wording across both tools. */
+   * house assertions match one wording across both tools. Door 2 (fb-2112, the
+   * SURVIVOR of that cure): the SYMMETRIC gap the whitelist left open — a call
+   * whose keys are ALL declared but which declares NO WRITE FIELD (`{id}` alone,
+   * the measured call) passed every check and reached an EMPTY `store.update`,
+   * which appended a SPURIOUS TAIL (only `updatedAt` moved) and returned normal:
+   * the tool CONFIRMED what it did NOT do, and the trace it left LOOKS like an
+   * edit (a rejection teaches; a false success trains the loop).
+   * The check lives in THIS validator because it is the SAME family — a
+   * malformed argument surface, decidable from `args` ALONE, before any
+   * authority check, transition computation or store read — and it PRESERVES
+   * the fb-775 ordering: the contract is reported in ONE message, never the
+   * `duplicado requires duplicate_of` gate. */
   const feedbackUpdateArgsViolations = (args: Record<string, unknown>): string[] => {
     const violations: string[] = []
     for (const key of Object.keys(args)) {
       if (!(FEEDBACK_UPDATE_EXPECTED_FIELDS as readonly string[]).includes(key)) {
         violations.push(`"${key}" is not a declared property (additionalProperties: false)`)
       }
+    }
+    if (violations.length === 0 && !FEEDBACK_UPDATE_WRITE_FIELDS.some((field) => args[field] !== undefined)) {
+      violations.push(feedbackUpdateNoFieldViolation)
     }
     return violations
   }
@@ -6139,9 +6185,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * message and corrects without re-reading the docs (the fb-223 rationale). */
   const FEEDBACK_UPDATE_EXPECTED_FIELDS_LABEL = FEEDBACK_UPDATE_EXPECTED_FIELDS.join(', ')
 
+  /** The ONE reject shape of the closed-set contract, shared by BOTH doors (an
+   * undeclared key and an empty update) so every caller reads the SAME template
+   * with the SAME full contract trailer. */
+  const feedbackUpdateArgsError = (violations: string[]): Error =>
+    new Error(`[deepartments] dept_feedback_update: invalid arguments — ${violations.join('; ')}; expected fields: ${FEEDBACK_UPDATE_EXPECTED_FIELDS_LABEL}`)
+
   const feedbackUpdateTool = defineTool({
     name: 'dept_feedback_update',
-    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` | `duplicado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. LOOP FASE 1 (RD spec §4): `duplicate_of` marks the record as a duplicate (estado → `duplicado`, QH-only — the record\'s evidence is merged into the canonical tail, emisor + origen fb-XXX); `related` (REPLACE the cross-links), `triage_owner` (the triage responsibility), `resolution` (how/why it was closed — the auto-close-by-reference flow records the delivery link here) and `frozen` (QH-only lifecycle flag: a frozen record is never stale-closed nor nudged — the K8s /lifecycle frozen escape) are the new metadata fields. `notas_qh`/`escalado`/`escalado_a` stay unchanged. WORKER callers are rejected. Unknown keys are rejected — the closed argument surface is `id`/`estado`/`notas_qh`/`escalado`/`escalado_a`/`duplicate_of`/`related`/`triage_owner`/`resolution`/`frozen` (an undeclared key rejects the WHOLE call and applies ZERO transition, so a typo can never close a record without its justification). Returns the updated FeedbackRecord.',
+    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` | `duplicado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. LOOP FASE 1 (RD spec §4): `duplicate_of` marks the record as a duplicate (estado → `duplicado`, QH-only — the record\'s evidence is merged into the canonical tail, emisor + origen fb-XXX); `related` (REPLACE the cross-links), `triage_owner` (the triage responsibility), `resolution` (how/why it was closed — the auto-close-by-reference flow records the delivery link here) and `frozen` (QH-only lifecycle flag: a frozen record is never stale-closed nor nudged — the K8s /lifecycle frozen escape) are the new metadata fields. `notas_qh`/`escalado`/`escalado_a` stay unchanged. WORKER callers are rejected. Unknown keys are rejected — the closed argument surface is `id`/`estado`/`notas_qh`/`escalado`/`escalado_a`/`duplicate_of`/`related`/`triage_owner`/`resolution`/`frozen` (an undeclared key rejects the WHOLE call and applies ZERO transition, so a typo can never close a record without its justification). An update field is REQUIRED: a call carrying only `id` — none of `estado`/`notas_qh`/`escalado`/`escalado_a`/`duplicate_of`/`related`/`triage_owner`/`resolution`/`frozen` — is rejected the SAME way (invalid arguments, ZERO transition), because it would apply NOTHING and still answer with the record: a confirmed no-op is indistinguishable from an applied change. Returns the updated FeedbackRecord.',
     parameters: {
       id: { type: 'string', required: true, description: 'The feedback record id (fb-<seq>).' },
       estado: { type: 'string', description: 'The target estado: "abierto" | "en-estudio" | "resuelto" | "descartado" | "duplicado" (duplicado requires `duplicate_of`).' },
@@ -6164,7 +6216,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // duplicate_of` gate, so the culprit key is always the reported one.
       const violations = feedbackUpdateArgsViolations(args as Record<string, unknown>)
       if (violations.length > 0) {
-        throw new Error(`[deepartments] dept_feedback_update: invalid arguments — ${violations.join('; ')}; expected fields: ${FEEDBACK_UPDATE_EXPECTED_FIELDS_LABEL}`)
+        throw feedbackUpdateArgsError(violations)
       }
       const agent = exec.agent
       if (!agent) throw new Error('dept_feedback_update requires a calling agent (exec.agent was undefined)')
@@ -6211,6 +6263,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       if (args.frozen !== undefined) {
         if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may set the `frozen` lifecycle flag (the stale-review escape)')
         input.frozen = args.frozen === true
+      }
+      // fb-2112 — THE SECOND DOOR, at the WRITE itself (the host anchor): the
+      // constructor above is a WHITELIST of `if (args.X !== undefined)` reads, so
+      // the args-level check cannot see an input that ends up EMPTY for another
+      // reason — a declared key with an EMPTY SLOT (`estado: ''`, which the
+      // constructor's own `!== ''` guard drops) PASSES door 1 and still writes
+      // nothing. THIS reads the ARTIFACT about to be written, not the args, and an
+      // empty one is REJECTED rather than handed to `store.update` — the empty
+      // update that returned normal, sealed the ledger and lied. The anchor is
+      // `Object.keys(input).length === 0` (an ENUMERABLE OWN-key count, the only
+      // honest reading of "no field was set"): it is false for every legitimate
+      // FALSY value (`escalado: false`, `frozen: false`, `related: []`,
+      // `notas_qh: ''`), so the `undefined ≠ false/[]/''` distinction the
+      // constructor implements is NOT touched — every id + ONE declared field
+      // call keeps its EXACT semantics.
+      if (Object.keys(input).length === 0) {
+        throw feedbackUpdateArgsError([feedbackUpdateNoFieldViolation])
       }
       return store.update(id, input, isQh ? { cerradoPor: memberId } : {})
     }

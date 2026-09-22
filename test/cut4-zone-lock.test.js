@@ -78,7 +78,21 @@ const CLOSE = "  }, 'deepartments: host-plane tools')"
 // host-plane registration + the create-description pointer sentence. The terminal
 // transition stays QH-only (spec §4): the fix is TEMPORAL, not authoritative.
 // MEASURED with the SAME command above (the same extraction this file performs).
-const FROZEN_MD5 = '5dc4d300ed610e2040733ef57fa91da9'
+// RE-FROZE 2026-09-22 (lane fb-2112 — the `dept_feedback_update` CONFIRMED NO-OP
+// / run token 3f092289): 5dc4d300ed610e2040733ef57fa91da9 →
+// f7ed6986b8c89fa625910e3566b51fbd — ONE INTENTIONAL in-span change, the
+// SYMMETRIC twin of the fb-775 lane: fb-775 closed «an UNDECLARED key» and left
+// open «NO key at all», so `{ id }` alone built the EMPTY `input` and
+// `store.update` answered SUCCESS for a transition that never happened. The
+// change is the shared `no update field applied` violation + the WRITE-field
+// test in the SAME `feedbackUpdateArgsViolations` + the runtime anchor
+// `Object.keys(input).length === 0` before `store.update` + the description
+// sentence. NOTHING ELSE MOVED: no transition semantics, no authority guard,
+// and the `!== undefined` constructor is untouched, so every id + ONE declared
+// field call (incl. `related: []`, `escalado: false`, `notas_qh: ''`) keeps its
+// EXACT behaviour. MEASURED with the SAME command above (the same extraction
+// this file performs).
+const FROZEN_MD5 = 'f7ed6986b8c89fa625910e3566b51fbd'
 
 const md5 = (s) => createHash('md5').update(s, 'utf8').digest('hex')
 const lineOf = (src, idx) => src.slice(0, idx).split('\n').length

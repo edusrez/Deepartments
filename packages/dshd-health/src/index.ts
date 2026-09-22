@@ -4864,6 +4864,35 @@ export const POOLER_CAPACITY_KEY_ROTATION_STALE = 'pooler-capacity:rotation-stal
 // out must be OBSERVABLE (the owner rule <20% global / <10% weekly is blind for
 // a key with usageWeekly null while the probe is down).
 export const POOLER_CAPACITY_KEY_PROBE_FAILED = 'pooler-capacity:probe-failed'
+// LANE W3 (MISIÓN POOLER, host 2026-09-22) — the OFFICIAL-API class dedupe
+// keys. DISTINCT from `POOLER_CAPACITY_KEY_CRITICAL`/`_WARNING` (and from every
+// other `pooler-capacity:` key) so the appearance of the owner's official API in
+// the pooler NEVER collides with — and never eats — the capacity dedupe: a
+// billing outage and an official-key appearance are two independent facts and
+// must be able to alert in the SAME tick (the M1 no-collision rule). ONE key
+// per MODE (the finding carries the mode): the two branches describe DIFFERENT
+// realities (`declared` = a rejected config entry; `legacy` = a loaded-but-inert
+// singleton) and a transition between them is a NEW FACT — a shared key would
+// swallow it inside the 30-min window.
+// MODULE-PRIVATE by construction (NOT `export`): the bundle's compiled export
+// surface is FROZEN (test/export-parity.test.js — `lib/invoke.js` at 349) and
+// this lane adds NO runtime export. The precedent is the sibling pooler/
+// starvation key prefixes (`POOLER_CAPACITY_KEY_*` are exported because they
+// predate the lock and the tests import them; `RECIPIENT_STARVED_*_KEY_PREFIX`
+// are private for exactly this reason). The literals are the contract — a test
+// asserts them VERBATIM.
+const POOLER_OFFICIAL_API_KEY_DECLARED = 'pooler-capacity:official-api:declared'
+const POOLER_OFFICIAL_API_KEY_LEGACY = 'pooler-capacity:official-api:legacy'
+
+/** LANE W3 (MISIÓN POOLER) — THE FINDING KEY for one official-API marker: the
+ * per-MODE dedupe key (`…:official-api:declared` / `…:official-api:legacy`).
+ * An UNKNOWN/absent mode is not invented into a third key: it falls back to the
+ * `declared` key (the branch that means «the config asks for the official API» —
+ * the conservative reading), so an empty/odd mode can never become a keyless
+ * finding. Module-private (the frozen export surface — see above). */
+function poolerOfficialApiKey(mode: 'declared' | 'legacy' | undefined): string {
+  return mode === 'legacy' ? POOLER_OFFICIAL_API_KEY_LEGACY : POOLER_OFFICIAL_API_KEY_DECLARED
+}
 
 /** M1 (b) code defaults. */
 export const QI_SILENCE_DEFAULT_WINDOW_MS = 120 * 60 * 1000
@@ -5092,6 +5121,60 @@ export interface PoolerBillingDownLike {
   resetsAt?: string
 }
 
+/** LANE W3 (MISIÓN POOLER, host 2026-09-22) — ONE entry of the pooler's
+ * `officialApiGuard` marker: a configured source that RESOLVES to the OFFICIAL
+ * API (the upstream host, the key's fingerprint, or the key's provenance). The
+ * pooler NEVER reports the KEY ITSELF — the fingerprint is a sha16 and the
+ * provenance is an opaque `env:`/`file:` label (fb-16). STRUCTURAL mirror of
+ * the producer contract (lane W1): every field optional by the
+ * `readPoolerStateFile` blind-cast convention — this package only READS. */
+export interface PoolerOfficialApiEntryLike {
+  /** The declared channel id ('ds-official', …). */
+  channelId?: string
+  /** The upstream host the entry resolves to ('api.deepseek.com'). */
+  upstreamHost?: string
+  /** WHY the entry counts as the official API: the upstream host matched, the
+   * key's sha16 matched, or the key came from the official env/file source. */
+  rule?: 'official-upstream' | 'official-key-sha16' | 'official-key-env' | 'official-key-file'
+  /** The key's PROVENANCE label ('env:DEEPSEEK_API_KEY' /
+   * 'file:deepseek-official.key') — NEVER the key value. */
+  keySource?: string
+}
+
+/** LANE W3 (MISIÓN POOLER, host 2026-09-22) — the pooler's `officialApiGuard`
+ * marker: the ADDITIVE field the lane-W1 producer writes onto
+ * `keyPooler-state.json`. ABSENT or `null` = the healthy shape = nothing to
+ * report (ZERO findings — byte-identical to the pre-W3 scan). Present with >=1
+ * entry = the official API appeared in the pooler and the guard decided about
+ * it:
+ *   - `mode:'declared'` — a declared `channels:` entry RESOLVED to the official
+ *     API and was REJECTED (never loaded, never serves): the pool is NOT
+ *     compromised, the CONFIG asks for the owner's key;
+ *   - `mode:'legacy'` — the legacy singleton WAS LOADED but is INERT (it never
+ *     serves — the owner's decision, no opt-in).
+ * BOTH modes are an ALERT. WHY IT EXISTS (measured by the host): the official
+ * key entered the pooler on 2026-09-17T10:31 as the declared channel
+ * `ds-official` and dried the owner's balance (402 Insufficient Balance at
+ * 09-18T07:50:42Z and 09-22T06:13:29Z) with ZERO alerts — the owner learned it
+ * from a 503 of his own turn. This marker is a FIRM declaration about the
+ * CONFIGURATION: it does NOT age out, which is why the scan reads it BEFORE
+ * the stale early-return (the all-billing-blocked precedent below). */
+export interface PoolerOfficialApiGuardLike {
+  /** ISO ts of the boot at which the guard decided. */
+  at?: string
+  /** The branch: a declared `channels:` entry (REJECTED) or the legacy
+   * singleton (LOADED but INERT). */
+  mode?: 'declared' | 'legacy'
+  /** The matching sources (>=1 → the finding fires; absent/empty = nothing
+   * NAMED — never fabricate an appearance out of an empty list). MICRO-TAREA
+   * (head, 2026-09-22): `mode:'legacy'` with an absent/EMPTY list STILL fires
+   * («the singleton WAS LOADED» is a declaration about the boot, not a list, and
+   * it is the exact silent-appearance the owner forbade — m-781 §4); only the
+   * `declared` branch reads an empty list as health. The TYPE is unchanged (the
+   * field stays optional — the branch, not the type, carries the semantics). */
+  entries?: PoolerOfficialApiEntryLike[]
+}
+
 /** The pooler snapshot — STRUCTURAL mirror of dsh-key-pooler PoolSnapshot
  * (pool.ts:71-93). */
 export interface PoolerSnapshotLike {
@@ -5135,6 +5218,15 @@ export interface PoolerSnapshotLike {
    *  byte-identical to the pre-fix verdict. Secret-free by construction (id +
    *  booleans + a deadline). */
   channels?: PoolerChannelLike[]
+  /** LANE W3 (MISIÓN POOLER, host 2026-09-22) — the pooler's OFFICIAL-API GUARD
+   * marker (`officialApiGuard`, produced by lane W1). ADDITIVE: ABSENT or `null`
+   * is the healthy shape and reads EXACTLY like the pre-W3 snapshot (ZERO
+   * findings from this field — no regression of any existing class). Present
+   * with >=1 entry → the scan emits the `pooler-capacity:official-api:<mode>`
+   * finding (see {@link PoolerOfficialApiGuardLike}). A FIRM declaration: it is
+   * checked BEFORE the stale early-return because the CONFIG did not stop
+   * resolving to the official API just because the pooler stopped writing. */
+  officialApiGuard?: PoolerOfficialApiGuardLike | null
 }
 
 /** PARIDAD (2026-09-11) — one declared channel's serve-ability, as the pooler
@@ -5303,12 +5395,139 @@ export interface PoolerCapacityKnobs {
  * rotation prelude + rotation-stale, the R1 probe-failed class, the daily-hot
  * highPercent warning) STOP braking — they behave as info/no-bloqueo, NEVER as
  * a gate (the dispatch pre-check `resolvePoolerDispatchBlock` is the single
- * runtime gate, HALT-only). The stateFile seam is unchanged (SOLO-LECTURA). */
+ * runtime gate, HALT-only). The stateFile seam is unchanged (SOLO-LECTURA).
+ *  (W3) THE OFFICIAL-API APPEARANCE (LANE W3, MISIÓN POOLER, host 2026-09-22) —
+ *      the ONE added class, and NOT an aviso: the owner's personal official key
+ *      appeared in the pooler (the measured 09-17 incident: it entered as the
+ *      declared channel `ds-official` and dried the balance with ZERO alerts).
+ *      The pooler publishes the additive `officialApiGuard` marker; >=1 entry →
+ *      ONE finding on its OWN per-mode key (`pooler-capacity:official-api:
+ *      declared` / `…:legacy`) which the render labels `critical` EXPLICITLY.
+ *      Absent/null/empty-entries → 0 findings (byte-identical to the pre-W3
+ *      scan). Checked BEFORE the stale early-return: the marker is a FIRM
+ *      declaration about the CONFIG and does not age out (the fb-39 billing
+ *      precedent) — a late check would silence an appearance forever. */
 export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: PoolerCapacityKnobs, logger?: { warn(message: string): void }): HealthFinding[] {
   const state = readPoolerStateFile(statePath)
   if (state === undefined) return []
   const keys = Object.values(state.keys ?? {})
   const totalCount = keys.length
+  // LANE W3 (MISIÓN POOLER, host 2026-09-22) — THE OFFICIAL-API APPEARANCE: the
+  // owner's personal official key is RESERVE, and this architecture must NEVER
+  // spend it. The pooler marks the appearance on the SAME snapshot via the
+  // additive `officialApiGuard` field; this branch turns it into an ALERT that
+  // rides the EXISTING findings → dedupe → notifyHost pipeline (the alert IS the
+  // `notifyHost` — no new channel, no pooler-side write to health-alerts.jsonl).
+  //
+  // POSITION — FIRST, BEFORE THE BILLING BRANCH AND BEFORE THE STALE
+  // EARLY-RETURN, ON PURPOSE (the trap this lane exists to close). The marker is
+  // a FIRM DECLARATION about the CONFIGURATION (a declared entry resolves to the
+  // official API / the legacy singleton is back), not a measurement with a shelf
+  // life: it does NOT age out. The pooler writes its state file ONLY on health
+  // CHANGES, so a quiet-but-healthy grid looks STALE by design — and an
+  // appearance that lands while the snapshot is stale would be SILENCED FOREVER
+  // by a check placed after the `return []` below. The all-billing-blocked
+  // branch DIRECTLY BELOW (fb-39) established this exact precedent («the flag
+  // does not age out»); this branch precedes it for the same reason.
+  //
+  // ADDITIVE, NOT A BRANCH THAT STOLE THE TICK (the reason this is computed
+  // SEPARATELY and threaded into every return below): the capacity classes
+  // (billing / 0-usable / HALT) are INDEPENDENT FACTS from the appearance, and
+  // the measured incident is exactly the coincidence case — the official key
+  // dried the balance AND the pool went dry. The capacity body returns ONE
+  // capacity finding from each of its branches, so a plain `return [guard]` here
+  // would let a billing-blocked pool SILENCE the appearance — the exact class of
+  // silence this lane exists to close. The guard findings are therefore appended
+  // to EVERY outcome, which also preserves the documented one-capacity-finding-
+  // per-tick rule (the capacity branches still contribute at most one finding
+  // each, byte-identical). INERT WITHOUT THE MARKER: absent/null →
+  // `officialApiFindings` is `[]` → every `[x, ...[]]` is the pre-W3 array, byte
+  // for byte.
+  //
+  // SOUNDNESS (never fabricate): absent OR null → 0 findings. `mode` is READ,
+  // never invented: an absent/odd mode falls back to the `declared` key (the
+  // conservative reading) and is rendered verbatim.
+  //
+  // MICRO-TAREA (head, 2026-09-22) — «SIN ENTRADAS» ES DOS ESTADOS, NO UNO.
+  // The original predicate ALSO required `entries.length > 0` TO ALERT, which
+  // read an absent/empty list as «nothing appeared» UNCONDITIONALLY. That is
+  // TRUE for `declared` — a rejected config entry is a LIST: «ninguna entrada
+  // rechazada» = SANO = 0 findings (the documented no-regression case, fixed by
+  // an existing test that MUST keep passing) — but it is FALSE for `legacy`: the
+  // legacy singleton is a DECLARATION ABOUT THE BOOT, not a list. It is armed by
+  // `DEEPSEEK_API_KEY` resolving through the systemd `EnvironmentFile`
+  // (`/etc/dsh/dsh-deepartments-dev.env` — a LIVE mechanism; adding one line
+  // arms the singleton's `default:true` WITHOUT TOUCHING CONFIG). That
+  // appearance has NO `channels:` row to name, and with `channels:` declared the
+  // singleton stays INERT and is never loaded — so a producer emitting
+  // `{mode:'legacy', entries: []}` (or with `entries` absent) is a REAL,
+  // reachable state, and the old predicate answered it with ZERO findings: the
+  // SILENT appearance the owner forbade (m-781 §4 «que la aparición nunca sea
+  // silenciosa»). The rule is therefore PER-MODE: an absent/empty list means
+  // «healthy, 0 findings» ONLY for `declared`; for `legacy` the branch ITSELF is
+  // the declared fact → ALERT («ante la duda, alerta»). NO entry is ever
+  // FABRICATED: the bullet says so EXPLICITLY («entry not nameable from the
+  // marker») and `count` floors at 1 — the declaration is the source of record,
+  // not a list length. A `legacy` marker whose list is non-empty but carries no
+  // OBJECT entry lands on the SAME no-entry branch (never a silent skip).
+  const officialApiFindings: HealthFinding[] = []
+  const officialApiGuard = state.officialApiGuard
+  if (officialApiGuard != null && typeof officialApiGuard === 'object') {
+    const officialEntries = Array.isArray(officialApiGuard.entries)
+      ? officialApiGuard.entries.filter((entry) => entry !== null && typeof entry === 'object')
+      : []
+    const mode = officialApiGuard.mode === 'legacy' ? 'legacy' : officialApiGuard.mode === 'declared' ? 'declared' : undefined
+    if (officialEntries.length > 0 || mode === 'legacy') {
+      // The MODE is named in the bullet because the two branches mean DIFFERENT
+      // things to the reader: `declared` = a configured channel was REJECTED
+      // (the pool is not compromised, the CONFIG asks for the official key);
+      // `legacy` = the singleton WAS LOADED but is INERT (never serves). Both
+      // must alert — the appearance can never be silent.
+      const modeLabel = mode === 'legacy'
+        ? "legacy (the singleton WAS LOADED but is INERT — it never serves; the owner's decision, no opt-in)"
+        : mode === 'declared'
+          ? 'declared (the channel entry was REJECTED — never loaded, never serves)'
+          : 'unknown (the pooler did not declare the branch — read conservatively)'
+      const entryLines = officialEntries.map((entry) => {
+        const channelId = typeof entry.channelId === 'string' && entry.channelId !== '' ? entry.channelId : '(channel unknown)'
+        const upstreamHost = typeof entry.upstreamHost === 'string' && entry.upstreamHost !== '' ? entry.upstreamHost : '(host unknown)'
+        // The `rule`/`mode` unions are the CONTRACT's type; the file is read by
+        // a BLIND CAST (readPoolerStateFile), so a malformed/foreign snapshot
+        // can carry ANY string. Reading through `unknown` is what makes the
+        // defensive check legal (a direct `!== ''` on the union is a type error
+        // — and the runtime truth is that the union is NOT enforced on disk).
+        const ruleRaw: unknown = entry.rule
+        const rule = typeof ruleRaw === 'string' && ruleRaw !== '' ? ruleRaw : '(rule unknown)'
+        // The keySource is a PROVENANCE LABEL ('env:…' / 'file:…'), never the
+        // key: rendered only when present (never synthesized).
+        const keySource = typeof entry.keySource === 'string' && entry.keySource !== '' ? ` key-source ${entry.keySource}` : ''
+        return `${channelId} → ${upstreamHost} (rule ${rule}${keySource})`
+      }).join('; ')
+      // MICRO-TAREA — the NO-ENTRY degradation: `entries` absent/empty (or a
+      // non-empty list carrying no OBJECT entry) on the `legacy` branch. NO
+      // entry may be SYNTHESIZED (the contract forbids it: never invent a
+      // `channelId`/`upstreamHost`), so the bullet names the ABSENCE explicitly
+      // — the reader must be able to tell «the marker could not name the
+      // source» from «the marker named zero sources». The framing keeps the
+      // EXACT template of the with-entries bullet (same `— <n> source(s):
+      // <lines> —`, same tail): one render path, no drift.
+      const hasNameableEntry = officialEntries.length > 0
+      const sourceCount = hasNameableEntry ? officialEntries.length : 1
+      const countLabel = hasNameableEntry
+        ? `${officialEntries.length} source(s)`
+        : '0 source(s): (entry not nameable from the marker)'
+      officialApiFindings.push({
+        kind: 'pooler-capacity',
+        key: poolerOfficialApiKey(mode),
+        ts: nowMs,
+        count: sourceCount,
+        error:
+          `OFFICIAL API in the pooler (mode ${modeLabel}) — ${countLabel}${hasNameableEntry ? `: ${entryLines}` : ''} — ` +
+          `the owner's official key is PERSONAL RESERVE and this architecture must NEVER use it; ` +
+          `remove the source from the pooler config (the guard keeps it INERT/REJECTED — it is NOT serving)`
+      })
+    }
+  }
   // HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class is
   // near-PERMANENT: a billing block (401 CreditsError / Insufficient balance)
   // does NOT reset with time like a quota cooldown, and the pooler clears the
@@ -5324,14 +5543,18 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   // billing-flagged key in a pool that can still serve never pauses).
   const billingBlockedKeys = keys.filter((k) => k.billingBlocked === true)
   if (billingBlockedKeys.length > 0 && billingBlockedKeys.length === totalCount) {
+    // W3: the appearance is ADDITIVE — a coincient all-billing-blocked pool must
+    // NOT silence it (the measured incident is exactly that coincidence).
     return [{
       kind: 'pooler-capacity',
       key: POOLER_CAPACITY_KEY_CRITICAL,
       ts: nowMs,
       count: keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs).length,
       error: `billing/credits block on ${billingBlockedKeys.length}/${totalCount} keys (401 CreditsError class) — pausa de nuevos despachos; resume al recuperar`
-    }]
+    }, ...officialApiFindings]
   }
+  // LANE W3 — (the official-API findings were computed ABOVE, before the billing
+  // branch: see the block at the head of this function. Nothing to compute here.)
   const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
   const stale = !Number.isFinite(updatedMs) || nowMs - updatedMs > knobs.stateStaleMs
   if (stale) {
@@ -5341,10 +5564,15 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
     // health changes). Warn (naming the age) and return [] — the real
     // dead-man's-switch is the CERTAIN exhaustion branches below (a 429
     // rotation to:null, usable ≤ critical).
-    logger?.warn(Number.isFinite(ageMin)
-      ? `pooler state unknown/stale (age ${ageMin} min) — no capacity finding`
-      : `pooler state unknown/stale (unparseable updatedAt) — no capacity finding`)
-    return []
+    // W3: the warn is suppressed when the marker rides the snapshot — the state
+    // is not UNKNOWN, it is KNOWN and alarming (and a warn-plus-alert pair
+    // describing the same snapshot would read as a contradiction).
+    if (officialApiFindings.length === 0) {
+      logger?.warn(Number.isFinite(ageMin)
+        ? `pooler state unknown/stale (age ${ageMin} min) — no capacity finding`
+        : `pooler state unknown/stale (unparseable updatedAt) — no capacity finding`)
+    }
+    return [...officialApiFindings]
   }
   const usable = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs)
   const usableCount = usable.length
@@ -5376,7 +5604,7 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
       ts: nowMs,
       count: usableCount,
       error: `0 usable / ${totalCount} keys — outage total: NO usable key (scarcity decides; the «todas-secas» class — pool cannot serve; resume with a fresh key)`
-    }]
+    }, ...officialApiFindings]
   }
   // m-2333 (owner 2026-09-06 — «MÁXIMA MÁQUINA CON HALT») — the ONLY
   // availability-gate finding. THE HALT: with EXACTLY ONE usable key left
@@ -5410,7 +5638,7 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
           `weekly available ${weeklyAvail === undefined ? 'unknown' : `${Math.round(weeklyAvail)}%`} (< ${haltWeekly}%) ` +
           `or monthly available ${monthlyAvail === undefined ? 'unknown' : `${Math.round(monthlyAvail)}%`} (< ${haltMonthly}%) — ` +
           `NO new dispatches until ≥2 usable keys or new keys are added`
-      }]
+      }, ...officialApiFindings]
     }
   }
   // Everything else — CERO avisos (owner 2026-09-06): outside the HALT pause
@@ -5419,7 +5647,10 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   // rotation 429→null, rotation-stale, probe-failed, quota <20% global /
   // <10% weekly) STOP braking; they behave as info/no-bloqueo, NEVER as a gate
   // (the dispatch pre-check below is the single runtime gate, HALT-only).
-  return []
+  // W3: the ONLY addition is the official-API appearance, which is not an aviso
+  // about capacity at all — it is the owner's reserve key showing up where it
+  // must never be spent. With no marker this return is the pre-W3 `[]`.
+  return [...officialApiFindings]
 }
 
 /** DISPATCH-HARDENING (QH — the «429-primer-call» class; 2026-08-28) — the
@@ -8618,6 +8849,26 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // M1 — the two new kinds need their OWN branches (the fallback below would
     // render an unknown kind as a stalled-post — never let these kinds hit it).
     if (finding.kind === 'pooler-capacity') {
+      // LANE W3 (MISIÓN POOLER, host 2026-09-22) — THE OFFICIAL-API CLASS IS
+      // NAMED EXPLICITLY. WHY THIS BRANCH EXISTS: the fallback below infers the
+      // LEVEL from the dedupe KEY (`critical` IFF the key is
+      // POOLER_CAPACITY_KEY_CRITICAL, `warning` otherwise), so the W3 key
+      // (`…:official-api:declared` / `…:official-api:legacy`) would have
+      // rendered as a `warning` — MIS-LABELLED: the appearance of the owner's
+      // personal official key in the pooler is the class the host demanded be
+      // loud («severidad que despierte»), not a soft pool-capacity warning.
+      // The class is therefore labelled `critical` BY ITS OWN NAME, and the
+      // finding's `error` (which already carries mode + channelId +
+      // upstreamHost + rule + keySource + WHY it matters) is rendered verbatim
+      // — no wording is re-derived here, so the bullet and the finding can
+      // never drift.
+      // ADDITIVE AND SCOPED: ONLY the `official-api:` keys take this branch.
+      // Every pre-existing class — POOLER_CAPACITY_KEY_CRITICAL (critical) and
+      // any other key (warning) — falls through to the byte-identical literal
+      // below (0 change to any existing grade or text).
+      if (finding.key === POOLER_OFFICIAL_API_KEY_DECLARED || finding.key === POOLER_OFFICIAL_API_KEY_LEGACY) {
+        return `- pooler-capacity critical: ${finding.error ?? `official API source present in the pooler — the owner's key is personal reserve and this architecture must never use it (${finding.count ?? 0} source(s))`}`
+      }
       const level = finding.key === POOLER_CAPACITY_KEY_CRITICAL ? 'critical' : 'warning'
       return `- pooler-capacity ${level}: ${finding.error ?? `pool capacity low (${finding.count ?? 0} usable)`}`
     }
