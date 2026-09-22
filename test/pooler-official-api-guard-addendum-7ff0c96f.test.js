@@ -120,7 +120,14 @@ test("W3-control-positivo (fb-973/fb-867): el lector se LOCALIZA — el marcador
     const wiring = toolsSrc.match(/const healthPoolerStatePath = [^\n]*\n[^\n]*\n[^\n]*/)
     assert.notEqual(wiring, null, 'the REAL wiring expression is locatable in the source (the control anchors on the true seam, not on my belief)')
     assert.match(wiring[0], /path\.join\(dshHome\(\), POOLER_STATE_FILE\)/, 'the daemon reads `<dshHome>/<POOLER_STATE_FILE>` — the reader is measured at THAT path')
-    const stateFileName = toolsSrc.match(/POOLER_STATE_FILE\s*=\s*'([^']+)'/)?.[1]
+    // ANCHOR FIX (builder-461): tools.ts only IMPORTS the symbol (tools.ts:168,
+    // in the `} from 'dshd-health'` list) — anchoring the regex there read
+    // `undefined`. Its DEFINITION is in the health package, so read THAT.
+    const healthSrc = readFileSync(
+      '/home/esuarez/projects/deepartments/packages/dshd-health/src/index.ts',
+      'utf8'
+    )
+    const stateFileName = healthSrc.match(/export const POOLER_STATE_FILE\s*=\s*'([^']+)'/)?.[1]
     assert.equal(stateFileName, 'keyPooler-state.json', 'the state file name is the documented one (a rename here would silently blind the detector — exactly the fb-973 class)')
 
     // Now write the marker AT THAT RESOLVED SHAPE and prove the tick alerts.
