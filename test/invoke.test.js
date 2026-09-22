@@ -526,14 +526,20 @@ class StubPersistence extends Service {
     this.durableSessions = durableSessions
   }
 
-  /** S2 `persistence.create(meta)` — detached lazy metadata (spy). */
-  async create(meta) {
-    this.createCalls.push(meta)
-  }
-
-  /** S2 `persistence.append(id, events)` — the seed artifact (spy). */
-  async append(id, events) {
-    this.appendCalls.push({ id, events })
+  /** S2 `persistence.create(header)` — POST-MIGRATION (v2→v3, 2026-09-21) HANDLE
+   * shape: the service registers the session and returns the OWNED write handle
+   * (the SERVICE exposes no `append(id, events)` any more — the id lives on
+   * `create`, the seed travels through the handle). The stub records the
+   * `{id, events}` pair so the existing rotation assertions keep the same
+   * observable. */
+  async create(header) {
+    this.createCalls.push(header)
+    const id = header.id
+    return {
+      append: async (events) => { this.appendCalls.push({ id, events }) },
+      flush: async () => {},
+      close: async () => {}
+    }
   }
 
   async inspect(childId) {
@@ -25078,7 +25084,8 @@ test('LANE SELLO (d) — DOCUMENTED TRAP (family fb-591): the token extractor ta
 //       concluded the FALSE cause «no-figure-in-reason» for a reason that DOES cite a figure;
 //   (A) the pct branch needs the monitor's completion reserve `(projected + reserve) / window`,
 //       and the caller knob `health.contextCompletionReserve` lives on the dshd-health plugin
-//       row (profiles/departments-dev/cordis.patch.yml:151) while BOTH verification call sites
+//       row (profiles/deepartments-dev/cordis.patch.yml, anchor `- id: dshd-health`;
+//       :151 only up to the 09-16..09-21 revisions, :166 measured 09-22) while BOTH verification call sites
 //       read the DEEPARTMENTS plugin's `config.health` — a different Config object with no
 //       `health` section ⇒ undefined (MEASURED: EVERY production row of the ledger says
 //       `completionReserveSource: "absent"`, including the rows whose reason cites `+262144`).

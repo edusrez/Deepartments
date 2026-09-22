@@ -1428,7 +1428,10 @@ const REASON_PERCENT_RE = /~?\s*(\d{1,3}(?:[.,]\d{1,3})?)\s*%/g
  * The pct branch needs that SAME reserve to recompute the fraction the citation
  * claims, and it cannot take it from the caller knob:
  * `health.contextCompletionReserve` exists on the dshd-health plugin row alone
- * (profiles/departments-dev/cordis.patch.yml:151, the MONITOR's own config),
+ * (profiles/deepartments-dev/cordis.patch.yml — the row is the anchor, NOT a line
+ * number: `- id: dshd-health` → `config.health.contextCompletionReserve`; the
+ * `:151` once cited here was correct only in the 09-16..09-21 revisions and now
+ * lands on the `tool-fs` row — `:166` measured 09-22), the MONITOR's own config),
  * while BOTH verification call sites read `config.health` of the DEEPARTMENTS
  * plugin config — a DIFFERENT Config object with no `health` section ⇒
  * `undefined` (MEASURED in the ledger: `completionReserveSource: "absent"` on
