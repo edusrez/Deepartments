@@ -3291,7 +3291,7 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
   // The message NAMES the whitelist it enforces, so the guard's own doc cannot
   // drift from the list (doc ≠ guard is the class this lane exists to close).
   if (lower.includes('systemctl') && !isReadOnlySystemctl(cmd)) {
-    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath|DropInPaths|EnvironmentFiles>` are permitted; `show` without `-p` dumps the environment and is DENIED; mutating forms are the Asistente/owner\'s)'
+    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath|DropInPaths|EnvironmentFiles>` are permitted; `-p` may appear ONCE and its value is a COMMA LIST of those names (e.g. `-p MainPID,NRestarts`), never a repeated `-p A -p B`; `show` without `-p` dumps the environment and is DENIED; mutating forms are the Asistente/owner\'s)'
   }
   // (2c) fb-62 (IPH — token-guard refinement): the ROOT-WIPE `rm -rf /` — the
   // legacy loose denylist substring over-blocked every SCOPED cleanup (`rm -rf
