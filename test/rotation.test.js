@@ -18,7 +18,7 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage } from '../lib/invoke.js'
 import {
@@ -396,12 +396,24 @@ function rotationHarness(dir, overrides = {}) {
     journalsDir: path.join(dir, 'journals'),
     workspacePath: '/root',
     boundarySeq: 42,
-    // FIX 1 — the dsh-session-persistence seam (cold seed): `create` records
-    // the detached metadata, `append` records the exact seed events. NO live
-    // sessions-store stub — the rotation path must not have one at all.
+    // FIX 1 — the dsh-session-persistence seam (cold seed) in its POST-
+    // MIGRATION (v2→v3, 2026-09-21) HANDLE shape: `create(header)` returns the
+    // owned write handle, the seed travels through `handle.append(events)` (NO
+    // id — the handle IS the session) and `flush` + `close` complete it. The
+    // pre-handle SERVICE shape (`create(meta)` + `append(id, events)`) is GONE
+    // in 0.1.5-rc.2; a stub implementing it proved only the old contract while
+    // every real rotation fell to the legacy fallback (see the A/B test at the
+    // end of this file). NO live sessions-store stub — the rotation path must
+    // not have one at all.
     persistence: {
-      create: async (meta) => { state.persistenceCreated.push(meta) },
-      append: async (id, events) => { state.persistenceAppended.push({ id, events }); state.order.push('append') }
+      create: async (header) => {
+        state.persistenceCreated.push(header)
+        return {
+          append: async (events) => { state.persistenceAppended.push({ id: header.id, events }); state.order.push('append') },
+          flush: async () => { state.order.push('flush') },
+          close: async () => { state.order.push('close') }
+        }
+      }
     },
     // FIX 1b — the workspace registry: `list` returns the workspace entities
     // (a MISMATCHING path FIRST — attachSession validates cwd vs path and
@@ -435,8 +447,7 @@ test('U2 §3.6 crash window: seed-persist failure → {rotated:false} + no hosts
   await withTempDir(async (dir) => {
     const { deps, state } = rotationHarness(dir, {
       persistence: {
-        create: async () => { throw new Error('injected store failure') },
-        append: async () => undefined
+        create: async () => { throw new Error('injected store failure') }
       }
     })
     const outcome = await runHostRotation(deps)
@@ -558,23 +569,28 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     const oldJournal = await readFile(path.join(deps.journalsDir, `${deps.oldHostId}.md`), 'utf8')
     assert.equal(oldJournal, deps.seededJournal, 'OLD journal file byte-identical (bump only, archive copy — G4/D2)')
 
-    // S2 — FIX 1: the new session is seeded COLD via the persistence seam.
-    // `create` registered the DETACHED metadata (cursor 0, no artifact, no
-    // live-store attach); `append` persisted the exact buildRotationSeed
-    // events. Regression (a): create meta carries the pre-minted id + all
-    // header fields; append carries the exact seed of the re-keyed journal.
+    // S2 — FIX 1: the new session is seeded COLD via the persistence seam in
+    // its POST-MIGRATION HANDLE shape: `create(header)` registers the session
+    // and returns the owned write handle, the seed travels through
+    // `handle.append(events)` (NO id), and `flush` + `close` complete it.
+    // Regression (a): the header carries the pre-minted id + every REQUIRED
+    // v3 field; the handle's append carries the exact seed.
     assert.equal(state.persistenceCreated.length, 1, 'exactly one persistence.create call')
     assert.equal(state.persistenceAppended.length, 1, 'exactly one persistence.append call')
     const [createdMeta] = state.persistenceCreated
     assert.equal(createdMeta.id, newSessionId, 'pre-minted id used')
-    assert.equal(createdMeta.version, 0, 'header version 0')
+    // The version is the LOCAL package constant here (the unit harness supplies
+    // no `sessionFormatVersion`): the production seam reads the RUNNING
+    // harness's version from the LIVE session header instead — see the A/B test
+    // and RotationDeps.sessionFormatVersion.
+    assert.equal(createdMeta.version, SESSION_FORMAT_VERSION, 'header version stamped from the resolved package constant')
     assert.equal(createdMeta.createdAt, 1787000000000, 'createdAt from the clock seam')
     assert.equal(createdMeta.cwd, '/root', 'workspace path attributed')
-    assert.equal(createdMeta.seedLength, 4, 'seedLength = the seed event count (setup + title pin — the retracted journal node is NOT counted)')
+    assert.equal(createdMeta.isSeeded, false, 'the rotation seed is NOT fork-inherited (the v3 header requires the flag)')
+    assert.ok(!('seedLength' in createdMeta), 'the retired `seedLength` field is never sent (the v3 codec refuses an unexpected header field)')
     assert.equal(createdMeta.delegationDepth, 0, 'fresh host seed has delegation depth 0')
     const [appended] = state.persistenceAppended
-    assert.equal(createdMeta.seedLength, appended.events.length, 'seedLength agrees with the appended event list length')
-    assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
+    assert.equal(appended.id, newSessionId, 'the handle belongs to the pre-minted id (create is the only call naming it)')
     // CONTRACT 2026-09-21 (compat 0.1.5): setup + the title pin only. The former
     // seq-3 `user/message` journal node was RETRACTED — it is a surface node
     // emitted before the first step, which the harness v2→v3 migration rejects.
@@ -595,10 +611,11 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     // whose path matches its header cwd. The harness's first entity
     // (mismatching path) throws — a cwd-vs-path validation mismatch falls
     // through — so the attach landed on the '/root' entity, exactly once,
-    // AFTER the cold seed append (the attach needs the persisted header).
+    // AFTER the seed handle was completed (flush materialized the artifact;
+    // the attach validates the persisted header).
     assert.equal(state.attachCalls.length, 1, 'exactly one workspace attach (the mismatching path fell through)')
     assert.deepEqual(state.attachCalls[0], { path: '/root', sessionId: newSessionId }, 'attach targets the pre-minted id on the matching workspace')
-    assert.deepEqual(state.order, ['append', 'attach'], 'S2.2 attach runs AFTER the S2 seed append (it validates the persisted header cwd)')
+    assert.deepEqual(state.order, ['append', 'flush', 'close', 'attach'], 'the seed handle completes (append → flush → close) BEFORE the S2.2 attach (which validates the persisted header cwd)')
 
     // S3/S7 — hosts.json records committed BEFORE resolve (persist called).
     assert.ok(state.persisted >= 1, 'commit happens before the outcome resolves (concludeTurn ordering is invoke-side)')
@@ -619,5 +636,96 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     assert.equal(outcome.newJournalPath, path.join(deps.journalsDir, `${newHostId}.md`))
     assert.equal(outcome.sleepEpoch, 1787000000000)
     assert.equal(outcome.reKeyedJournal, journalText)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// THE SEAM MIGRATION (A/B) — rotation-seam-migration, 2026-09-22.
+//
+// THE MEASURED DEFECT: the `sessionPersistence` seam contract CHANGED SHAPE in
+// the harness's v2→v3 migration (2026-09-21). The pre-handle SERVICE exposed
+// `create(meta)` + `append(id, events)` (dsh-session-persistence 0.1.0-rc.7
+// types/index.d.ts:98/104). The post-handle SERVICE exposes
+// `create(header) → SessionHandle`; `append(events)` — NO id — lives on the
+// HANDLE and `readRaw` no longer exists (0.1.5-rc.2 lib/index.js:2322-2336
+// returns `tracker.adopt(new JsonlSessionHandle(...))`; the handle's
+// `append`/`flush`/`close` at :115/:128/:147). The rotation called the OLD
+// signature, so `deps.persistence.append === undefined` and EVERY rotation
+// fell to the legacy fallback (last rotation that CREATED a session:
+// 2026-09-21 14:48:13Z, `bb5b8d5b→15f80d86`).
+//
+// WHY THIS TEST IS THE ORACLE: the pre-existing rotation tests pass a stub
+// implementing the OLD contract — their green proves the old shape, not the
+// harness that runs. This test drives the REAL 0.1.5-rc.2 shape (a service
+// with `create(header) → handle` and NO service-level `append`) and demands
+// `rotated === true`. Against the pre-migration code it fails RED with
+// `/persistence seam unavailable/`; after the migration it passes.
+//
+// It also pins the two traps the diagnosis measured:
+//   * the header must be the REAL `SessionHeader` (v3): `version` stamped from
+//     the resolved `SESSION_FORMAT_VERSION`, `isSeeded` present, and NO
+//     `seedLength` (the v3 codec refuses it: "format v2 header has unexpected
+//     field seedLength") — no invented fields;
+//   * the artifact only MATERIALIZES with `append`/`flush`, so the handle must
+//     be completed (`flush`) and released (`close`); a created-and-abandoned
+//     handle leaves the id CLAIMED in-process and no artifact on disk.
+test('rotation seam migration (A/B): the REAL 0.1.5-rc.2 shape — service `create(header) → handle` with the seed on `handle.append(events)`, NO service-level `append` — the rotation COMMITS (rotated === true) with the v3 header and a completed handle', async () => {
+  await withTempDir(async (dir) => {
+    await authorFakeArtifact(path.join(dir, 'sessions'), 'session-old')
+    const seen = { headers: [], appends: [], flushes: [], closes: [], order: [] }
+    // THE REAL SERVICE SURFACE: `create(header, options) → SessionHandle`.
+    // There is deliberately NO `append` and NO `readRaw` on the service — the
+    // pre-handle shape is gone, exactly as in 0.1.5-rc.2.
+    const handleShapedService = {
+      async create(header) {
+        seen.headers.push(header)
+        seen.order.push('create')
+        return {
+          async append(events, options) { seen.appends.push({ events, options }); seen.order.push('append') },
+          async flush(options) { seen.flushes.push(options); seen.order.push('flush') },
+          async close() { seen.closes.push(true); seen.order.push('close') }
+        }
+      }
+    }
+    const { deps, state } = rotationHarness(dir, { persistence: handleShapedService })
+
+    const outcome = await runHostRotation(deps)
+
+    // THE CRITERION: the rotation COMMITTED (no legacy fallback).
+    assert.equal(outcome.rotated, true, `the rotation must commit against the real 0.1.5-rc.2 seam shape (reason=${JSON.stringify(outcome.reason)})`)
+    const newSessionId = outcome.newSessionId
+
+    // S2 — the header is the REAL SessionHeader: version STAMPED from the
+    // resolved @deepseek-ai/dsh-session (3 on 0.1.5-rc.2), `isSeeded` present,
+    // and NO seedLength (the field does not exist in the v3 header — the codec
+    // refuses it, so sending it would fall back).
+    assert.equal(seen.headers.length, 1, 'exactly one create call')
+    const header = seen.headers[0]
+    assert.equal(header.version, SESSION_FORMAT_VERSION, 'header.version is stamped from the resolved package SESSION_FORMAT_VERSION (never a hardcoded literal)')
+    assert.equal(header.id, newSessionId, 'create targets the pre-minted session id')
+    assert.equal(header.createdAt, 1787000000000, 'createdAt from the clock seam')
+    assert.equal(header.cwd, '/root', 'the workspace path is attributed (absolute — the codec validates it)')
+    assert.equal(header.isSeeded, false, 'a rotation seed is NOT fork-inherited (no inherited prefix — the v3 header requires the flag)')
+    assert.equal(header.delegationDepth, 0, 'a fresh host session is top-level (delegation depth 0)')
+    assert.ok(!('seedLength' in header), 'the retired `seedLength` field is NOT sent (the v3 codec refuses any unexpected header field)')
+
+    // The SEED travels through the HANDLE — `append(events)` with NO id.
+    assert.equal(seen.appends.length, 1, 'exactly one handle.append call')
+    const appended = seen.appends[0]
+    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'session/title'], 'the handle carries the 4-event rotation seed (no retracted surface node)')
+    appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
+
+    // THE MATERIALIZATION TRAP: without flush the artifact never lands, and
+    // without close the id stays write-claimed in-process (the successor's
+    // resume would meet an owned id). Both must have run, after the append.
+    assert.equal(seen.flushes.length, 1, 'the handle was FLUSHED (the durability barrier that materializes the artifact)')
+    assert.equal(seen.closes.length, 1, 'the handle was CLOSED (releases the single write ownership)')
+    assert.deepEqual(seen.order, ['create', 'append', 'flush', 'close'], 'the handle is completed in order: create → append → flush → close')
+
+    // The rest of the state machine still runs (S2.2 attach after S2).
+    assert.equal(state.attachCalls.length, 1, 'the workspace attach landed exactly once')
+    assert.equal(state.attachCalls[0].sessionId, newSessionId, 'attach targets the pre-minted id')
+    assert.equal(state.hosts.get(outcome.newHostId).sessionId, newSessionId, 'the new host entry names the new session')
+    assert.equal(state.hosts.get(deps.oldHostId).retired, true, 'the old host entry is retired')
   })
 })

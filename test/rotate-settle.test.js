@@ -254,9 +254,13 @@ class StubAgents extends Service {
   }
 }
 
-/** Stub persistence: records the rotation S2 `create`/`append` calls as spies
- * (no real artifact backend is needed — the point is that the COLD seed landed
- * via the persistence seam and NOT in the live store). */
+/** Stub persistence: records the rotation S2 seed as spies (no real artifact
+ * backend is needed — the point is that the COLD seed landed via the
+ * persistence seam and NOT in the live store). POST-MIGRATION (v2→v3,
+ * 2026-09-21) HANDLE shape: `create(header)` returns the owned write handle and
+ * the seed travels through `handle.append(events)` — the SERVICE exposes no
+ * `append(id, events)` any more. `appendCalls` keeps the `{id, events}`
+ * observable for the rotation assertions. */
 class StubPersistence extends Service {
   constructor(ctx) {
     super(ctx, 'sessionPersistence')
@@ -264,12 +268,14 @@ class StubPersistence extends Service {
     this.appendCalls = []
   }
 
-  async create(meta) {
-    this.createCalls.push(meta)
-  }
-
-  async append(id, events) {
-    this.appendCalls.push({ id, events })
+  async create(header) {
+    this.createCalls.push(header)
+    const id = header.id
+    return {
+      append: async (events) => { this.appendCalls.push({ id, events }) },
+      flush: async () => {},
+      close: async () => {}
+    }
   }
 
   async inspect(childId) {

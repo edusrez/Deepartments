@@ -42,7 +42,7 @@ import { randomUUID } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { findSessionArtifact } from './session-cleanup.js'
 
 /** The durable hosts.json schema version (D4). Written by `persistHosts` at the
@@ -677,19 +677,53 @@ export function chainSnapshotFinalize(
   })
 }
 
-/** The session-persistence seam (dsh-session-persistence coordinator
- * `create`/`append`), structurally narrowed so the plugin never hard-depends
- * on the package (mirrors dsh-session-persistence lib/index.js:802-840).
- * `create` registers DETACHED lazy metadata (`states.set`, cursor 0, NO
- * artifact, NO live store attach — the session stays COLD); `append`
- * seq-validates against the cursor and materializes the artifact. This is the
- * same service the RESUME path reads (`prepare` → live-guard at
+/** One open handle onto the new session's storage — the `SessionHandle` the
+ * backend hands back from `create` (dsh-session-persistence-jsonl
+ * lib/index.js:2322-2336: the service `create`s and returns
+ * `tracker.adopt(new JsonlSessionHandle(...))`), structurally narrowed so the
+ * plugin never hard-depends on the package. `append(events)` carries NO id
+ * (the HANDLE is the session — the id lives on `create`); `flush()` is the
+ * durability barrier that materializes the artifact (lib:128); `close()`
+ * releases the single write ownership and is idempotent (lib:147). A handle
+ * left open keeps the id CLAIMED for this process (`tracker.writers`), so the
+ * successor's resume in the same process would find it owned — S2 always
+ * completes the handle. */
+export interface RotationSessionHandleLike {
+  append(events: readonly RotationSeedEvent[], options?: { signal?: AbortSignal }): Promise<unknown>
+  flush(options?: { signal?: AbortSignal }): Promise<unknown>
+  close(): Promise<unknown>
+}
+
+/** The immutable logical session header `create` stores (dsh-session
+ * `SessionHeader`, narrowed to the fields the rotation sets). The v2→v3
+ * migration of 2026-09-21 replaced the pre-handle metadata form: `seedLength`
+ * is NOT a header field (the v3 codec REFUSES it — "format v2 header has
+ * unexpected field seedLength") and `version` must equal the resolved
+ * package's `SESSION_FORMAT_VERSION` (`encodeCurrent requires Session format
+ * vN`), so it is STAMPED from the resolved `@deepseek-ai/dsh-session`, never
+ * hardcoded. `cwd`, when present, must be absolute (the codec validates it). */
+export interface RotationSessionHeaderLike {
+  version: number
+  id: string
+  createdAt: number
+  cwd?: string
+  isSeeded: boolean
+  delegationDepth?: number
+}
+
+/** The session-persistence seam in its v3 HANDLE shape (the contract the
+ * v2→v3 migration of 2026-09-21 introduced): `create(header)` registers the
+ * session and returns the OWNED write handle — the service exposes NO
+ * `append(id, events)` any more and NO `readRaw` (dsh-session-persistence
+ * lib/types/index.d.ts: `abstract create(header, options) → SessionHandle`).
+ * The seed travels through `handle.append(events)` (jsonl lib:115) and only
+ * `flush`/`close` make it durable and release ownership. This is the same
+ * service the RESUME path reads (`prepare` → live-guard at
  * dsh-session-persistence lib/index.js:852: a session already in
  * `ctx.sessions` is rejected as "while it is live"), so S2 must write the
  * seed here and NEVER via the live sessions store. */
 export interface RotationPersistenceLike {
-  create(meta: { id: string; version?: number; createdAt: number; cwd?: string; seedLength?: number; delegationDepth?: number }): Promise<unknown>
-  append(id: string, events: unknown[]): Promise<unknown>
+  create(header: RotationSessionHeaderLike, options?: { signal?: AbortSignal }): Promise<RotationSessionHandleLike>
 }
 
 /** Logger seam for runHostRotation. */
@@ -718,6 +752,15 @@ export interface RotationDeps {
    * (missing create/append) → rotation cannot run (legacy fallback). The
    * new session is persisted COLD and is NEVER store-attached. */
   persistence?: RotationPersistenceLike
+  /** The Session format version the RUNNING harness's backend validates
+   * headers against — read from the LIVE session's own header at the call site
+   * (lifecycle.ts), because this package's own `@deepseek-ai/dsh-session`
+   * peer may be a DIFFERENT generation than the harness that loaded the plugin
+   * (measured 2026-09-22: the plugin resolves 0.1.2-rc.1 → version 0, while
+   * the validating backend is 0.1.5-rc.2 → version 3, and the codec refuses a
+   * mismatched header with "encodeCurrent requires Session format vN").
+   * Absent → the local `SESSION_FORMAT_VERSION` (the unit-test default). */
+  sessionFormatVersion?: number
   /** The workspace registry (S2.2 attach — FATAL; S2.5 archive — non-fatal).
    * Attach requires `list` + entities; absent list → rotation cannot run
    * (an invisible registered host is worse than no rotation). */
@@ -819,31 +862,68 @@ export async function runHostRotation(deps: RotationDeps): Promise<HostRotationO
   }
 
   // S2 — COLD server-side session seed (spec §3.2, FIX 1). THE fallback
-  // trigger: a missing/partial persistence seam or a failing create/append
-  // returns {rotated:false} — invoke.ts then runs the legacy in-place path
-  // with a loud log. The seed is persisted via the dsh-session-persistence
-  // seam (`create` registers detached lazy metadata at cursor 0 —
-  // dsh-session-persistence lib:802-816; `append` seq-validates and
-  // materializes the artifact — lib:824-840), so the new session is written
-  // to disk COLD and is NEVER attached to ctx.sessions. The later resume
-  // (agents.resume → persistence.prepare) requires exactly that: its
-  // live-guard rejects any id present in ctx.sessions ("cannot prepare
-  // session … while it is live", lib:849-863/852) — the attached-but-
-  // agentless state the old `ctx.get('sessions').create` manufactured.
-  if (deps.persistence?.create === void 0 || deps.persistence?.append === void 0) {
+  // trigger: a missing/partial persistence seam or a failing create/append/
+  // flush returns {rotated:false} — invoke.ts then runs the legacy in-place
+  // path with a loud log. The seed is persisted via the dsh-session-persistence
+  // seam in its POST-MIGRATION (v2→v3, 2026-09-21) HANDLE shape:
+  // `create(header)` registers the session and returns the OWNED write handle
+  // (dsh-session-persistence-jsonl lib:2322-2336 — `tracker.adopt(new
+  // JsonlSessionHandle(...))`); the seed is appended THROUGH THE HANDLE
+  // (`handle.append(events)`, lib:115 — NO id: the handle IS the session) and
+  // `handle.flush()` is the durability barrier that materializes the artifact
+  // (lib:128 — a created session that never appends/flushes "never existed"),
+  // then `handle.close()` releases the single write ownership (lib:147; a
+  // handle left open keeps the id claimed by this process — the successor's
+  // resume must not meet an owned id). The pre-migration SERVICE (create(meta)
+  // + append(id, events)) is exactly what no longer exists, so calling it fell
+  // through to the legacy fallback on EVERY rotation (last rotation that
+  // created a session: 2026-09-21 14:48:13Z).
+  //
+  // The header is the REAL SessionHeader (dsh-session lib/types/types.d.ts:58):
+  // `{version, id, createdAt, cwd?, isSeeded, delegationDepth?}`. Two traps
+  // this shape encodes: `seedLength` is NOT a header field (the v3 codec
+  // REFUSES it — "format v2 header has unexpected field seedLength") and
+  // `version` must be the RUNNING harness's format version, because the codec
+  // refuses anything else ("encodeCurrent requires Session format vN"). The
+  // running version is NOT this package's own dsh-session constant — the
+  // plugin resolves its own peer (measured: 0.1.2-rc.1, SESSION_FORMAT_VERSION
+  // = 0) while the backend validating the header is the harness that loaded it
+  // (measured: 0.1.5-rc.2, = 3) — so the caller supplies the version observed
+  // on the LIVE session's own header (deps.sessionFormatVersion) and only the
+  // unit harness falls back to the local constant.
+  //
+  // The new session is written COLD (artifact only, NEVER attached to
+  // ctx.sessions) and is thus exactly what the later resume requires: its
+  // live-guard rejects any id present in ctx.sessions ("cannot prepare session
+  // … while it is live", lib:852) — the attached-but-agentless state the old
+  // `ctx.get('sessions').create` manufactured.
+  if (deps.persistence?.create === void 0) {
     return { rotated: false, reason: "persistence seam unavailable (no ctx.get('sessionPersistence'))" }
   }
   const seed = buildRotationSeed(reKeyed)
+  const headerVersion = deps.sessionFormatVersion ?? SESSION_FORMAT_VERSION
   try {
-    await deps.persistence.create({
+    const handle = await deps.persistence.create({
+      version: headerVersion,
       id: newSessionId,
-      version: 0,
       createdAt: now(),
       cwd: deps.workspacePath,
-      seedLength: seed.length,
+      // A rotation seed is freshly built (setup events + title pin), NOT an
+      // inherited fork prefix — so the header is unseeded and the handle
+      // carries no inherited cut (toHeaderLine: seeded ⇔ an inherited count).
+      isSeeded: false,
+      // A host session is top-level. The physical header line REQUIRES the key
+      // (HEADER_REQUIRED_KEYS) and the harness's own creation path stamps
+      // `delegationDepth ?? 0` (toHeaderLine) — an explicit 0 is the shape the
+      // harness itself writes for a top-level session.
       delegationDepth: 0
     })
-    await deps.persistence.append(newSessionId, seed)
+    if (typeof handle?.append !== 'function' || typeof handle?.flush !== 'function' || typeof handle?.close !== 'function') {
+      return { rotated: false, reason: 'persistence seam unavailable (create returned no SessionHandle)' }
+    }
+    await handle.append(seed)
+    await handle.flush()
+    await handle.close()
   } catch (error) {
     return { rotated: false, reason: `session create failed: ${error instanceof Error ? error.message : String(error)}` }
   }
