@@ -12500,7 +12500,7 @@ test('HARDENING-401 (fb-39): CAPACITY GATE transition monitor (molde franja PEAK
 // bus-wake materializePost) against a fixture pool state.
 // ===========================================================================
 
-test('DISPATCH-HARDENING (pure, m-2333): resolvePoolerDispatchBlock — a fresh snapshot with ZERO usable keys blocks with the CLEAR honest «pool: workspace … at quota — dispatch delayed; retry when a fresh key resolves» (the CERTAIN no-service outage is kept); eligibleKeys==1 with weekly/monthly available below the thresholds → the HALT block (the ONLY availability gate); every usable key at/above the old highPercent quota → NO longer blocks (retired — maxima maquina); a 429→null rotation → NO longer blocks (retired); absent/stale → passthrough; a healthy pool → passthrough', async () => {
+test('DISPATCH-HARDENING (pure, m-2333): resolvePoolerDispatchBlock — a fresh snapshot with ZERO usable keys blocks with the CLEAR honest «pool: workspace … at quota — dispatch delayed» message that NAMES the missing path(s) BY CAUSE + its measurement basis (the CERTAIN no-service outage is kept; 2026-09-22: the cause-aware label/remedy — Go-empty + a cooling channel names BOTH and prescribes WAITING, never «a fresh key»); eligibleKeys==1 with weekly/monthly available below the thresholds → the HALT block (the ONLY availability gate); every usable key at/above the old highPercent quota → NO longer blocks (retired — maxima maquina); a 429→null rotation → NO longer blocks (retired); absent/stale → passthrough; a healthy pool → passthrough', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
     const knobs = { stateStaleMs: POOLER_CAPACITY_DEFAULT_STATE_STALE_MS, haltWeeklyAvailablePercent: 20, haltMonthlyAvailablePercent: 10 }
@@ -12516,7 +12516,34 @@ test('DISPATCH-HARDENING (pure, m-2333): resolvePoolerDispatchBlock — a fresh 
     }), 'utf8')
     const blocked = resolvePoolerDispatchBlock(p, T0, knobs)
     assert.ok(blocked !== undefined, 'an all-blocked pool blocks the dispatch')
-    assert.match(blocked.reason, /^pool: workspaces wrk-a,wrk-b at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — dispatch delayed; retry when a fresh key resolves$/, 'the EXACT honest message: workspaces + cause + the retry guidance')
+    // 2026-09-22 (host-approved lane — the measured false positive of the
+    // capacity gate): the message now NAMES the missing path(s) BY CAUSE, the
+    // cheapest remedy, and its OWN measurement basis (`basis:`). This fixture
+    // declares NO channels, so this IS the real outage class: the Go pool is
+    // named as such, the absent channels are named, and the remedy stays «a
+    // fresh key». The VERDICT (block) and the PREDICATE are unchanged.
+    assert.match(blocked.reason, /^pool: workspaces wrk-a,wrk-b at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — missing: the Go pool has no usable key \(3\/3 blocked\/cooldown\/invalid\); no channels are declared — basis: Go keys \(usable = not invalid, not blocked, past cooldown\) \+ declared channels \(enabled && !halted && past cooldown\) — dispatch delayed; remedy: retry when a fresh key resolves \(the Go pool must gain a usable key\)$/, 'the EXACT honest message: workspaces + cause + the missing path(s) BY CAUSE + the measurement basis + the remedy')
+    // (1b) THE MEASURED INCIDENT (2026-09-22T16:48Z — this case did NOT exist):
+    // ZERO usable Go keys (0/0 — the pool declares none) AND a declared channel
+    // that is `enabled`, NOT halted, but INSIDE its cooldown. The pooler was
+    // serving HTTP 200 on that channel at that moment and the old text still
+    // read «workspace(s) (all) at quota … 0/0 keys — retry when a fresh key
+    // resolves»: the WRONG subject (the reader concludes «the pool is dry») and
+    // the WRONG remedy (a Go key that was not needed). The BLOCK is CORRECT and
+    // must stay (in that instant there was no serving path — the predicate is
+    // untouched); the LABEL must name BOTH missing paths and prescribe WAITING.
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {},
+      channels: [{ id: 'commandcode', enabled: true, peer: true, halted: false, cooldownUntil: T0 + 383_000 }]
+    }), 'utf8')
+    const incident = resolvePoolerDispatchBlock(p, T0, knobs)
+    assert.ok(incident !== undefined, 'the incident case still blocks (the predicate is NOT touched — in that instant there was no serving path)')
+    assert.match(incident.reason, /— missing: the Go pool declares NO key at all \(0\/0 keys\); channel commandcode is in COOLDOWN \(~383s left — transient, auto-resolves\) —/, 'the label NAMES BOTH missing paths by cause (Go empty AND the cooling channel) — never one chosen subject')
+    assert.match(incident.reason, /remedy: wait ~383s for channel commandcode to leave its cooldown \(transient — it auto-resolves; NO fresh key needed\)$/, 'the remedy is WAITING the cooldown — NOT «a fresh key» (the measured false positive)')
+    assert.doesNotMatch(incident.reason, /retry when a fresh key resolves/, 'the old misleading remedy is NOT issued for a channel cooldown')
+    assert.match(incident.reason, /basis: Go keys \(usable = not invalid, not blocked, past cooldown\) \+ declared channels \(enabled && !halted && past cooldown\)/, 'the message declares its OWN measurement basis (the class-affinity requirement)')
+    assert.match(incident.reason, /pool:.*at quota.*dispatch delayed/, 'the form-consumer triad (pool: / at quota / dispatch delayed) survives — delivery.ts:1945 classifies on it')
     // (2) m-2333 THE HALT — WEEKLY leg: 1 usable key at 90% weekly consumed →
     // 10% available < 20% → block.
     await writeFile(p, fresh({
@@ -17983,8 +18010,8 @@ test('DISPATCH-HARDENING (acceptance 1 — dept_worker_spawn): a fixture pool st
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'blocked by an at-quota pool' }, { agent: head, signal }),
-        /pool: workspaces ws6,ws7,ws8 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — dispatch delayed; retry when a fresh key resolves/,
-        'dept_worker_spawn rejects with the CLEAR EARLY pool-quota error'
+        /pool: workspaces ws6,ws7,ws8 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — missing: the Go pool has no usable key \(3\/3 blocked\/cooldown\/invalid\); no channels are declared — basis: Go keys .*dispatch delayed; remedy: retry when a fresh key resolves/,
+        'dept_worker_spawn rejects with the CLEAR EARLY pool-quota error (now naming the missing path(s) BY CAUSE + the measurement basis)'
       )
       // BEFORE materializing: NO ctx.agents.create for a worker session and NO
       // durable worker post — the pre-check fires before any create.
@@ -18008,7 +18035,7 @@ test('DISPATCH-HARDENING (acceptance 1 — dept_job_run): the SAME exhausted-poo
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
-        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — dispatch delayed; retry when a fresh key resolves/,
+        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — missing: the Go pool has no usable key \(1\/1 blocked\/cooldown\/invalid\); no channels are declared — basis: Go keys .*dispatch delayed; remedy: retry when a fresh key resolves/,
         'dept_job_run rejects with the SAME pool-quota error (runJobForDepartment — the shared job engine)'
       )
       assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no job worker was created (the rejection precedes agents.create)')
@@ -18028,7 +18055,7 @@ test('DISPATCH-HARDENING (acceptance 1 — dept_post_create): the SAME exhausted
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'blocked legacy create' }, { agent: head, signal }),
-        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — dispatch delayed; retry when a fresh key resolves/,
+        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — missing: the Go pool has no usable key \(1\/1 blocked\/cooldown\/invalid\); no channels are declared — basis: Go keys .*dispatch delayed; remedy: retry when a fresh key resolves/,
         'dept_post_create rejects with the SAME CLEAR EARLY pool-quota error (the legacy seam is guarded too)'
       )
       assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created via the legacy path (the pre-check fires BEFORE agents.create)')

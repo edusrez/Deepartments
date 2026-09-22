@@ -5243,13 +5243,36 @@ export interface PoolerChannelLike {
   halted?: boolean
   /** Cooldown deadline (epoch ms; 0/absent = not cooling down). */
   cooldownUntil?: number
+  /** fb-2425 (A) — THE OFFICIAL-API GUARD MARKER, READ (not merely published).
+   *  `true` → this entry is the org's RESERVE key (the official API) and the
+   *  pooler's structural floor denies it service (`isOfficialApiChannel`,
+   *  dsh-key-pooler/src/proxy.ts:796-799 — the HOST predicate, by construction).
+   *  It is PRODUCED by the pooler at its ONE state-write seam (proxy.ts:2213,
+   *  `...(ch.officialBlocked === true ? { officialBlocked: true } : {})`) and it
+   *  is ADITIVO: ABSENT (every pre-W1 snapshot, every legitimate channel) reads
+   *  EXACTLY as before — not blocked, zero verdict change.
+   *  WHY IT IS READ HERE: the entry KEEPS `enabled: true` in config (the guard
+   *  does NOT filter the entry out — an operator must SEE it in /status), so
+   *  WITHOUT this field a blocked entry satisfies every other conjunct and
+   *  counts as real, servable capacity — the gate would PASS a dispatch the
+   *  pooler will refuse. Measured (fb-2425, 2026-09-22): Go 0/0 + a blocked entry
+   *  ⇒ `poolerServingChannels` returned 1 ⇒ the gate opened (`undefined`) where
+   *  the same snapshot without the marker BLOCKS. See {@link poolerServingChannels}. */
+  officialBlocked?: boolean
 }
 
 /** PARIDAD (2026-09-11, fb-630) — the channels that can serve RIGHT NOW: declared
  *  AND enabled AND not halted AND past their cooldown. This is the «extra
  *  capacity» the dispatch gate counts next to the Go keys — the fail-stop
  *  semantics are preserved: a channel that is off, dry or cooling down still
- *  counts for NOTHING (the «todas-secas» case keeps blocking). */
+ *  counts for NOTHING (the «todas-secas» case keeps blocking).
+ *  fb-2425 (A, 2026-09-22) — THE OFFICIAL-API GUARD IS THE FOURTH FAIL-STOP, and
+ *  the reason is the SAME one: such an entry is `enabled: true` by construction
+ *  (the guard never removes it from the list, it only denies it service), so it
+ *  counts for NOTHING here too — a blocked entry is NOT capacity the gate may
+ *  serve with. This is the READER the pooler's promise names (proxy.ts:2203-2206),
+ *  and it is ONE predicate: both consumers (the dispatch gate
+ *  `resolvePoolerDispatchBlock` and the alert `scanPoolerCapacity`) read it. */
 export function poolerServingChannels(
   state: PoolerSnapshotLike | undefined,
   nowMs: number
@@ -5261,6 +5284,7 @@ export function poolerServingChannels(
     typeof ch === 'object' &&
     ch.enabled === true &&
     ch.halted !== true &&
+    ch.officialBlocked !== true &&
     (Number(ch.cooldownUntil) || 0) <= nowMs
   )
 }
@@ -5777,11 +5801,65 @@ export function resolvePoolerDispatchBlock(
   // field, e.g. wrk_…/ws6; a key without one falls back to its id).
   const workspaceNames = (list: PoolerKeyStateLike[]): Set<string> =>
     new Set(list.map((k) => String(k.workspace ?? k.id ?? '').trim()).filter((w) => w !== ''))
+  // CAUSE-AWARE LABEL + REMEDY (2026-09-22, host-approved lane — the measured
+  // false positive of the capacity gate). The VERDICT of this branch was always
+  // honest («no serving path RIGHT NOW») and its predicate is NOT touched here:
+  // the defect was the LABEL. It spoke of the Go pool («workspace(s) (all) at
+  // quota … 0/0 keys») while what was failing could be a declared CHANNEL inside
+  // its cooldown, and it prescribed «a fresh key» when the remedy was to WAIT
+  // the cooldown out. Three measured faults: (i) it named the WRONG SUBJECT
+  // (the reader concludes «the pool is dry», which was false); (ii) it gave the
+  // WRONG REMEDY (a Go key that was not needed); (iii) it reported a TRANSIENT
+  // with TERMINAL language (a channel cooldown read exactly like a real total
+  // outage). This builder keeps the delivered verdict and names, instead: WHICH
+  // path(s) are missing — BY CAUSE, all of them, never a single chosen one —
+  // the cheapest/most probable remedy, and the MEASUREMENT BASIS itself
+  // (`basis:`), so a pooler architecture change (e.g. channel-only) cannot leave
+  // this text measuring a world that already moved.
+  const SERVING_PATH_BASIS =
+    'Go keys (usable = not invalid, not blocked, past cooldown) + declared channels (enabled && !halted && past cooldown)'
   const atQuotaReason = (blocked: PoolerKeyStateLike[], total: number, cause: string): string => {
     const names = workspaceNames(blocked)
     const head = [...names].slice(0, 3).join(',')
     const ws = names.size > 3 ? `${head},… (${names.size} at quota)` : head
-    return `pool: workspace${names.size === 1 ? '' : 's'} ${ws === '' ? '(all)' : ws} at quota (${cause}; ${blocked.length}/${total} keys) — dispatch delayed; retry when a fresh key resolves`
+    const headText = `pool: workspace${names.size === 1 ? '' : 's'} ${ws === '' ? '(all)' : ws} at quota (${cause}; ${blocked.length}/${total} keys)`
+    // THE MISSING PATHS, BY CAUSE — every unavailable one is named here; the
+    // combinations are ENUMERATED, never collapsed into one.
+    const missing: string[] = [
+      total === 0
+        ? 'the Go pool declares NO key at all (0/0 keys)'
+        : `the Go pool has no usable key (${blocked.length}/${total} blocked/cooldown/invalid)`
+    ]
+    const declared: PoolerChannelLike[] = Array.isArray(state.channels)
+      ? state.channels.filter((ch) => ch !== null && typeof ch === 'object')
+      : []
+    if (declared.length === 0) {
+      missing.push('no channels are declared')
+    } else {
+      for (const ch of declared) {
+        const id = String(ch.id ?? '(unknown channel)')
+        const until = Number(ch.cooldownUntil) || 0
+        if (ch.halted === true) missing.push(`channel ${id} is HALTED`)
+        else if (ch.enabled !== true) missing.push(`channel ${id} is DISABLED`)
+        else if (until > nowMs) missing.push(`channel ${id} is in COOLDOWN (~${Math.ceil((until - nowMs) / 1000)}s left — transient, auto-resolves)`)
+        else missing.push(`channel ${id} is not serving`)
+      }
+    }
+    // THE CHEAPEST / MOST PROBABLE REMEDY, DERIVED FROM THE CAUSE — never a
+    // fixed prescription: a channel cooldown self-resolves in seconds and needs
+    // NO fresh key (the measured incident), a halt must be lifted, a disabled
+    // channel enabled; ONLY a pool with no usable path at all needs a new Go key.
+    const cooling = declared.find((ch) => ch.halted !== true && ch.enabled === true && (Number(ch.cooldownUntil) || 0) > nowMs)
+    const halted = declared.find((ch) => ch.halted === true)
+    const disabled = declared.find((ch) => ch.halted !== true && ch.enabled !== true)
+    const remedy = cooling !== undefined
+      ? `wait ~${Math.ceil(((Number(cooling.cooldownUntil) || 0) - nowMs) / 1000)}s for channel ${String(cooling.id ?? '(unknown channel)')} to leave its cooldown (transient — it auto-resolves; NO fresh key needed)`
+      : halted !== undefined
+        ? `lift the halt on channel ${String(halted.id ?? '(unknown channel)')} (SIGHUP / POST /__keypool/revalidate after a top-up)`
+        : disabled !== undefined
+          ? `enable the declared channel ${String(disabled.id ?? '(unknown channel)')}`
+          : 'retry when a fresh key resolves (the Go pool must gain a usable key)'
+    return `${headText} — missing: ${missing.join('; ')} — basis: ${SERVING_PATH_BASIS} — dispatch delayed; remedy: ${remedy}`
   }
   // (1) ZERO usable keys — every workspace is blocked/cooldown/invalid; the
   // FIRST call of the spawn would find NO usable key (the 503

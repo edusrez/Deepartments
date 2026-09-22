@@ -25,7 +25,7 @@
 // fb-95 (AGENTS.md): BUILT-lib test (plain `node --test` over lib/invoke.js) —
 // it does NOT self-register the ts-src-loader hook.
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -313,5 +313,158 @@ test('fb-635 (5): ZERO usable Go + a DRY channel ⇒ both surfaces BLOCK (the «
 test('fb-635 (6): a channel in COOLDOWN ⇒ both surfaces BLOCK (a cooling channel is not capacity anywhere)', async () => {
   await withStateDir(async (stateDir) => {
     await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel({ cooldownUntil: NOW + 1 })], expectBlocked: true, label: 'thin Go + cooling channel' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-09-22 (host-approved lane) — THE MEASURED INCIDENT OF THE CAPACITY GATE.
+// The gate blocked a REAL dispatch to quality-head at 16:48Z and its text read
+// «pool: workspaces (all) at quota (0 usable keys — …; 0/0 keys) — dispatch
+// delayed; retry when a fresh key resolves» — while the pooler was serving HTTP
+// 200 on `commandcode` at that moment. The VERDICT was RIGHT (the channel was
+// inside its cooldown ⇒ in THAT instant no path could serve, so the predicate
+// blocked) but the LABEL named the WRONG SUBJECT (the Go pool, which was empty,
+// instead of the cooling channel) and gave the WRONG REMEDY (a fresh Go key that
+// was not needed — waiting seconds for the cooldown was). These tests lock the
+// three corrections: name the missing path(s) BY CAUSE, prescribe the cheapest
+// remedy, and DECLARE the measurement basis.
+// ---------------------------------------------------------------------------
+
+test('2026-09-22 (1): the INCIDENT shape — Go 0/0 AND a declared channel enabled+not-halted but INSIDE its cooldown ⇒ STILL blocks (predicate untouched, that instant had no serving path) but the label names BOTH missing paths and the remedy is WAITING, never «a fresh key»', async () => {
+  await withStateDir(async (stateDir) => {
+    // The exact live shape: `keys: {}` (the Go pool declared NO key — 0/0) plus
+    // `commandcode` enabled, NOT halted, cooling down for 383 s.
+    const file = await snapshot(stateDir, { keys: {}, channels: [channel({ cooldownUntil: NOW + 383_000 })] })
+    const r = verdict(file)
+    assert.notEqual(r, undefined, 'the incident case still BLOCKS — the predicate is NOT touched (a cooling channel serves nothing, so in that instant there was no path)')
+    assert.match(r.reason, /^pool: workspaces \(all\) at quota \(0 usable keys — all blocked\/cooldown\/invalid; 0\/0 keys\) —/, 'the delivered verdict text is preserved (the pre-fix head of the message)')
+    // (i) NAME THE MISSING PATH BY CAUSE — BOTH of them, never one chosen.
+    assert.match(r.reason, /missing: the Go pool declares NO key at all \(0\/0 keys\)/, 'the EMPTY Go pool is named as such (the case of the day)')
+    assert.match(r.reason, /channel commandcode is in COOLDOWN \(~383s left — transient, auto-resolves\)/, 'the COOLING CHANNEL is named, with the time left derived from cooldownUntil − now')
+    // (ii) THE REMEDY COMES FROM THE CAUSE — wait, do not look for a key.
+    assert.match(r.reason, /remedy: wait ~383s for channel commandcode to leave its cooldown/, 'the remedy is to WAIT the cooldown out (transient, auto-resolves)')
+    assert.doesNotMatch(r.reason, /retry when a fresh key resolves/, '«retry when a fresh key resolves» is NOT issued when a channel cooldown is the cause (the measured false remedy)')
+    // (iii) DECLARE THE MEASUREMENT BASIS (class affinity: a pooler
+    // re-architecture must not leave this counter measuring the void).
+    assert.match(r.reason, /basis: Go keys \(usable = not invalid, not blocked, past cooldown\) \+ declared channels \(enabled && !halted && past cooldown\)/, 'the message states which serving paths it consulted')
+    // The FORM CONSUMERS keep working: delivery.ts:1945 classifies on the triad.
+    assert.match(r.reason, /pool:.*at quota.*dispatch delayed/, 'the triad pool: / at quota / dispatch delayed survives (delivery.ts:1945)')
+  })
+})
+
+test('2026-09-22 (2): the CONTROL — Go 0/0 with NO channels declared is a REAL outage ⇒ blocks and names the empty Go pool as the missing path (plus the un-declared channels)', async () => {
+  await withStateDir(async (stateDir) => {
+    const file = await snapshot(stateDir, { keys: {} })
+    const r = verdict(file)
+    assert.notEqual(r, undefined, 'no usable path at all (0 Go, no channels) ⇒ STILL blocks — this case IS the outage')
+    assert.match(r.reason, /missing: the Go pool declares NO key at all \(0\/0 keys\); no channels are declared/, 'both missing paths are enumerated (empty Go pool AND no declared channel)')
+    assert.match(r.reason, /remedy: retry when a fresh key resolves \(the Go pool must gain a usable key\)$/, 'with no cheaper path available, the remedy IS a fresh Go key (the pre-fix guidance, correctly scoped)')
+  })
+})
+
+test('2026-09-22 (3): a HALTED channel is named as such and its remedy is LIFTING THE HALT — never «a fresh key»', async () => {
+  await withStateDir(async (stateDir) => {
+    const file = await snapshot(stateDir, { keys: {}, channels: [channel({ halted: true, cooldownUntil: 0 })] })
+    const r = verdict(file)
+    assert.notEqual(r, undefined, 'a dry channel serves nothing ⇒ still blocks')
+    assert.match(r.reason, /missing: the Go pool declares NO key at all \(0\/0 keys\); channel commandcode is HALTED/, 'the halted channel is named BY CAUSE')
+    assert.match(r.reason, /remedy: lift the halt on channel commandcode/, 'the remedy is lifting the halt (the pooler owns the SIGHUP/revalidate path)')
+    assert.doesNotMatch(r.reason, /retry when a fresh key resolves/, 'no fresh-key guidance for a halt cause')
+  })
+})
+
+test('2026-09-22 (4): a DISABLED channel is named as such, and the fix is to enable it; the triad + the basis still ride along', async () => {
+  await withStateDir(async (stateDir) => {
+    const file = await snapshot(stateDir, { keys: {}, channels: [channel({ id: 'ds-official', enabled: false, peer: false, cooldownUntil: 0 })] })
+    const r = verdict(file)
+    assert.notEqual(r, undefined, 'a switched-off channel serves nothing ⇒ still blocks')
+    assert.match(r.reason, /missing: the Go pool declares NO key at all \(0\/0 keys\); channel ds-official is DISABLED/, 'the disabled channel is named')
+    assert.match(r.reason, /remedy: enable the declared channel ds-official$/, 'the cheapest remedy for that cause')
+    assert.match(r.reason, /basis: Go keys .*declared channels/, 'the measurement basis is always declared')
+    assert.match(r.reason, /pool:.*at quota.*dispatch delayed/, 'the form triad survives on every cause variant')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-09-22 (host-approved lane, fb-2425 (A)) — THE OFFICIAL-API GUARD AS THE
+// FOURTH FAIL-STOP OF THE CAPACITY GATE. THIS TEST LOCKS THE **DIRECTION**, NOT
+// THE FIELD: the same snapshot WITH and WITHOUT `officialBlocked` must produce
+// DIFFERENT verdicts, and the side WITH the field is the correct one.
+//
+// WHY IT IS NOT TAUTOLOGICAL. The pooler's guard NEVER removes a blocked entry
+// from the list — it only denies it SERVICE (`isOfficialApiChannel`,
+// dsh-key-pooler/src/proxy.ts:796-799; the entry stays visible in /status with
+// `officialBlocked: true`, proxy.ts:2213). So a blocked entry keeps
+// `enabled: true` / `halted: false` / `cooldownUntil: 0` — i.e. it satisfied
+// EVERY conjunct of the pre-fb-2425 predicate except the one that did not exist.
+//
+// THE DIRECTION (MEASURED, not argued — see the report for the raw run):
+//   · WITH the marker  ⇒ the gate BLOCKS (the blocked entry is NOT capacity);
+//   · WITHOUT the marker ⇒ the gate OPENS (the entry reads as real capacity).
+// The second half is the phantom: the dispatch is allowed through and the
+// pooler's structural floor refuses it (503). The assertion below therefore
+// compares the TWO verdicts of the SAME snapshot — if the old predicate were
+// still in place, the two sides would be IDENTICAL and this test goes RED.
+// ---------------------------------------------------------------------------
+
+/** The blocked entry EXACTLY as the pooler publishes it: the marker is additive
+ *  and the rest of the triad is UNTOUCHED (`enabled: true` survives in config). */
+const blockedOfficialChannel = (extra = {}) => channel({ id: 'ds-official', peer: false, officialBlocked: true, ...extra })
+
+test('fb-2425 (1): DIRECTION — a BLOCKED entry that keeps `enabled: true` is NOT capacity: the snapshot WITH the marker BLOCKS, the same snapshot WITHOUT it OPENS (the phantom) — the two verdicts MUST differ', async () => {
+  // NOTE: each variant lives in its OWN stateDir ON PURPOSE — `snapshot()` writes
+  // the fixed `keyPooler-state.json` name, so two variants in one dir would
+  // overwrite each other and both reads would see the SECOND (the trap this test
+  // hit in its first draft; the negative control is what exposed it).
+  await withStateDir(async (blockedDir) => {
+    await withStateDir(async (openDir) => {
+      // The measured defect shape: the Go pool has NO usable key (0/0) and the ONLY
+      // declared entry is the official API, blocked by the guard — still enabled.
+      const blocked = await snapshot(blockedDir, { keys: {}, channels: [blockedOfficialChannel()] })
+      const open = await snapshot(openDir, { keys: {}, channels: [blockedOfficialChannel({ officialBlocked: false })] })
+      // (a) THE TWO VERDICTS DIFFER — this is the assertion the OLD predicate fails.
+      assert.notEqual(
+        verdict(blocked) === undefined,
+        verdict(open) === undefined,
+        'the marker MUST change the verdict: with `officialBlocked` the blocked entry is not capacity; without it the identical entry reads as real capacity'
+      )
+      // (b) …and the WITH-marker side is the CORRECT one: no serving source exists,
+      //     so the gate blocks instead of letting a dispatch die at the pooler's floor.
+      const r = verdict(blocked)
+      assert.notEqual(r, undefined, 'a blocked official entry must NOT count as capacity — 0 Go + 0 real channels is the CERTAIN outage')
+      assert.match(r.reason, /^pool: workspaces \(all\) at quota/, 'the CERTAIN-outage verdict is delivered (the class that was already honest)')
+      // (c) THE PHANTOM, stated explicitly so the regression mode is legible: with
+      //     the marker ignored the gate would PASS this dispatch.
+      assert.equal(verdict(open), undefined, 'CONTROL: without the marker the entry satisfies enabled/!halted/past-cooldown ⇒ the gate OPENS (the phantom capacity this lane removes)')
+    })
+  })
+})
+
+test('fb-2425 (2): the SECOND branch too — the marker also denies the m-2333 HALT lift (one blocked entry must not satisfy the «≥2 usable sources» premise)', async () => {
+  await withStateDir(async (blockedDir) => {
+    await withStateDir(async (openDir) => {
+      const blocked = await snapshot(blockedDir, { keys: { 'oc-15': thinKey() }, channels: [blockedOfficialChannel()] })
+      const open = await snapshot(openDir, { keys: { 'oc-15': thinKey() }, channels: [blockedOfficialChannel({ officialBlocked: false })] })
+      assert.notEqual(verdict(blocked), undefined, 'a thin Go key with only a BLOCKED entry left ⇒ the HALT stands (the blocked entry is not the 2nd source)')
+      assert.match(verdict(blocked).reason, /^pool: HALT — 1 usable key oc-15/, 'the m-2333 HALT is the branch that must return')
+      assert.equal(verdict(open), undefined, 'CONTROL: the identical entry WITHOUT the marker lifts the HALT — the exact phantom this lane removes')
+    })
+  })
+})
+
+test('fb-2425 (3): ADDITIVE + ONE PREDICATE — absent/false is byte-identical to the pre-fb-2425 world, and BOTH consumers read the same marker', async () => {
+  await withStateDir(async (stateDir) => {
+    // ABSENT (every pre-W1 snapshot and every legitimate channel) ⇒ unchanged.
+    const absent = await snapshot(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel()] })
+    const falsey = await snapshot(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel({ officialBlocked: false })] })
+    assert.equal(verdict(absent), undefined, 'ABSENT `officialBlocked` ⇒ a healthy channel still counts (the additive contract)')
+    assert.deepEqual(verdict(falsey), verdict(absent), '`false` reads EXACTLY like ABSENT')
+    // The PREDICATE is the reader — the field is not re-interpreted per consumer.
+    const read = await snapshot(stateDir, { keys: {}, channels: [blockedOfficialChannel()] })
+    const parsed = JSON.parse(await readFile(read, 'utf8'))
+    assert.deepEqual(poolerServingChannels(parsed, NOW), [], 'the single predicate excludes the blocked entry (both consumers count through it)')
+    // fb-635 convergence HELD for the new class: gate BLOCKS *and* the alert FIRES.
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [blockedOfficialChannel()], expectBlocked: true, label: 'thin Go + blocked official entry' })
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel()], expectBlocked: false, label: 'thin Go + unmarked healthy channel' })
   })
 })
