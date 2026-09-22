@@ -640,6 +640,8 @@
 > ledger concluirá «el fix no cargó» teniéndolo cargado (§8.4).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
+<!-- ⚠️ Vigencia: los ítems de esta sección son HISTÓRICOS (09-06→09-10) salvo el
+     bloque «⏱️ COLA VIVA DEL IPD al 2026-09-22T20:23Z», que es la cola de HOY. -->
 
 > **FORMATO `next:` (convención docs — diseño fb-184 ITEM 4,
 > reports/explore-deep/2026-09-06-fb184-watchdog-idle-v2-design-586effda.md
@@ -1453,6 +1455,33 @@ describe esto: describe el 09-08**
 
 ## 5. BACKLOG
 
+- **LOS DOS ENCARGOS DEL HOST DE HOY 2026-09-22 (uno CERRADO aquí, otro EN COLA)**:
+  - **(1) `work-register-sync` — ✅ CERRADO por esta misma entrada**: encargo del host
+    `m-1261` (19:45Z), lane `builder-468` despachada 19:48:12.955Z, ejecutada en el
+    árbol `/home/esuarez/projects/deepartments` y entregada como **esta ENTRADA 2026-09-22
+    del bloque superior** + el bloque **«COLA VIVA DEL IPD»** de §1 + **«ESTADO VIVO
+    2026-09-22»** de §3 + **«CAPACIDAD VIVA»** de §4 + el arreglo de los **dos
+    encabezados que declaraban vigencia falsa** (§3 «estado al 09-09» y §4 «al 09-08»).
+    **NO commiteado por mí por diseño** (los commits son del host).
+  - **(2) job `server-hygiene` — EN COLA, NO abierto** (encargo `m-1261` §3; dueño IPD;
+    brief: `docs/departments/internal-programming/jobs/server-hygiene.md`, que **a
+    2026-09-22T20:23Z NO EXISTE** — `ls` lo confirma: el directorio de jobs tiene 8
+    ficheros y no está). Qué debe medir/actuar: **disco raíz** (leído por mí
+    **20:13:29Z: 84%, 30G/38G**), **`/tmp/dsh-spill-*`** (cuenta + bytes; ⚠️ **mi
+    toolset NO puede listar `/tmp`** — `dept_exec` deniega `/tmp` como cwd o ruta y
+    `glob` no enumera directorios ⇒ el job necesita la vía que hoy no tengo: **la
+    cifra del cron (155 dirs / 2,0G) es DECLARADA, no medida por mí**), **`archive/`**
+    (`du` leído: **436M** en `/opt/dsh/.dsh-dev/archive`, **sin retención**), journals,
+    stateDir y los ficheros de cuarentena. Cadencia: diaria o 6 h (decide el head).
+    **🔴 LA REGLA QUE NO SE NEGOCIA (y es el criterio de aceptación principal, más que
+    los topes)**: **NUNCA borrar evidencia de un incidente abierto** — antes de
+    borrar, comprobar si la ronda/fichero es referencia de una ficha `abierto`/
+    `en-estudio`; si lo es, **PRESERVAR y reportar** (precedente: la ronda
+    `20260918T062134Z`, salvada fuera del ciclo de retención y hoy en
+    `/opt/dsh/preserved-evidence/` con md5 origen==copia
+    `3ea1a106cbb39c21d87b555f9d095c1d`). No duplica `reports-snapshot` (aquél copia
+    INFORMES; éste mira el SERVIDOR).
+
 - **O2 del QD (09-03, dirigido a host/runtime) — nudge spliced a posts RETIRED
   sobre abort de vida → dead-letter — CERRADO-foldeado (0e2e735 fold-ins
   tramo 3 09-04**: dead-letter retired, life-abort, dedup + fix guard
@@ -1519,6 +1548,19 @@ describe esto: describe el 09-08**
   · candidato-3 fb-253 (siguiente mejora del mark-delivery, tras el CLI `5ab20ea`)
   · refs cruzadas fb-308/fb-309 (journal-writer finalizeSessionLog vs la familia
   fb-309 de sesión — cotejo pendiente). No absorbidas en el CIERRE DE JORNADA 09-09.
+  · **NUEVO (2026-09-22, declarado con su forma honesta)**: **`doc-drift` TIENE JOB Y NO
+  TIENE SU PRIMER INFORME** — `docs/departments/internal-programming/jobs/doc-drift.md`
+  (194 líneas, mtime 2026-09-22T16:30:30Z, `schedule: '0 11 * * 1'`, outbox
+  `reports/reviewer/<YYYY-MM-DD>-doc-drift-<token>.md`) entró con `e845baf` 18:00:36Z,
+  pero **`find` sobre `/.deepartments` y sobre el repo NO encuentra ningún informe
+  `*doc-drift*`** (medido 20:23Z) ⇒ **la doc viva debe su PRIMERA verificación**; el
+  primer lunes en que dispare es **2026-09-28** (día de la semana verificado con `date`).
+  · **Y `docs/WHERE-TO-LOOK.md` tiene delta SIN COMMITEAR** en el árbol de trabajo
+  (`git diff --stat` 20:23Z: +70 líneas solo), igual que `docs/departments/internal-programming/HOST-SAMPLER.md`,
+  `packages/dshd-health/src/index.ts`, `scripts/host-sampler.mjs`, `src/index.ts`,
+  `test/host-rotation-fallback-trace.test.js`, `test/host-sampler.test.js` y el nuevo
+  `test/heap-band-truth-2ebbc0de.test.js` — **es trabajo de lanes vivas (Lane A/`heap-band-truth`),
+  no residuo**; se anota para que el cierre de bloque no lo lea como suciedad.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03) — EN COLA (P2)**: el
   archive de dept_sleep corta ~85 líneas de la cola zombie final (incl.
   m-426 delivered post-retirement; acks a host rotado 'prepared') —
