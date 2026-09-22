@@ -684,7 +684,10 @@ test('O3-b PEAK anti-storm: an O1 dispatch block ([deepartments] pool: …) NEVE
   await withTempStateDir(async (stateDir) => {
     // The pooler 0-usable branch carries the family token "quota" — the PEAK
     // rule must win (a job deferred by O1 was never materialized; no backfill).
-    const atQuota = '[deepartments] pool: workspace ws1 at quota (0 usable keys — all blocked/cooldown/invalid; 1/1 keys) — dispatch delayed; retry when a fresh key resolves'
+    // 2026-09-22 (host-approved lane): the label now names the missing path(s)
+    // BY CAUSE + the measurement basis; the PEAK rule keys on the SAME family
+    // text («[deepartments] pool: …»), which is preserved.
+    const atQuota = '[deepartments] pool: workspace ws1 at quota (0 usable keys — all blocked/cooldown/invalid; 1/1 keys) — missing: the Go pool has no usable key (1/1 blocked/cooldown/invalid); no channels are declared — basis: Go keys (usable = not invalid, not blocked, past cooldown) + declared channels (enabled && !halted && past cooldown) — dispatch delayed; remedy: retry when a fresh key resolves (the Go pool must gain a usable key)'
     const r1 = await collectClassOutageCandidate(stateDir, 'c1', atQuota, undefined, 1000)
     assert.equal(r1.collected, false)
     // The HALT branch via the ERROR text too.
