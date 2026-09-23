@@ -298,6 +298,18 @@ counterexample freezes the org identically). Before the restart, run the
 - **Escalate, don't trash**: if a builder (Flash) fails twice, human
   decision (no tiered models).
 - **Specs first**: write/update the spec before implementing.
+- **Declared instants: measured or absent.** An instant you state in a message
+  or a report is **MEASURED** — cite the machine-written file it came from and
+  its anchor (the record that carries both the epoch and the ISO) — or it is
+  **ABSENT**. Never extrapolate one from an earlier anchor: the divergence grows
+  and is invisible to you (measured: declared instants drifted up to **+119 m
+  16 s** from their own persistence, `fb-2487`). Form: `ts MEDIDO: <epoch ms> =
+  <ISO> (source: <file>, anchored to <anchor>)`. An approximate `~HH:MMZ`
+  **without a cited source is a DEFECT**, not a rounding: a fabricated
+  coordinate. If you cannot measure it, **omit it** — an absent instant costs
+  nothing, an invented one misleads a peer into building on it. On receiving
+  one: say so plainly as a defect and ask for the anchored value; never act on
+  the unanchored figure.
 - **Reports are inter-agent memory**: dispatch prompts reference paths of
   previous reports instead of re-dumping context.
 - **Always-async delegation.** The secretary tool (the `dsh-deepartments/
