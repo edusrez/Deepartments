@@ -38,6 +38,18 @@ restate it**.
    host state in +/-60 s and its **verdict** — so the open question ("is the
    server short?") is answered by a criterion instead of an impression.
 
+**Contract for the two read-only `systemctl` forms** (the `dept_exec` guard is
+ANCHORED and deny-by-default — it TOKENIZES the line and matches by grammar,
+never by `startsWith`): the accepted form must be the **ENTIRE LINE**, and **any
+metacharacter denies it OUTRIGHT** (`;` `|` `&`, `$(…)`, backticks, quotes,
+braces, redirects, and every control char — newline/CR/TAB). So **a compound
+with an instant stamp is DENIED even when the inner form is allowed — the
+instant is taken in a SEPARATE call.** And the `-p` value is **ONE
+COMMA-SEPARATED LIST** — `systemctl show <unit> -p MainPID,NRestarts,…` —
+**never the repeated `-p A -p B`, because a SECOND `-p` is DENIED**; `show`
+**WITHOUT `-p`** (the full dump) stays DENIED
+(`src/invoke.ts:2458-2527`, fb-958).
+
 ## What to do
 
 1. **Liveness** (the FULL protocol, in this order — the norm §6 is its durable
@@ -78,8 +90,9 @@ restate it**.
    - **`systemctl restart dsh-host-sampler` is NOT available to a worker.** It
      is a MUTATING verb and the `dept_exec` guard DENIES it (the only permitted
      forms are READ-ONLY: `systemctl is-active <unit>`, and the inert-property
-     read `systemctl show <unit> -p MainPID|NRestarts|ExecMainStartTimestamp|
-     FragmentPath|DropInPaths|EnvironmentFiles`). The unit still owns the process, its cwd, its flags and the
+     read `systemctl show <unit> -p
+     MainPID,NRestarts,ExecMainStartTimestamp,FragmentPath,DropInPaths,EnvironmentFiles`
+     — ONE comma list, and a SECOND `-p` is DENIED). The unit still owns the process, its cwd, its flags and the
      log append targets — and the ACTION is the **Asistente/owner's**. Do NOT
      attempt it with any other mechanism, and do not touch the daemon
      (`dsh-deepartments-dev`) either.
