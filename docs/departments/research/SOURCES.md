@@ -98,6 +98,8 @@ defect.** ⇒ **When verifying a correction in an append-only entry, grep for th
 MARKER vocabulary — and search for it actively, because a marker the reviewer
 does not search for is indistinguishable from a marker that does not exist.**
 
+**⚠️ BILINGUAL MARKER VOCABULARY (research-head, 2026-09-23).** The marker vocabulary of this archive is **bilingual**: `SUPERSEDED`/`CORRECTED`/`OBSOLETE`/`RETRACTED` coexist with `CORRECCIÓN`/`OBSOLETA`/`SUPERADO`/`RETIRADO`. ⇒ A verification grep MUST carry **both word-sets**: a reviewer grepping only the English set reproduces the R24 defect — it declares "unneutralized" what IS neutralized. Measured (pattern and file per hit): ≈21 of 314 files, ≈25 acts — `reports/research-head/2026-09-23-neutralizacion-volumen-y-mecanismo-medidos.md`.
+
 **Measured instance (2026-09-23, `sources/openai-gpt-6-sol-luna.md`; filed as
 `fb-2667`, since closed — cited for its measurement, not as a home).** A
 correction landed with its `>>> SUPERSEDED` marker **three lines below** the false
@@ -110,12 +112,26 @@ between explicit opening/closing fences (`>>> … DO NOT ACT ON THE FOLLOWING` �
 `<<< END OF SUPERSEDED TEXT`), so provenance survives and nobody mistakes it for
 guidance.
 
+**✅ DECISION (research-head, 2026-09-23; closed by the host, `1790173139`) — the cure is performed by the `organizer`, which ALREADY holds `edit` and has NO web tools; the `researcher` is NOT given `edit`.**
+
+**(a) The rule as decided.** When a claim already written in an append-only `sources/` entry must be neutralized, the **`organizer`** applies the R23 marking act: marker **ABOVE** the claim, inside opening/closing fences, the neutralized text kept **verbatim**.
+**(b) Scope of the cure — MARKING, never JUDGMENT.** The `organizer` marks; it never alters findings, conclusions, citations, or any report body, and it never decides **what** is obsolete — that judgment stays with whoever wrote or verified the claim. The act is mechanical and verifiable by delta.
+**(c) Why.** The role that reads the most untrusted content (web, PDFs) does not widen its toolset to satisfy a documentation convention. The alternative primitive was considered and rejected on cost: a full `write` retype is precisely where silent last-write-wins loss happens (see the four steps above).
+**RECINTO (bound scope, and it is not decoration):** this cure covers **the department workspace `sources/` and the RD's own reports — NEVER the repository**; the repo's law documents are the head's/host's pen. Cost of the concession: **zero** — no new tool, no engine change, no widening of the exposed role.
+
+>>> [SUPERSEDED 2026-09-23 — READ BEFORE ACTING] The execution condition below was written while
+the decision was still OPEN; it is kept verbatim as history, never as guidance. Its mechanical
+premise was also TOO STRONG: a `researcher` performing a full `write` CAN restructure and place a
+marker above an existing claim — measured, `sources/cognition-devin-astra-harness.md:35` (§0
+"CORRECTION TO THIS FILE ITSELF", round `25158f86`, written BY a researcher). What the role cannot
+do is edit ONE line, or revisit a large file without paying the full retype. See the DECISION above.
 **⚠️ EXECUTION CONDITION — AND IT IS STRUCTURAL: the researcher has NO `edit`, so
 it CANNOT put the marker above an existing claim; append-only forces the marker
 BELOW.** ⇒ A rule that requires rewriting an existing line **cannot be assigned to
 a role that cannot rewrite**. Either the role gets `edit`, or the cure is performed
 by the file's owner (the head), who does hold `write`. **Deciding which, explicitly,
 is part of writing the rule — not an afterthought.**
+<<< END OF SUPERSEDED TEXT — see the DECISION above.
 
 **★ Control (this worked, and it is the model to copy):** `sources/nvidia-deepseek-v41-flash-nvfp4.md`
 — worker `5f9bdaba` filed §[1]–§[6], then worker `d90c7ef9` reached the same
