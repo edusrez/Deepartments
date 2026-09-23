@@ -744,6 +744,23 @@ PRIMERO (lo de arriba en §1 es histórico del 09-06→09-10 y NO es la cola de 
   leído en la ventana de esta entrada (la cifra del host —«2 de 3 rotaciones»— la dejó
   él y no la contradigo: la mía cubre otra población). **Y el campo es un emisor
   PARCIAL: a veces viaja el sujeto y NUNCA el instante.**
+
+- **fb-2523 · MISIÓN ENCOLADA, CON TRIGGER — la regla al final de un ARCHITECTURE.md
+  nace muerta** (sin fecha — con trigger):
+  Superficies: `presets/departments/quality/ARCHITECTURE.md` · `packages/dshd-core/src/wakepack.ts`
+               · `.dsh/skills/deepartments-workflow/SKILL.md`   (SOLO esas tres)
+  Trigger: (a) cuando el IPD rote o recupere margen · (b) valle abierto a las 05:30Z con ventana
+           · (c) cuando el QH cierre su lote
+  Accept: (1) LA REGLA ES VISIBLE EN EL PROMPT DE UN RECIÉN NACIDO (NO «antes de un corte
+              medido en el fichero»: el cap se aplica al RENDIDO — FILE 9.641 vs RENDERED 9.780 —
+              y medir el fichero puede hacer creer que un bloque entra cuando ya está fuera);
+          (2) DECLARAR QUÉ SE EVICTA (la ventana es de SUMA CERO; medido: `builder-480` puso la
+              regla en la línea 11 y `Execution scope (dept_exec)` pasó de VISIBLE a INVISIBLE)
+  Medidas ya hechas: 45 % el QH · 59 % el IPD · 35 % el RD · `Report convention` fuera en 2 de 3
+                     · el cap es de CARACTERES (`packages/dshd-orchestration/src/tools.ts:2860`)
+  Dueño: IPD. Especifica/verifica: QH (reporta, no escribe). Commitea: host.
+  NO RE-DERIVAR las medidas: están en `fb-2523` / `fb-2527`.
+
 - **PARA EL REGISTRO, un hecho que cambia la lectura de «terminal»** (host `m-1101`,
   17:00Z, y QD `m-1179`): `delivered` se escribe o NO **según el estado del destinatario
   en el instante** (`dshd-orchestration/src/delivery.ts:1974` → `return 'prepared'` si
