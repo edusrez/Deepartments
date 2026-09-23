@@ -1,5 +1,29 @@
 # WORK-REGISTER — trabajo pendiente
 
+> **LANDING 2026-09-23 (host Asistente `30ed2af0`, wake 118)** — **FILAS 18 + 3c
+> DESPLEGADAS AL ÁRBOL SERVIDO + HUECO DE 77,98 h ADJUDICADO + `474` CERRADO**
+> (detalle: `.dsh/reports/host/2026-09-23-deploy-rows18-3c-y-adjudicacion-hueco.md`
+> y ROADMAP 09-23). (1) **Desplegado y verificado POR IDENTIDAD** (md5 == POST
+> declarado en los dos ficheros; 25.462 ficheros comparados y solo esos dos
+> cambiados; cero `.rej`; canario PASS; proceso arrancado DESPUÉS del parche):
+> `ROW 18` `2443ac0c→539094cd` · `ROW 3c` `a182162d→f3b4e74d`. Efecto medido con
+> Host y 3 Heads retenidos: 626→24 filas, 112.213→5.383 B, 517→24 proyecciones,
+> 28,2→7,8 ms CPU/item. (2) **Hallazgo que invalidó una conclusión previa**: los
+> symlinks del perfil se **re-apuntaron al árbol el 09-22 21:16:32** — 3 min
+> DESPUÉS de la medición que concluyó «3c = NO-OP»; hoy **240/249** paquetes se
+> sirven del árbol y los 9 que van al global no los toca ninguna fila ⇒ **3c no
+> era NO-OP** y quedó verificada **por conducta** (`SEARCH_FAILED` →
+> `grep: path not found:`). **fb-2488**. (3) **`474` CERRADO** con `version = 3`
+> DENTRO del header vivo (peer 0.1.5-rc.2). (4) **Hueco de 77,98 h ADJUDICADO:
+> capacidad, NO caída** (proceso vivo 978/1728/1728 líneas, mismo PID; tombstone
+> `monthly-100` → pool a 0 claves del 18-09 10:25 al 21-09 12:18:54, y el hueco
+> termina 96 s después; 35 `mission-stalled` + 34 `pooler-capacity`).
+> **COLA QUE ESTO ABRE (VALLE, no PEAK)**: **fb-2489** (el oráculo del lane
+> `sidebarfix1` se auto-invalida al desplegar: derivar el brazo pristine del
+> **árbol de control**, hoy 6/6 con `DSH_DEV_TREE=/opt/dsh/trees/control-0.1.5-rc.2-pristine`)
+> · **fb-2488** (falta un DETECTOR del re-link del perfil) · **fb-2490** (test
+> `THE ALERT` del sampler, verde solo cuando la máquina está mal) · **fb-2487**
+> (QH: el `ts` del encabezado deriva hasta +119 min del `ts` durable).
 > Registro TOTAL de trabajo pendiente de la organización Deepartments. Creado
 > el 2026-08-27 (M3 SYNERGY-DOCS, decisión owner) a partir del contenido v1 del
 > Asistente; lo mantienen el **Internal Programming Department (IPD)** y el
