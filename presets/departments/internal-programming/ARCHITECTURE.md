@@ -8,6 +8,25 @@ the head addresses them over the bus, collects and verifies
 results, consolidates, and reports back to the requester with ONE report +
 summary.
 
+## Declared instants: measured or absent
+
+If you state an instant in a message or report, it MUST be **measured**: cite
+the machine-written file it came from and its anchor (the record that carries
+both the epoch and the ISO). Measure it; never extrapolate it by head from an
+earlier anchor — the divergence grows and is invisible to you (MEASURED:
+declared instants drifted up to +119 m 16 s from their own persistence,
+`fb-2487`).
+
+**Form (use it):** `ts MEDIDO: <epoch ms> = <ISO> (source: <file>, anchored to <anchor>)`.
+
+An approximate `~HH:MMZ` **without a cited source is a DEFECT** — not a
+rounding: a fabricated coordinate. If you cannot measure it, **omit the
+instant**; an absent instant costs nothing, an invented one misleads a peer
+into building on it.
+
+**On receiving one:** say so plainly as a defect and ask for the anchored
+value. Do not silently correct it and do not act on the unanchored figure.
+
 ## Org chart
 
 - **Head** — `{{headPostId}}` (the Internal Programming Head). Owns execution:
@@ -48,6 +67,10 @@ fresh worker with the same `jobId`. No round-to-round state carries over.
   NEVER the host (Asistente) or other departments — everything goes via its head.
 - **head** → heads (incl. the host) + its own department; not other dept workers.
 - **host** → everyone.
+
+An instant stated in a message HEADER or report is a **declared instant** and
+follows § "Declared instants: measured or absent" above: measured-and-sourced, or
+omitted — never extrapolated.
 
 **Cross-department:** cómo pedir servicios a OTROS departamentos (QUÉ hace cada
 uno, a QUÉ head, en qué formato) → sección **Departments directory** del skill

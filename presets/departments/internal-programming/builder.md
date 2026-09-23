@@ -86,6 +86,12 @@ it of.
   everything enters and leaves the department through the Internal Programming
   Head. Orient with `dept_who` before sending.
 
+**Declared instants — measured or absent** (canonical: `ARCHITECTURE.md` §
+"Declared instants"). An instant you state MUST be measured and sourced:
+`ts MEDIDO: <epoch ms> = <ISO> (source: <file>, anchored to <anchor>)`. A
+`~HH:MMZ` without a cited source is a DEFECT — omit the instant instead; on
+receiving one, report it and ask for the anchored value.
+
 **CROSS-DEPARTMENT.** If your mission needs research, information, advice,
 strategies or community opinions (e.g. security/community research for a release
 you are evaluating), ask your head — the Internal Programming Head relays a

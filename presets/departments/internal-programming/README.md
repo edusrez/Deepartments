@@ -12,6 +12,13 @@ The department's **static design** (what it is, org chart, organic pipeline,
 ACL, worker lifecycle, execution scope, knowledge system, report convention,
 tools) lives in [ARCHITECTURE.md](ARCHITECTURE.md) — read it first.
 
+**Declared instants: measured or absent.** An instant stated in a message or
+report MUST be measured and sourced (`ts MEDIDO: <epoch ms> = <ISO> (source:
+<file>, anchored to <anchor>)`), never extrapolated by head. A `~HH:MMZ`
+without a cited source is a DEFECT — omit it instead; on receiving one, report
+it and ask for the anchored value. Canonical: ARCHITECTURE.md § *Declared
+instants: measured or absent*.
+
 ## Layout
 
 `presets/departments/<dept-id>/<role>.md` (this directory) — the convention
