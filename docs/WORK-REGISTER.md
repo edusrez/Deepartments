@@ -662,6 +662,149 @@
 > diseño (es log-only; su casa es la línea del log `FB467_INSTRUMENTATION_STAMP`,
 > que a su vez tiene **0 ocurrencias en el journal del día**): quien lo busque en el
 > ledger concluirá «el fix no cargó» teniéndolo cargado (§8.4).
+>
+> **ENTRADA 2026-09-23 — CIERRE DE LA LANE ACL (`fb-2591` + `fb-2620`), EL ARTEFACTO
+> CARGADO, LA REGLA VISIBLE EN EL PROMPT DE UN RECIÉN NACIDO, Y **UNA PREMISA HEREDADA
+> RETIRADA POR MEDICIÓN** (IPD `builder-488`, lane `register-sync`, docs-only; encargo
+> del HOST — el commit es del host, yo NO commiteo)** — **por qué existe esta entrada**:
+> el cierre de la lane ACL es de HOY y no estaba en el registro (`grep -c`: `fb-2591`
+> **0** · `fb-2620` **0** · `fb-2651` **0** · `d540e53` **0** antes de escribir esto).
+> **VENTANA DE LECTURA: 13:45:09.394Z – 14:00:47.948Z**, ambas orillas medidas con
+> `date +%s%3N` vía `dept_exec` — última orilla:
+> `ts MEDIDO: 1790172047948 = 2026-09-23T14:00:47.948Z (source: reloj del host vía `date +%s%3N` en dept_exec)`;
+> cada cifra con su fuente y su instante.
+> **ÁRBOL**: `/home/esuarez/projects/deepartments`, HEAD `d540e53`
+> (`git rev-parse HEAD origin/main` **idénticos** ⇒ pusheado) · stateDir `/.deepartments`.
+>
+> **1) CIERRE DE LA LANE ACL (`fb-2591` + `fb-2620`) — commit `d540e53`.** El fix vive
+> en `packages/dshd-core/src/messages.ts`, con estos **literales**:
+> `export const NON_RETRYABLE_FAILURE_GROUNDS: ReadonlySet<string> = new Set(['acl'])`
+> (`messages.ts:1438`) · el predicado PURO
+> `export function isNonRetryableFailureGround(reason: string | undefined): boolean {`
+> cuya única línea de cuerpo es
+> `return reason !== undefined && NON_RETRYABLE_FAILURE_GROUNDS.has(reason)`
+> (`messages.ts:1444-1445`) · y la rama en `drivePair`
+> `if (row.status === 'failed' && isNonRetryableFailureGround(row.reason)) {`
+> (`messages.ts:2219`) que **precede** a la llamada de entrega
+> `const status = await this.deps.deliver(record, row.recipientId, callerSessionId)`
+> (`messages.ts:2408`) — **el orden está verificado por los DOS literales, no por el
+> número de línea**. Esa rama asienta el par `terminal` **UNA VEZ** con un `warn` que
+> declara par+status+ground ⇒ **0 intentos en vez de 12**. **Un `acl` determinista es
+> TERMINAL: el par no puede entregar nunca** (la refusal se computa sobre las dos fichas
+> DURABLES del catálogo — `aclDenyGround(sender, deps.busProfileFor(recipientId))`, la
+> rama no-reroute de `catalogRoute`: `messages.ts:1408-1411`).
+> **Test**: `test/fb2591-acl-bucle-terminalidad-c50e73ed.test.js` — **re-corrido por mí
+> en esta ventana: `# pass 6` / `# fail 0`, exit 0**, con **RED-FIRST por neutralización
+> de la fuente en COPIA** (el propio test sustituye el cuerpo del predicado por
+> `return false` y exige que la copia queme el CAP completo; su comentario lo declara:
+> «I first expected the pre-fix loop to be UNBOUNDED. It is NOT — the lane-② CAP bounds
+> it at 12 attempts (24 rows for the pair)»).
+> **Población medida por mí en el ledger vivo** (`/.deepartments/deliveries.jsonl`):
+> **58 filas con `"reason":"acl"`, TODAS status `failed`**; **5 pares distintos**; cada
+> par acumuló **12** de esas filas (`m-1818|quality-head`: **10**) **y los 5 tienen ≥1
+> `terminal`**; la última fila `acl` del store es
+> `ts MEDIDO: 1790166860133 = 2026-09-23T12:34:20.133Z`.
+>
+> **2) EL FIX ESTÁ CARGADO — y su LÍMITE, dicho con las palabras exactas.** El
+> artefacto `packages/dshd-core/lib/messages.js` tiene mtime
+> **2026-09-23 13:40:17.748063319 +0000** y el boot que sirve el daemon es
+> `ts MEDIDO: 1790170874685 = 2026-09-23T13:41:14.685Z (source: /.deepartments/boot-crash.json, anchored to bootStartedAt + bootId 21891d64-459c-4625-a651-35deea6319c8)` — la fila
+> `deploy` de `/.deepartments/restart-registry.jsonl` para ese bootId es
+> `ts MEDIDO: 1790170935098 = 2026-09-23T13:42:15.098Z`, y systemd registró
+> `Started dsh-deepartments-dev.service` a las **13:41:02** (journald). Sobre ese boot,
+> el predicado está en el `lib` cargado (`lib/messages.js:1325`
+> `export function isNonRetryableFailureGround(reason) {` y `:1787` la rama).
+> **🔴 LÍMITE HONESTO — NO LO INFLES: LA RAMA NUEVA AÚN NO SE HA EJERCITADO.** El primer
+> boot (código viejo) cerró **por CAP** los pares pendientes ⇒ **no queda ningún par
+> `acl` sin `terminal`**: medido, **0 filas `acl` posteriores al boot** y **0
+> ocurrencias** del literal del warn nuevo (`REFUSED BY ROUTE`) en journald desde el
+> arranque. **⇒ La aceptación se sostiene en el ARTEFACTO CARGADO + el TEST 6/6 con su
+> RED-FIRST. NO en «verificado en producción».**
+>
+> **3) LA REGLA ES VISIBLE EN EL PROMPT DE UN RECIÉN NACIDO: CERRADA.** El **primer
+> predicado** (verificado por el host con **ancla TRIPLE**: fuente · artefacto · su
+> propio pack) es: la regla de los **instantes declarados** viaja en
+> `packages/dshd-core/src/wakepack.ts:403`
+> (`export const HOST_WAKE_ROUTINE_TEXT =` — el literal empieza
+> `'Start-of-session: your Deepartments context injection already carries identity, …`
+> y contiene el bloque `DECLARED INSTANTS` con la forma
+> `ts MEDIDO: <epoch ms> = <ISO> (source: <file>, anchored to <anchor>)`),
+> en el artefacto de tipos `packages/dshd-core/lib/wakepack.d.ts:209`
+> (`export declare const HOST_WAKE_ROUTINE_TEXT = "Start-of-session: …`), y en el
+> artefacto de runtime `packages/dshd-core/lib/wakepack.js:366`.
+> El **segundo predicado** — **«DECLARAR QUÉ SE EVICTA»** — lo satisfizo un **lector
+> fresco del departamento de quality** (no el editor de la superficie) con un **control
+> de dos columnas** contra el commit previo, que **nombró las 4 secciones evictas**:
+> `Org chart` · `Pipeline` · `Worker lifecycle` · `Head lifecycle`
+> (las 4 existen como encabezados en `presets/departments/quality/ARCHITECTURE.md` y
+> ninguna entra en el prompt; las visibles son `Report convention` ·
+> `Execution scope (dept_exec)` · `Tools` · `Report-only fix flow (D-Q5, §3.5)` ·
+> `Messaging ACL (send_message)`).
+> 🔴 **VOCABULARIO (cortesía del QH, aceptada): `S1`/`S2`/`S3` y «asiento» NO EXISTEN en
+> este registro — son jerga de journal. Lo de arriba está nombrado POR SU PREDICADO.**
+>
+> **4) `fb-2651` SIGUE ENCOLADO @15:00Z — y su PREMISA DE RE-FREEZE ESTÁ RETIRADA.**
+> El defecto, en pie: el marcador de truncación declara **QUE** truncó pero **no QUÉ
+> quedó fuera** — `packages/dshd-orchestration/src/tools.ts:2908` devuelve
+> `` `## Department architecture\n\n${rendered.slice(0, ARCHITECTURE_SECTION_MAX)}\n\n… (truncated — full text at ${archPath})` ``
+> y el cap es de **CARACTERES sobre el RENDIDO**: `const ARCHITECTURE_SECTION_MAX = 3500`
+> (`tools.ts:2860`) ⇒ **medir el FICHERO no lo revela**. Dueño: IPD; `next: internal-programming-head`.
+> **🔴 Y AQUÍ LA RETRACTACIÓN, medida por mí (coincide con la del QH): `tools.ts` NO es
+> una zona congelada EN ESTA LÍNEA y el cambio NO exige re-freeze.** La zona congelada
+> es el **slice** entre dos centinelas de CONTENIDO — banner
+> `  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the`
+> (`tools.ts:5783`) y cierre `  }, 'deepartments: host-plane tools')` (`tools.ts:7708`)
+> ⇒ el span es **[5783, 7708]**, y **`tools.ts:2908` queda FUERA**. Verificado con el
+> **md5 del slice recomputado por DOS instrumentos que coincidieron** (`node -e` con el
+> corte banner→close y `python3 hashlib`, ambos **`f7ed6986b8c89fa625910e3566b51fbd`**),
+> valor **byte-sincronizado** con `scripts/zone-md5-manifest.json` (`cut4-tools-zone`) y
+> con el literal `assert.equal(md5, 'f7ed6986b8c89fa625910e3566b51fbd', …)` de
+> `test/tools-factory.test.js` ⇒ **no hay md5 que invalidar y NO hay re-freeze que
+> acoplar**. **⇒ LA PREMISA HEREDADA ERA «`tools.ts` = zona congelada» (cierto del
+> FICHERO) y de ella se derivó «cualquier edición exige re-freeze» (FALSO para estas
+> líneas): UN ALCANCE SIN MEDIR SE HEREDA COMO HECHO.** El disparador de calendario de
+> las 15:00Z lleva DOS piezas de `fb-2668` + `fb-2651` y **ya contiene la retractación**
+> (medido en `/.deepartments/calendar.json`: la entrada `e6edea28-…` declara «NO EXIGE
+> RE-FREEZE» y «RETIRADA LA PREMISA FALSA»). **Si las piezas van en UN solo cambio, el
+> motivo es la regla de la casa «UN FICHERO, UN DUEÑO» + una sola verificación — NO el
+> lock.**
+>
+> **5) EL CANAL DEL SISTEMA TIENE DOS CAMINOS VIVOS — HALLAZGO DEL CIERRE, no
+> hipótesis.** Censo propio (solo lectura) sobre `/.deepartments/messages.jsonl`
+> cruzado con `deliveries.jsonl`:
+> - **`System-health ALERT` al host: 3/11 CON fila de bus · 8/11 SIN fila.** Ventana
+>   medida: **13:11:36.472Z → 13:42:16.014Z**, 11 alertas dirigidas al host, **3 con fila
+>   (`m-2043`/`m-2050`/`m-2060`, las tres `delivered`) y 8 sin ninguna fila**
+>   (`m-2009`, `m-2011`, `m-2035`, `m-2062`, `m-2064`, `m-2068`, `m-2069`, `m-2070`).
+> - **`Quality inspect`: 43/43 POR EL BUS.** La cifra se reproduce **exacta** para las
+>   **43 más recientes** (`m-1533` → `m-2120`) y para la clase entera (**80/80**;
+>   hoy **50/50**, todas `kind:"agent"`) ⇒ **su denominador es VENTANA-DEPENDIENTE, no
+>   un tamaño de clase** — se registra con esa forma.
+> **⇒ El canal tiene DOS caminos vivos: el bus y la notificación directa.**
+>
+> **6) DOS NORMAS DE LA JORNADA (decisión del IPH; van como DOCTRINA en §7 con su caso
+> medido al lado)** — **(i) UN DISPARADOR DE CALENDARIO QUE LLEVA UNA PREMISA FALSA LA
+> EJECUTA: se corrige en la ENTRADA, no en un mensaje** (la retractación tiene **radio de
+> daño**: alcanza disparadores, briefs ya enviados y resúmenes; el caso de hoy es el
+> disparador de @15:00Z con la premisa del re-freeze) · **(ii) AL CITAR UNA MEDICIÓN
+> PROPIA SE DECLARA `medido a <ts>`, NUNCA «medido ahora»** (caso medido: una cifra que
+> envejeció **72.650 s** entre la lectura y el envío del MISMO agente; y su extensión
+> probada: **el `seq` de un bloque que NO se re-mide es el sello que delata la copia**
+> — el mismo `seq 3748` citado en tres mensajes era la prueba de que no se había
+> re-medido).
+>
+> **7) EL COSTE REAL DE UN DEPLOY: DOS RESTARTS, y el primero pasó canary con código
+> PRE-FIX** (`fb-2673`, `estado:duplicado`, ALTO · `fb-2230`, `abierto`, ALTO — ambos
+> leídos en `/.deepartments/feedback.jsonl`). Mecanismo: el bare **`pnpm build`** es
+> **`tsc`** (compila SOLO `src/` raíz) ⇒ **el `lib/` del paquete queda STALE** ⇒ **cinco
+> señales verdes** (`build` · `plugin add` · `dump-config` · **canary PASS** · test 6/6)
+> **sobre un artefacto que el proceso NO cargaba**. El paso correcto es
+> **`pnpm build:root-check`** = `node scripts/check-root-build.mjs` (regenera cada lib de
+> paquete desde su src y DESPUÉS corre el tsc raíz: `scripts/check-root-build.mjs:1-34`,
+> gate FB-266). **Y `lib/` está en `.gitignore:7`** ⇒ **el artefacto NO VIAJA EN EL
+> COMMIT** ⇒ **el gate tiene que correr DONDE SE ARRANCA.**
+> — next: host (commit de cierre) / IPD (`fb-2651` @15:00Z) — **CERRADA-la-lane-ACL**
+> (register-sync 2026-09-23, builder-488).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 <!-- ⚠️ Vigencia: los ítems de esta sección son HISTÓRICOS (09-06→09-10) salvo el
@@ -1786,6 +1929,45 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   Referencias: lane O2-ALIGN `9420964` ·
   /root/.deepartments/departments/internal-programming/reports/builder/2026-09-09-cleanup-wt-fbd-nudge-o2-631e8329.md
   y ...-exec-23a00303.md.
+- **DOCTRINA — UN DISPARADOR DE CALENDARIO QUE LLEVA UNA PREMISA FALSA LA EJECUTA:
+  SE CORRIGE EN LA ENTRADA, NO EN UN MENSAJE (2026-09-23, IPH; doctrina + caso medido)**:
+  corregir el texto de un disparador no basta, porque **la retractación tiene RADIO DE
+  DAÑO** — el alcance de lo que ya incorporó la premisa: el propio disparador, los briefs
+  YA enviados a workers y los resúmenes que la citan. **Una regla sin su caso es un
+  aforismo; con su caso, es citable.**
+  **CASO MEDIDO**: el disparador de calendario de las **15:00Z** del 09-23
+  (`/.deepartments/calendar.json`, entrada `e6edea28-2b35-4200-9715-4fb809ee10ed`,
+  `createdBy internal-programming-head`, creada
+  `ts MEDIDO: 1790171305440 = 2026-09-23T13:48:25.440Z`) llevaba la premisa **falsa** de
+  que la edición de `packages/dshd-orchestration/src/tools.ts` exigía **re-freeze**; la
+  **ENTRADA** se corrigió — y hoy declara, en su propio texto, «**NO EXIGE
+  RE-FREEZE**» y «**RETIRADA LA PREMISA FALSA**». La medida que la funda está en el §
+  de esta misma entrada: la zona congelada es el **slice** entre los centinelas de
+  `tools.ts:5783` y `tools.ts:7708`, y `tools.ts:2908` **queda FUERA** (md5 del slice
+  `f7ed6986b8c89fa625910e3566b51fbd` por dos instrumentos que coincidieron).
+  **Ninguna entrada ajena se reescribe por esto**: la retractación vive donde se leyó la
+  premisa.
+- **DOCTRINA — AL CITAR UNA MEDICIÓN PROPIA SE DECLARA `medido a <ts>`, NUNCA «medido
+  ahora» (2026-09-23, IPH; doctrina + caso medido)**:
+  **CASO MEDIDO**: una cifra que **envejeció 72.650 s** entre la lectura y el envío del
+  **MISMO** agente ⇒ «medido ahora» era falso en el momento de escribirlo, y no había
+  forma de saberlo sin el `ts`.
+  **EXTENSIÓN PROBADA — EL `seq` DELATA LA COPIA**: **el `seq` de un bloque que NO se
+  re-mide es el sello de que se está citando una lectura VIEJA**; la prueba de la jornada
+  es que el **mismo `seq 3748`** se citó en **TRES** mensajes distintos, y ésa —no el
+  contenido— era la señal de que no se había vuelto a medir.
+  ⚠️ **COROLARIO PARA ESTE REGISTRO**: un margen (o cualquier cifra viva) se cita **con
+  su `seq`**, nunca como número suelto — un número sin su `seq` no es verificable. El
+  margen VIEJO del IPH (`{seq 3748, pressureTokens 313728}`) quedó **SUPERSEDED** por el
+  suyo medido para el mensaje de la jornada (**`{seq 3930, pressureTokens 388373}`**) —
+  y la forma correcta de citarlo es **con ese par**, no con la resta.
+  ⚠️ **LÍMITE DECLARADO (no re-medido por mí)**: esos dos pares `{seq, pressureTokens}`
+  son **telemetría del PROPIO agente** (`agent_pressure`/context-action del harness), **no
+  campos de un artefacto que yo pueda releer**: `/.deepartments/tool-intents.jsonl` tiene
+  **2.821 filas** con claves `kind,id,tool,agent,memberId,target,args,ts` y **0 filas con
+  `seq` o `pressureTokens`** (medido en esta ventana) ⇒ **en este registro se citan como
+  DECLARADOS por el IPH, no como medición mía**; lo verificable aquí es la FORMA
+  (`{seq, pressureTokens}`, nunca la resta), que es lo que la doctrina exige.
 
 ---
 
