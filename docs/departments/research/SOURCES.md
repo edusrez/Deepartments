@@ -80,6 +80,43 @@ section disappears SILENTLY** — no error, no conflict, no trace.
    content** — never write your stale copy over it. Losing your own delta costs a
    round; overwriting a sibling's costs THEIR round too.
 
+#### NEUTRALIZING A CLAIM ALREADY WRITTEN IN AN APPEND-ONLY ENTRY — the marker goes FIRST
+**(head's rule, 2026-09-23; the defect is measured, and it bit its own author)**
+
+**The rule (R23): when you correct or retire a claim that is ALREADY in the
+entry, the neutralization marker goes ABOVE the claim, not below it.** A marker
+placed *after* the text it neutralizes does not neutralize anything: a reader who
+trusts the cited range reads the old claim and stops.
+
+**Why a marker BELOW fails — the second half, and the one that is easy to miss
+(R24): the defect and its verification require OPPOSITE instruments.** A reader
+checking the claim greps for the *claim's* vocabulary (`SECONDARY`,
+`Do not restate`, `promotional`); the marker lives in a *different* vocabulary
+(`SUPERSEDED`, `CORRECTION`, `RETRACT`, `CLOSED`). **The two word-sets are
+disjoint by design, so using the defect's words to check the fix REPRODUCES the
+defect.** ⇒ **When verifying a correction in an append-only entry, grep for the
+MARKER vocabulary — and search for it actively, because a marker the reviewer
+does not search for is indistinguishable from a marker that does not exist.**
+
+**Measured instance (2026-09-23, `sources/openai-gpt-6-sol-luna.md`; filed as
+`fb-2667`, since closed — cited for its measurement, not as a home).** A
+correction landed with its `>>> SUPERSEDED` marker **three lines below** the false
+caution it retired. Consequence, and it is the part that makes this a rule rather
+than a style note: **the instruction derived from that line — «never write «OpenAI
+says 50%»» — was sent to two workers, and would have stripped OpenAI of an
+attribution it does actually make.** The fix, applied by the file's owner: markers
+moved **above** the text they neutralize, the neutralized text kept **verbatim**
+between explicit opening/closing fences (`>>> … DO NOT ACT ON THE FOLLOWING` …
+`<<< END OF SUPERSEDED TEXT`), so provenance survives and nobody mistakes it for
+guidance.
+
+**⚠️ EXECUTION CONDITION — AND IT IS STRUCTURAL: the researcher has NO `edit`, so
+it CANNOT put the marker above an existing claim; append-only forces the marker
+BELOW.** ⇒ A rule that requires rewriting an existing line **cannot be assigned to
+a role that cannot rewrite**. Either the role gets `edit`, or the cure is performed
+by the file's owner (the head), who does hold `write`. **Deciding which, explicitly,
+is part of writing the rule — not an afterthought.**
+
 **★ Control (this worked, and it is the model to copy):** `sources/nvidia-deepseek-v41-flash-nvfp4.md`
 — worker `5f9bdaba` filed §[1]–§[6], then worker `d90c7ef9` reached the same
 verdict by an independent path and **appended §[7]** carrying five things the
