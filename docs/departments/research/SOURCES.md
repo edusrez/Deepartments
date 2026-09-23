@@ -145,6 +145,7 @@ determinista), `community.cloudflare.com` = 403 anti-bot (**la fila que `fb-442`
 pedía desde el 09-08**), **`alignment.openai.com` = fila POSITIVA**, y la
 **regla de ALCANCE POR SUBDOMINIO** que las tres comparten).
 **Updated 2026-09-23** (fb-843 → instancia **fb-2625**, round `daily-ai-news-21`): 2 filas nuevas — `mimo.xiaomi.com` (**200-inservible**: shell JS) y el **ALCANCE del proxy `r.jina.ai`** (funciona **por host**, NO es universal). **REFINADA el mismo día con verificación INDEPENDIENTE del QD** (segundo lector, su propio `web_fetch`): el modo de fallo NO es «vacío» sino **«METADATA-COMO-CUERPO»**, y el remedio que el propio proxy declara está **gateado fuera del alcance de `web_fetch`** ⇒ leer la fila de `r.jina.ai` ANTES de usarlo como árbitro.
+**Updated 2026-09-23 (2ª edición, curación del head en ventana autorizada por el host)**: 1 fila nueva — `venturebeat.com` (**429** recurrente, la fila que **`fb-739`** pedía y que quedó plegada al canónico VIVO **`fb-24`** sin aterrizar aquí) — y **la regla de lectura de los ids citados en esta tabla** (bloque inmediatamente antes de la tabla).
 
 ### ⚠️ SCOPING RULE — a row is scoped by SUBDOMAIN/PREFIX, NEVER by registrable domain
 **(head's rule, 2026-09-17; two independently measured instances)**
@@ -193,6 +194,8 @@ es criterio de seguridad; «mismo DOMINIO REGISTRABLE» sí.** El escalón corre
 **no** es seguir el redirect por defecto, sino **exponer el `Location` completo
 en el error** (y acotar la URL de destino).
 
+**⚠️ PROCEDENCIA, NO DESTINO (regla de la casa, aprobada por el QD el 2026-09-23; nace de una instancia real):** los `fb-####` que esta tabla cita son **PROCEDENCIA** — de dónde salió cada observación — **NO el hogar donde plegar una instancia nueva**. Antes de plegar, **medir el ESTADO** del id (`/.deepartments/feedback.jsonl` = vivas · `feedback-archive.jsonl` = terminales), porque **un registro terminal no recibe instancias**: en esta misma tabla, `fb-211` figura en dos filas como procedencia y está **`resuelto`**, y `fb-739` está **`duplicado`→`fb-24`**. Donde el id SÍ es destino, la fila lo dice y **lleva su estado** (p. ej. la fila de `r.jina.ai`).
+
 | Domain | Status | Observed behavior | Fallback |
 |---|---|---|---|
 | `businesswire.com` (www + secure) | **UNRELIABLE** | systematic 30 s timeout (fb-96/102/104) | one attempt max, then vendor primary |
@@ -201,6 +204,7 @@ en el error** (y acotar la URL de destino).
 | `openai.com` (**scoped: `openai.com/index/*`**) | **BLOCKED — SCOPE, read the row** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08, 09-10; fb-211) — ⚠️ **the block is recorded for the `index/*` prefix, NOT for every subdomain**: see `alignment.openai.com` below | do not attempt; capture via search-provider content + dated secondaries — **and check for a POSITIVE sibling row first (scoping rule above)** |
 | `alignment.openai.com` | **OK (POSITIVA)** | **HTTP 200 con texto COMPLETO** (round 09-17; fb-1779) — **subdominio fetchable del MISMO publicador cuyo apex (`openai.com`) es 403** | **usar como primaria DIRECTA** para las divulgaciones de OpenAI (p. ej. `/misalignment-reports/`); **NO confundir con el apex bloqueado** — son hosts distintos |
 | `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
+| `venturebeat.com` | **UNRELIABLE** | **HTTP 429** rate-limited, **recurrente**: 3+ rondas medidas (`fb-739`, round 06e43428; 2ª ronda consecutiva `730c6c96`; 3 intentos en la ronda `048cd857`; de nuevo el 2026-09-23 en `ai-industry-news-69`). Es **la fila que `fb-739` pedía** y que quedó **plegada al canónico VIVO `fb-24` sin aterrizar en esta tabla** hasta hoy | **one attempt max**; capturar por **secundaria fechada** o por el **primary del vendor** — no reintentar en la misma ronda (el 429 consume la tentativa sin cambiar el resultado) |
 | `es.dataconomy.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-08, fb-236; corroboración GPT-6 Astra) | do not attempt; use dated secondaries (e.g. gadgetsnow/digitaltrends) |
 | `pricepertoken.com/model-releases` | **UNRELIABLE** | HTTP 404 URL drift (round 09-08; fb-236) | do not attempt; use ThursdAI / aireleasetracker for release-gap checks |
 | `media.defense.gov` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-286) — gov advisories (e.g. CSA) not fetch-able | one attempt max; capture via search-provider + dated secondaries |
