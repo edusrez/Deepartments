@@ -1344,6 +1344,98 @@ async function orphanHeadLandedAtSuccessor(
   }
 }
 
+// ─── D270 (2026-09-23) — THE HEALTH-NOTICE SYSTEM EXEMPTION ───────────────────
+// Host decision D270, TAKEN. `from = 'deepartments'` (the SYNTHETIC daemon
+// origin the bundle's health/quality seams append with — it is never a
+// registered post, so `aclDenyGround` classifies it `unclassified` and its
+// conservative final branch denies EVERY recipient) is admitted ONLY for a
+// HEALTH NOTICE that concerns the RECIPIENT'S OWN post — never for content.
+//
+// WHY THE EXEMPTION LIVES HERE AND NOT IN THE PURE PREDICATE: `aclDenyGround(sender,
+// recipient)` (./acl.ts) takes TWO MEMBER PROFILES and therefore CANNOT SEE THE
+// MESSAGE: an exemption conditioned on the notice's CONTENT is not expressible
+// in its signature without changing it. `catalogRoute` is the seam where the
+// RECORD is in scope (`record: MessageRecord`, the parameter below), and it is
+// the seam that EXECUTES the denial (`opts.failedGround?.('acl')` +
+// `return 'failed'`).
+//
+// THE ACL'S PURPOSE IS PRESERVED, NOT WEAKENED: the ACL exists to stop leakage
+// BETWEEN DEPARTMENTS. A health notice about a post, addressed to THAT SAME
+// post, discloses nothing the recipient does not already own — and without it
+// the head cannot self-repair (it never learns that its own session is
+// erroring). Content, and any notice about ANOTHER post, stay DENIED.
+//
+// THE EXEMPTION IS A CONJUNCTION OF FOUR INDEPENDENT, SEPARATELY VERIFIABLE
+// CONDITIONS — no one of them alone admits anything:
+//   (1) `record.from === 'deepartments'` — the synthetic daemon origin. NO agent
+//       can author with it (every agent send stamps the caller's own id), and
+//       the exemption additionally requires the denial ground to be EXACTLY
+//       `'unclassified-sender'` (the daemon origin's own conservative branch) —
+//       so it can never lift a real department-scoping ground;
+//   (2) the record's TEXT matches one of the MEASURED health-notice FORMS below
+//       (a recognized shape, never free prose);
+//   (3) the post id CITED BY the notice === `recipientId` (the notice is about
+//       THIS post) — the whole point of the exemption;
+//   (4) `route.kind === 'post'` — a CATALOG POST recipient (a head or a worker).
+//       The HOST route and the `reroute` branch are NOT exempted: the host alert
+//       path (`healthNotifyHost` → `busDeliverToHost`) never travels this seam.
+// An unparseable frame admits NOTHING (the conservative direction), and every
+// non-exempt denial keeps its byte-identical warn + `failedGround('acl')` +
+// `'failed'` (R6).
+
+/** The synthetic daemon origin (the health/quality append sites' `from`). */
+const DAEMON_ORIGIN_ID = 'deepartments'
+
+/** The MEASURED health-notice forms of the daemon origin, each paired with its
+ * emit site and its post-id capture (LITERAL frames, cited by `archivo:linea`):
+ *   - `Turn-error` — `dshd-health/src/index.ts` `buildTurnErrorNotifyFrame`
+ *     (`[From deepartments] Turn-error ${cls}: post ${postId} session …`),
+ *     appended by `dshd-orchestration/src/tools.ts` `healthNotifyHead`;
+ *   - `Quality-inspect` — `dshd-quality/src/index.ts` `qualityInspectDirectiveText`
+ *     (`Quality inspect: <kind> (post ${postId}, …`), appended by the same
+ *     package's emitter;
+ *   - `post-error` — `dshd-health/src/index.ts` `buildHealthAlertFrame`
+ *     (`- post-error: ${postId} (N in window)…`), the alert BULLET.
+ * The optional `[From deepartments → <to>]: ` prefix covers the framed form
+ * (the delivery frame of the same record); the id charset is the post-id
+ * alphabet, so an id the frame cannot parse admits nothing. */
+const HEALTH_NOTICE_FORMS: ReadonlyArray<{ cls: string; re: RegExp }> = [
+  { cls: 'Turn-error', re: /^(?:\[From deepartments(?: → [^\]]+)?\]: )?\[From deepartments\] Turn-error [^:\n]+: post ([A-Za-z0-9._-]+)/ },
+  { cls: 'Quality-inspect', re: /^(?:\[From deepartments(?: → [^\]]+)?\]: )?Quality inspect: [^\n]*?\(post ([A-Za-z0-9._-]+)/ },
+  { cls: 'post-error', re: /(?:^|\n)- (?:CATCH-UP )?post-error: ([A-Za-z0-9._-]+)/ }
+]
+
+/** PURE — the health-notice class + the post id it concerns, or `undefined` when
+ * the record is not a recognized health notice of the daemon origin. Never
+ * throws (a non-string text degrades to `undefined`). */
+function healthNoticeOf(record: MessageRecord): { cls: string; postId: string } | undefined {
+  if (record.from !== DAEMON_ORIGIN_ID) return undefined
+  const text = typeof record.text === 'string' ? record.text : ''
+  for (const form of HEALTH_NOTICE_FORMS) {
+    const match = form.re.exec(text)
+    if (match !== null && match[1] !== undefined) return { cls: form.cls, postId: match[1] }
+  }
+  return undefined
+}
+
+/** PURE — whether THIS denial is the D270 system exemption: the ground is the
+ * daemon origin's own `'unclassified-sender'`, the route is a CATALOG POST, the
+ * record is a recognized health notice (2) and the notice concerns the RECIPIENT'S
+ * OWN post id (3). Returns the notice class for the audit log, or `undefined`
+ * (⇒ the denial applies, byte-identically). Never throws. */
+function exemptOwnPostHealthNotice(
+  ground: string | undefined,
+  route: CatalogRoute,
+  record: MessageRecord,
+  recipientId: string
+): { cls: string } | undefined {
+  if (ground !== 'unclassified-sender') return undefined
+  if (route.kind !== 'post') return undefined
+  const notice = healthNoticeOf(record)
+  if (notice === undefined || notice.postId !== recipientId) return undefined
+  return { cls: notice.cls }
+}
+
 /** The CATALOG route of the delivery engine (spec §4.2 route 2 + §4.3): posts.json
  * (head/worker) then non-retired hosts.json; unknown → 'failed'. F1: a RETIRED
  * worker entry STAYS in the registry (marked, not erased) but is filtered from
@@ -1382,14 +1474,27 @@ async function catalogRoute(
       opts.failedGround?.('acl')
       return 'failed'
     }
-  } else if (aclDenyGround(sender, deps.busProfileFor(recipientId)) !== undefined) {
-    if (route.kind === 'host') {
-      deps.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
-    } else {
-      deps.logger.warn(`[deepartments] bus delivery to "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — skipped; it goes via the recipient's department head (spec 004 §5.6)`)
+  } else {
+    // The ground is computed ONCE and reused by the D270 exemption below.
+    const ground = aclDenyGround(sender, deps.busProfileFor(recipientId))
+    // D270 (2026-09-23) — THE HEALTH-NOTICE SYSTEM EXEMPTION (the block above
+    // `HEALTH_NOTICE_FORMS` carries the whole rationale and the 4 conditions).
+    const exempt = exemptOwnPostHealthNotice(ground, route, record, recipientId)
+    if (exempt !== undefined) {
+      // The ADMISSION is auditable: one info line naming the settled class, the
+      // record and the recipient. Nothing else changes — the delivery falls
+      // through to the UNMODIFIED ALWAYS-WAKE route below.
+      deps.logger.info(`[deepartments] bus delivery to "${recipientId}" ADMITTED by the D270 health-notice exemption (record ${record.id}, sender ${record.from}, class ${exempt.cls}) — a system notice about the recipient's OWN post (spec 004 §5.6)`)
+    } else if (ground !== undefined) {
+      // The byte-identical pre-D270 denial (warn split host/other, ground, status).
+      if (route.kind === 'host') {
+        deps.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
+      } else {
+        deps.logger.warn(`[deepartments] bus delivery to "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — skipped; it goes via the recipient's department head (spec 004 §5.6)`)
+      }
+      opts.failedGround?.('acl')
+      return 'failed'
     }
-    opts.failedGround?.('acl')
-    return 'failed'
   }
   // F1 — a RETIRED member is never woken/attempted (marked, never erased).
   if (route.kind === 'post' && route.entry.retired === true) {
