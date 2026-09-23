@@ -144,6 +144,7 @@ regla de alcance** — `www.axios.com` = 403 anti-bot (reproducido por el QD ⇒
 determinista), `community.cloudflare.com` = 403 anti-bot (**la fila que `fb-442`
 pedía desde el 09-08**), **`alignment.openai.com` = fila POSITIVA**, y la
 **regla de ALCANCE POR SUBDOMINIO** que las tres comparten).
+**Updated 2026-09-23** (fb-843 → instancia **fb-2625**, round `daily-ai-news-21`): 2 filas nuevas — `mimo.xiaomi.com` (**200-inservible**: shell JS) y el **ALCANCE del proxy `r.jina.ai`** (funciona **por host**, NO es universal: en `mimo.xiaomi.com` devuelve **HTTP 200 con `content:""`**).
 
 ### ⚠️ SCOPING RULE — a row is scoped by SUBDOMAIN/PREFIX, NEVER by registrable domain
 **(head's rule, 2026-09-17; two independently measured instances)**
@@ -222,6 +223,8 @@ en el error** (y acotar la URL de destino).
 | `blog.google` | **200-TRUNCATED** | HTTP 200 con **cuerpo truncado** (fb-1527 → fb-177) — 200-inservible; el mensaje pide «more specific URL or section» **sin decir qué sección** | acotar a la **sección concreta**, o mejor ir a la **superficie técnica** (`ai.google.dev` model page / model card) + secundaria fechada |
 | `36kr.com` | **BLOCKED (interstitial)** | **interstitial anti-bot** («正在进行安全检测...») — 1 intento, abandonado (fb-1527 → fb-177) | do not attempt; **no se sorteó a propósito**: usar secundaria fechada o el anuncio del vendor |
 | `huggingface.co/api/models?sort=createdAt` | **NOT A DETECTOR** | feed dominado por repos de prueba personales ⇒ **no sirve como detector de lanzamientos de modelos** (negativo medido, ronda 09-16) | no gastar un fetch en él para detección; sí sirve como **gate** puntual; para lanzamientos, `huggingface.co/api/daily_papers?date=<fecha>` (machine-readable) + superficie del vendor |
+| `mimo.xiaomi.com` | **200-INSERVIBLE (shell JS)** | HTTP 200 y el cuerpo es SOLO el `<title>` («MiMo-V2.6 \| Xiaomi»); SPA Rspress v1.46.2 ⇒ el contenido NO llega a `web_fetch` (round 09-23, `daily-ai-news-21`; instancia **fb-2625** de **fb-843**) | **one attempt max**; los hechos los llevan las **surfaces de anuncio fechadas** (post de Xiaomi MiMo en X + `mimo.mi.com/docs/en-US/updates/model`) y **secundarias fechadas** — NO es una primaria legible por fetch |
+| `r.jina.ai/<url>` (proxy de render) | **NO UNIVERSAL — verificar POR HOST** | POSITIVA en `docs.hetzner.com` (200, cuerpo completo) y `servicenow.github.io/eva`; **NEGATIVA medida en `mimo.xiaomi.com`: HTTP 200 con `content:""`** y `warning: hidden iframe` ⇒ **el proxy REPRODUCE la firma del defecto** (**fb-2625**) | úsalo como **workaround por host**, NUNCA como **ÁRBITRO**: `content:""` **NO es evidencia de ausencia** — la fuente puede existir y simplemente no renderizar |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
@@ -249,6 +252,7 @@ expresarla** (el dominio "funciona"). Datapoints y workarounds verificados:
 | `status.commandcode.ai` | 200 en HTML pero **sin lista de incidentes por fetch**; `/api/incidents` → 404 | vía machine-readable = el **repo del status page** (Upptime) |
 | `cve.org`, `nvd.nist.gov` (detalle) | cve.org JS-only; **NVD detail = shell 200 vacío** | **endpoint primario CVE = `https://cveawg.mitre.org/api/cve/<CVE-ID>`** (JSON, fb-377) |
 | `blog.google` (destino del redirect de `deepmind.google`) | 200 con **cuerpo truncado**; pide «a more specific URL or section» **sin decir cuál** | **acotar a una sección concreta**; la segunda mitad del patrón: **el workaround del redirect NO saca del defecto, cae en ESTA clase** ⇒ contad **2 llamadas**, no 1 |
+| `mimo.xiaomi.com` (SPA Rspress) | 200 con cuerpo = **solo el `<title>`** (shell JS completo, no truncado) | surfaces de anuncio **fechadas** + secundarias fechadas; **`r.jina.ai` NO ayuda aquí** (devuelve 200 con `content:""`) |
 
 **Regla:** ante un 200 con contenido inservible, **no reintentar el mismo
 fetch** — saltar directamente al workaround de la fila (render proxiado,
