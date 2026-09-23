@@ -228,6 +228,8 @@ Complementa la lección fb-115 con la forma de NO auto-inducir el rechazo:
 ## 4. Baseline de la suite (referencia para reviewers)
 
 - Método: `pnpm build` + `pnpm test` (plano sobre lib) — o `pnpm test:guarded`.
+  Desde 2026-09-23 `pnpm build` ES el gate de artefacto stale (§9.1, fb-2673): el
+  primer eslabón verifica el `lib/` que el runtime resuelve ANTES de compilar.
 - Baseline (canónico de la ronda, 2026-09-05 — verificado por reviewer-68,
   P-LATCH review bdf16217): **882/848/12/22** (previa 878/844/12/22 + 4 tests
   nuevos, todos pass; varianza documentada 877-882 total). Fail-set ESTABLE =
@@ -420,6 +422,71 @@ frescas — el gate es la forma verificada). Sitios de invocación:
 `package.json "build:root-check"` + el script `scripts/check-root-build.mjs`;
 los reviewers del flujo IPD lo usan en la verificación de lanes que tocan
 acoplamiento src↔paquete.
+
+### 9.1 El gate PASA A SER el paso 1 — el artefacto no viaja en el commit (fb-2673 → fb-2230, fb-1855; 2026-09-23)
+
+**HECHO MEDIDO.** Con la escalera **COMPLETA Y VERDE** (`pnpm build` exit 0 ·
+`plugin add` exit 0 · `dump-config` exit 0 · canary PASS · test 6/6) el **PRIMER
+restart cargó código PRE-FIX**: `packages/dshd-core/lib/messages.js` seguía con
+mtime 11:57 y **0 ocurrencias** del símbolo. Tras `pnpm build:root-check`
+(«regenerated "dshd-core" lib from src (was stale)») el **SEGUNDO restart SÍ**
+cargó el fix.
+
+**CAUSA ESTRUCTURAL.** `lib/` está en **`.gitignore:7`** ⇒ **EL ARTEFACTO NO
+VIAJA EN EL COMMIT** ⇒ la máquina que **ARRANCA** debe regenerarlo. Y nada lo
+garantizaba: **este repo NO tiene CI** (`AGENTS.md:79`: «`deepartments` itself
+has NO CI») ⇒ el gate de §9 era una obligación **SOLO-DOC**, sin ejecutor. Un
+paso documentado que hay que recordar es, por construcción, un paso que se puede
+omitir — ya se omitió una vez.
+
+**EL ARREGLO (dos mitades, y las dos son obligatorias).**
+
+1. **El gate ES el paso 1 de la escalera.** `package.json` `"build"` =
+   `node scripts/check-root-build.mjs`; el tsc pelado conserva su nombre propio
+   en `"build:tsc"`. Así **no existe forma de correr el paso 1 sin el gate**: no
+   es un paso extra que alguien deba recordar, es el paso. La escalera
+   `pnpm build` → `plugin add` → `dump-config` → smoke queda **intacta en su
+   forma** y gana la garantía en el primer eslabón.
+2. **El gate DETECTA y REPARA, y el verde lo GANA midiendo.** Antes de nada
+   enumera, por cada objetivo (la raíz —`main: lib/index.js`— y cada
+   `packages/*/lib` que resuelven los symlinks `node_modules/dshd-*`), **cada
+   salida compilada esperada** según el `tsconfig.json` del propio objetivo
+   (`include`/`exclude`/`outDir`/`declaration`/`noEmit`); una salida **AUSENTE**
+   o **más VIEJA que su `src`** es violación. Repara con
+   `pnpm --filter <pkg> run build` en **orden topológico** (dependencias
+   primero; alfabético NO es seguro: `dshd-orchestration` depende de
+   `dshd-pooler`/`dshd-quality`), corre el tsc raíz, y **solo entonces vuelve a
+   medir**: si algo sigue stale, el gate FALLA — nunca imprime un verde que su
+   propia medición contradice.
+
+**DETECCIÓN SIN ESCRITURA.** `pnpm build:check` = `--check`: no escribe NADA y
+sale **1** con cada fila stale/missing + el comando de arreglo. Es la forma para
+un reviewer/CI/pre-deploy: contesta «¿este árbol puede arrancar con el código que
+cree que corre?» sin tocar el árbol.
+
+**POR QUÉ ESTA FORMA Y NO OTRA (lo más simple que cierra el agujero).** (a) Un
+**hook de `postinstall`/`prepare`** se dispara en cada `pnpm install` (incluidas
+las de CI/reviewer), acopla el build a la instalación y no cubre el caso «src
+editado DESPUÉS del install» — que es exactamente el hecho medido. (b) Un
+**test** de la suite es demasiado tarde y demasiado débil: la suite corre
+**después** del deploy en la escalera, y el fallo no era «un test rojo» sino «un
+verde sin efecto»; además la suite se puede correr con `--test-name-pattern`, que
+convertiría el gate en opcional. (c) **Regenerar siempre TODO** (`pnpm -r build`)
+sería correcto pero paga ~11.7 s en cada paso 1 incluso sin cambios; medir por
+archivo paga ~0.15 s en el caso fresco y es **igual de ruidoso** en el caso
+stale. La forma elegida es la única que (i) está EN el camino que ya se corre,
+(ii) mide el artefacto que el runtime realmente resuelve, y (iii) no conoce el
+verde silencioso.
+
+**Evidencia en árbol (builder-487, token `b2d2b66d`).** Al aplicar el gate al
+árbol vivo éste encontró un caso REAL de la misma clase:
+`packages/dshd-core/lib/delivery.js` **476 s más viejo** que
+`packages/dshd-core/src/delivery.ts` — invisible para el `pnpm build` pelado.
+Test de regresión: `test/stale-lib-gate.test.js` (11 casos, fixture herméticos
+`--root <mkdtemp>`), que blinda (a) el wiring y (b) el instrumento, incluida la
+clase que la regla agregada «src más nuevo vs lib más viejo» NO puede ver (una
+salida ausente entre hermanas frescas).
+
 
 ## 10. Aislamiento de stateDir en SUBPROCESOS embebidos — el mapa de touchpoints del CONFIG del subproceso (fb-278; lección del cierre fb-234, 2026-09-09)
 
