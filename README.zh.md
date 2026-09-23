@@ -39,7 +39,8 @@ verification）。
 ## 开发
 
 ```sh
-pnpm build         # `tsc` —— 将 src/ 编译到 lib/
+pnpm build         # 即 gate（`node scripts/check-root-build.mjs`）—— (1) 按各 target 的 tsconfig 的 src→lib 映射逐文件度量新鲜度（某个输出缺失即为红，哪怕其同类看起来新鲜）；(2) 修复 stale 的包，始终包含 `dshd-orchestration`（`ALWAYS_REBUILD`，fb-266）；(3) 用 `build:tsc` 编译 root；(4) 重新度量 —— PASS 由该后置度量赢取，绝不假定
+pnpm build:check   # 仅检测，绝不写入 —— exit 1 并列出每一行 stale/缺失及其修复命令，新鲜时为 exit 0
 pnpm build:client  # dshd-gui 拥有客户端构建 —— `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs` —— 在包内打包客户端插件，再字节级镜像到 ./client（bundle 的 R6 镜像）
 pnpm test          # `node --test` —— 运行单元测试
 ```

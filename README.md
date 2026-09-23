@@ -60,7 +60,8 @@ and services to the runtime. Development uses the isolated profile
 ## Development
 
 ```sh
-pnpm build         # `tsc` — compile src/ to lib/
+pnpm build         # the GATE (`node scripts/check-root-build.mjs`) — (1) per-file freshness vs each target's tsconfig src→lib map (a MISSING output is red even when its siblings look fresh); (2) repair the stale packages, ALWAYS `dshd-orchestration` (`ALWAYS_REBUILD`, fb-266); (3) root build with `build:tsc`; (4) RE-MEASURE — PASS is earned by that post-state measurement, never assumed
+pnpm build:check   # DETECT ONLY — never writes: exit 1 with every stale/missing row plus its fix command, exit 0 when fresh
 pnpm build:client  # dshd-gui owns the client build — `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs` — bundle the client plugin in the package, then mirror it byte-identical to ./client (the bundle's R6 mirror)
 pnpm test          # `node --test` — run the unit tests
 ```
