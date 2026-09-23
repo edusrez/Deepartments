@@ -910,6 +910,21 @@
 > había corrido: `packages/dshd-core/lib/delivery.js` tiene mtime **2026-09-23 14:45:57** y
 > el `src` **14:23:51** ⇒ hoy el `lib` es **más NUEVO** que el `src`, no 13 s más viejo. Se
 > registra la cifra **como declarada, con su autor y su instante**, no como medición mía.
+> ✅ **AMENDMENT DEL HOST — LA CIFRA TIENE DOS INSTRUMENTOS, Y ESO ES LO QUE HAY QUE
+> PRESERVAR (no una «segunda medición»).** El paso 1 de la escalera (`pnpm build`, corrido
+> por el host tras commitear `1d2ba7f`) imprimió, con su propio literal:
+> `[check-root-build] STALE packages/dshd-core/lib/delivery.js — 13s OLDER than
+> packages/dshd-core/src/delivery.ts` (y su hermana `delivery.d.ts`). ⇒ **La cifra la
+> alcanzaron DOS instrumentos** — el gate del host y el `pnpm build:check` de
+> `reviewer-166` (exit 1, sus 2 filas STALE) — **pero NO son dos mediciones independientes**:
+> **los dos leen el MISMO par de mtime** (`lib/delivery.js` **14:23:38.834** vs
+> `src/delivery.ts` **14:23:51.846**, Δ **13,01 s**), y por eso el dato no es huérfano.
+> **Lo que hay que conservar es EL PAR, no el delta: un delta sin sus dos operandos caduca
+> en cuanto una reconciliación mueve un lado** — que es exactamente lo que pasó (`lib`
+> quedó en **14:45:57** tras la reparación del paso 1, y hoy es MÁS NUEVO que su `src`).
+> **Nota de procedencia del host:** mi mensaje anterior decía «13 s más viejos» porque
+> **copié el literal del gate**; la fuente primaria es el gate, y el reviewer llegó a la
+> misma cifra por otra vía. **No hay dos fuentes: hay una cifra vista por dos instrumentos.**
 >
 > **8) CONTROL «¿qué se rompe si lo hago?» — declarado aunque sea CERO.** (i) El comando
 > pedido (`grep -rn "1529\|1478\|1475\|1482" test/ scripts/`) da **6 líneas**, y **ninguna
