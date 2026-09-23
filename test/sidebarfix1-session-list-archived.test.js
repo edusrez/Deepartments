@@ -1,14 +1,22 @@
 // sidebarfix1 — RED→GREEN evidence for the session.list sidebar fix.
 //
-// WHAT IS UNDER TEST (the artifact, declared — fb-512): the REAL
-// `@deepseek-ai/dsh-api-session-controller/lib/index.js` of the Dev deployment
-// tree. Both arms are built in a TEMP dir at test time:
-//   pristine = the tree's file, byte-for-byte
+// WHAT IS UNDER TEST (declared — fb-512): the REAL
+// `@deepseek-ai/dsh-api-session-controller/lib/index.js` of the DECLARED CONTROL
+// tree, plus the tracked patch. Both arms are built in a TEMP dir at test time:
+//   pristine = the CONTROL tree's file, byte-for-byte
 //   patched  = the same bytes with `patches/dsh-api-session-controller-list-archived.patch`
 //              applied by `patch -p1` (the SAME patch file that is the deliverable)
 // so this file is SELF-CONTAINED: it depends on no scratch artifact, and a green
 // here means the TRACKED PATCH is what produces the behaviour — if the patch
 // stops applying, the lane fails loudly instead of silently testing a stale copy.
+//
+// THE TWO TREES ARE INDEPENDENT (oracle repair, sidebarfix1). Seeding the
+// pristine arm from the SERVED tree was the defect: on a POST deployment the
+// "pristine" copy WAS the already-patched file, so `patch` reported "previously
+// applied" and the lane went RED BY DEFAULT — an oracle deriving its control
+// from the artifact under test. The pristine arm is therefore built from the
+// DECLARED CONTROL tree only; the served tree remains the RESOLUTION ROOT (the
+// runtime the arms' bare imports resolve against) and is presence-checked.
 //
 // The unit driven is `ApiSessionList` — the class whose `list()` the RPC calls
 // (`SessionController.list()` → `this.listState.list(signal)`,
@@ -38,16 +46,24 @@ import { test } from 'node:test'
 register(new URL('./sidebarfix1-tree-loader.mjs', import.meta.url), { parentURL: import.meta.url })
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+const CONTROL_TREE = process.env.DSH_CONTROL_TREE || '/opt/dsh/trees/control-0.1.5-rc.2-pristine'
 const TREE = process.env.DSH_DEV_TREE || '/opt/dsh/trees/deepartments-dev-0.1.5-rc.2'
 const REL = path.join('node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'index.js')
 const TREE_CONTROLLER = path.join(TREE, REL)
+const CONTROL_CONTROLLER = path.join(CONTROL_TREE, REL)
 const PATCH = path.join(REPO_ROOT, 'patches', 'dsh-api-session-controller-list-archived.patch')
 
-// The subject is the DEPLOYED harness artifact. Where there is no Dev tree the
-// subject does not exist, so the lane SKIPS loudly rather than reporting a red
-// that is really an absent subject.
-const hasSubject = fs.existsSync(TREE_CONTROLLER) && fs.existsSync(PATCH)
-if (!hasSubject) console.error(`# sidebarfix1: SKIPPING — no Dev harness artifact at ${TREE_CONTROLLER}`)
+// The subject is the DECLARED CONTROL artifact plus the tracked patch; the
+// SERVED tree supplies the runtime the arms resolve against. Where either
+// controller, or the patch, is absent there is no subject, so the lane SKIPS
+// loudly, naming EVERY missing piece, rather than reporting a red that is really
+// an absent subject — or a green measured over nothing.
+const missing = []
+if (!fs.existsSync(CONTROL_CONTROLLER)) missing.push(`control controller ${CONTROL_CONTROLLER}`)
+if (!fs.existsSync(TREE_CONTROLLER)) missing.push(`served controller ${TREE_CONTROLLER}`)
+if (!fs.existsSync(PATCH)) missing.push(`tracked patch ${PATCH}`)
+const hasSubject = missing.length === 0
+if (!hasSubject) console.error(`# sidebarfix1: SKIPPING - missing subject(s): ${missing.join('; ')}`)
 
 // ── build both arms in a temp dir ───────────────────────────────────────────
 let ARMS
@@ -57,14 +73,16 @@ if (hasSubject) {
   const patchedPath = path.join(dir, 'patched', REL)
   for (const p of [pristinePath, patchedPath]) {
     fs.mkdirSync(path.dirname(p), { recursive: true })
-    fs.writeFileSync(p, fs.readFileSync(TREE_CONTROLLER))
+    // BOTH arms come from the CONTROL tree — never from the served artifact,
+    // which may already carry the patch.
+    fs.writeFileSync(p, fs.readFileSync(CONTROL_CONTROLLER))
   }
   // The patched arm IS the tracked patch: apply it for real (no --dry-run), so a
-  // patch that no longer applies fails this lane.
+  // patch that no longer applies to the PRISTINE control file fails this lane.
   execFileSync('patch', ['-p1', '-s', '-i', PATCH], { cwd: path.join(dir, 'patched') })
   assert.notEqual(
     fs.readFileSync(patchedPath, 'utf8'), fs.readFileSync(pristinePath, 'utf8'),
-    'the tracked patch changed nothing — it no longer describes this artifact',
+    'the tracked patch changed nothing — it no longer describes the control artifact',
   )
   ARMS = { dir, pristine: pristinePath, patched: patchedPath }
 }
@@ -149,7 +167,7 @@ function makeHarness({ archivedIds, registry, listSessions, sessions, agents } =
 }
 
 /** Run one arm's body only when the subject exists; otherwise SKIP. */
-const withSubject = (name, fn) => test(name, { skip: hasSubject ? false : 'no Dev harness artifact' }, fn)
+const withSubject = (name, fn) => test(name, { skip: hasSubject ? false : `missing subject(s): ${missing.join('; ')}` }, fn)
 
 const allArchived = () => Array.from({ length: ARCHIVED }, (_, i) => `archived-${i}`)
 
