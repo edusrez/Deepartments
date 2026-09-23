@@ -482,7 +482,7 @@ verde silencioso.
 árbol vivo éste encontró un caso REAL de la misma clase:
 `packages/dshd-core/lib/delivery.js` **476 s más viejo** que
 `packages/dshd-core/src/delivery.ts` — invisible para el `pnpm build` pelado.
-Test de regresión: `test/stale-lib-gate.test.js` (11 casos, fixture herméticos
+Test de regresión: `test/stale-lib-gate.test.js` (13 casos, fixture herméticos
 `--root <mkdtemp>`), que blinda (a) el wiring y (b) el instrumento, incluida la
 clase que la regla agregada «src más nuevo vs lib más viejo» NO puede ver (una
 salida ausente entre hermanas frescas).

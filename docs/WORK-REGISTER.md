@@ -805,6 +805,141 @@
 > COMMIT** ⇒ **el gate tiene que correr DONDE SE ARRANCA.**
 > — next: host (commit de cierre) / IPD (`fb-2651` @15:00Z) — **CERRADA-la-lane-ACL**
 > (register-sync 2026-09-23, builder-488).
+>
+> **ENTRADA 2026-09-23 — CIERRE DEL BLOQUE D270 + GATE DE `lib` STALE: `30→25` NO ES
+> ATRIBUIBLE POR CONTEO, LA EXENCIÓN ES DE **5 CONDICIONES Y NO 3**, Y LA CLASE `fb-2673`
+> LA REPRODUJO UNA LANE Y LA CAZÓ EL INSTRUMENTO DE LA OTRA LA MISMA JORNADA** (IPD
+> `builder-491`, lane `register-sync`, docs-only; encargo del IPH — **el commit es del host,
+> yo NO commiteo**).
+> **ÁRBOL**: `/home/esuarez/projects/deepartments`, HEAD `1d2ba7f` = `origin/main`
+> (`git rev-parse HEAD origin/main` **idénticos** ⇒ pusheado) · stateDir `/.deepartments`.
+> **ORILLA DE ESCRITURA**:
+> `ts MEDIDO: 1790175268388 = 2026-09-23T14:54:28.388Z (source: `date +%s%3N` vía `dept_exec`, anclado a su propio par epoch/ISO)`.
+> **Instante de cierre del trabajo (segunda orilla, medida DESPUÉS de escribir la entrada)**:
+> `ts MEDIDO: 1790175476243 = 2026-09-23T14:57:56.245Z (source: `date +%s%3N` y `date -u` vía `dept_exec`, anclados a su propio par epoch/ISO)`.
+> **1) LOS COMMITS DEL BLOQUE — cuatro, cada uno con su tamaño real.** **`1d2ba7f`** **lane A
+> / D270** (la exención de aviso de salud sobre el PROPIO post del destinatario):
+> `packages/dshd-core/src/delivery.ts` **+112/−7**, md5 del fichero commiteado
+> **`48637b6e375f7093c032754b2349477d`** — **re-verificado por mí en las DOS orillas**
+> (`git show 1d2ba7f:packages/dshd-core/src/delivery.ts` y el working tree: **idénticos**) —
+> más `test/d270-health-notice-exemption-ca72b481.test.js` **+263** (PASS de `reviewer-166`) ·
+> **`264b48a`** `README.md:63` + `README.zh.md:42` **al gate REAL** (+4/−2) · **`fe504c2`**
+> la decisión de la curación R23/R24 entra al RD (`docs/departments/research/SOURCES.md`
+> **+16/−0**) · y **`24a3a81`** **el gate de `lib` stale, como PIEZA PREVIA** (5 ficheros,
+> **+730/−75**: `scripts/check-root-build.mjs` +416 · `test/stale-lib-gate.test.js` +316 ·
+> `docs/VERIFICATION-LADDER.md` +67 · `AGENTS.md` +1/−1 · `package.json` +3/−1).
+>
+> **2) 🔴 EL DELTA DE ROJOS: POR SET-DIFF POR NOMBRE, NUNCA POR CONTEO.**
+> **«30→25 NO es atribuible por conteo (baja 5 y sólo 2 son de la excepción)»** — el total
+> baja 5, pero **sólo 2 entradas** son de la excepción: las otras 3 se van y 1 llega por
+> ruido de entorno. El par comparable es **BASE(14:08) → AFTER2(14:15)**:
+> **desaparecen 6** — 2 **de la excepción** (`D270 CASE 1` + `D270 CASE 3`) y **4 flakes**
+> `ENOTEMPTY`/daemon (`deps-holder-baseline` · `M2 (B1 discriminator)` ·
+> `M4 system-idle SMOKE` · `O1-EXT P2`) · **aparece 1** (`boot-factory`) · **26 permanecen
+> idénticos** en las tres corridas. Medido por mí con `comm -23/-13/-12` sobre los `.txt`
+> de rojos: **32 → 27 líneas, 6 fuera, 1 dentro, 26 comunes** — **coincide exacto** con el
+> set-diff del review (§9). **Y el log llamado «AFTER» NO era comparable: era MÁS VIEJO que
+> el BASE** (`d270-full-ca72b481.log`, `14:04:42`, **1518** tests y **0** ocurrencias de
+> `fb-2673` frente a las **22** del BASE) ⇒ **el par bueno es BASE→AFTER2**, no BASE→AFTER.
+> Instantes de los TRES artefactos, medidos por mí sobre el fichero y anclados a su propio
+> par epoch/ISO:
+> `1790172282 = 2026-09-23T14:04:42.169688+00:00` (source: mtime de `…/d270-full-ca72b481.log`) ·
+> `1790172484 = 2026-09-23T14:08:04.571254+00:00` (source: mtime de `…/d270-BASE-ca72b481.log`) ·
+> `1790172938 = 2026-09-23T14:15:38.074225+00:00` (source: mtime de `…/d270-AFTER2-ca72b481.log`).
+> ⚠️ **Los tres artefactos viven en el WORKSPACE DEL DEPARTAMENTO**
+> (`/root/.deepartments/departments/internal-programming/`), **no en la raíz del repo**:
+> quien los busque en `/home/esuarez/projects/deepartments` encontrará **sólo el test**.
+>
+> **3) `boot-factory` NO ES REGRESIÓN — y tampoco es «un flake» dicho sin mecanismo: ES UNA
+> CARRERA DE TEARDOWN.** **Primero la CLASE del error, después el nombre del test.** El error
+> literal es `ENOTEMPTY: directory not empty, rmdir '/tmp/deepartments-boot-factory-EKIxDj'`,
+> con `failureType: 'testCodeFailure'` y `location: test/boot-factory.test.js:261:1` ⇒ **el
+> que falla es el `rmdir` del tmpdir, NO una aserción del test** (nada del contrato del
+> composed boot se puso en duda). **CONTROL POSITIVO — la misma clase YA estaba en BASE
+> mordiendo a OTRO test**: `deps-holder-baseline`, `ENOTEMPTY: directory not empty, rmdir
+> '/tmp/deepartments-holder-baseline-9n5orX'` (`d270-BASE:842-849`, `location:
+> test/deps-holder-baseline.test.js:152:1`) ⇒ **la carrera es PRE-EXISTENTE y lo único que
+> cambió fue A QUÉ TEST le tocó.** Por eso el rojo «nuevo» no es del fix: es el mismo dado
+> cayendo en otra casilla.
+>
+> **4) LA EXENCIÓN ES MÁS ESTRECHA DE LO DECLARADO: 5 CONDICIONES, NO 3 — y nunca levanta
+> un ground real de scoping.** Las tres conocidas (`from === 'deepartments'` · forma de aviso
+> reconocida · `notice.postId === recipientId`) **más** `ground !== 'unclassified-sender'`
+> (`delivery.ts:1432`) y `route.kind !== 'post'` (`:1433`, verificado en fuente por mí).
+> Símbolo: **`exemptOwnPostHealthNotice()` (`packages/dshd-core/src/delivery.ts:1426`)**;
+> el predicado PURO sigue en `aclDenyGround` (`packages/dshd-core/src/acl.ts:102`) con
+> **arity 2 asertada por el test** (`assert.equal(aclDenyGround.length, 2, …)`): **un futuro
+> «arreglo» que mueva la exención al predicado puro FALLA ahí** — la firma no tiene mensaje,
+> luego no puede tener regla condicionada por contenido. **Y el hallazgo de producción que
+> justifica la lane**: el aviso self-directed de `fb-759`
+> (`packages/dshd-orchestration/src/tools.ts:7861`, `const selfDirected = headId === postId`)
+> **YA declaraba `noWake` pero se liquidaba `failed/acl`** ⇒ **la cabeza NUNCA se enteraba de
+> su propio error**. D270 **repara un canal que ya existía y moría en el ACL**; no inventa
+> uno.
+>
+> **5) 🔴 R-2 DECLARADO — CIFRA SIN ARTEFACTO.** La cifra **«1529/1478/27»** del informe de
+> `487` **NO TIENE ARTEFACTO EN DISCO** (su `.log` se borró: `find … -name "*b487*"` ⇒ **0**
+> ficheros, y `# pass 1478` **no aparece en ningún `.log`** del workspace — verificado por mí).
+> Lo que SÍ está en disco, y **estas son las medidas que VAN AL REGISTRO**, verificadas por
+> mí línea a línea en los tres artefactos:
+> ```
+> d270-BASE-ca72b481.log    → # tests 1529  # pass 1475  # fail 30
+> d270-full-ca72b481.log    → # tests 1518  # pass 1464  # fail 30
+> d270-AFTER2-ca72b481.log  → # tests 1531  # pass 1482  # fail 25
+> ```
+> ⇒ **la cifra «1529/1478/27» es una cifra SIN ARTEFACTO y se cita como tal**; la atribución
+> «0 fails nuevos» que se apoyaba en ella **no es verificable desde disco** (lo verificable
+> es el set-diff del punto 2, que sí lo es).
+>
+> **6) R-3 DECLARADO.** La forma `post-error` (`delivery.ts:1405`) matchea el **PRIMER** bullet
+> de un frame multi-bullet — y **hoy NO es alcanzable**: el único emisor multi-finding es el
+> ALERT al host y esa ruta queda **excluida** por `route.kind !== 'post'` (`:1433`). Queda
+> declarado como residual de diseño, no como agujero vivo: **si alguien añadiera un
+> `notifyPost` multi-bullet, esa forma no lo estrecharía.**
+>
+> **7) ⭐ EL HALLAZGO CRUZADO — vale más que el gate.** El `lib` que el **runtime resuelve**
+> iba **13 s por detrás** del `src` de la lane A **y lo cazó `pnpm build:check`, el
+> instrumento de la lane B** ⇒ **la clase `fb-2673` (el artefacto stale que el proceso sí
+> carga, mientras el `src` ya está arreglado) fue REPRODUCIDA por una lane y CAZADA por el
+> instrumento de la OTRA, la misma jornada.** Es la mejor evidencia de que el gate de
+> `24a3a81` vale lo que dice: no lo demostró un test sintético, lo demostró un artefacto
+> real desincronizado por trabajo en vuelo.
+> ⚠️ **LÍMITE DECLARADO (no lo pude re-medir)**: los **13 s** son **declarados por
+> `reviewer-166`** (su medición a las 14:27, con `src/delivery.ts` editado a las 14:23:51);
+> **yo NO pude reproducirlos** porque para cuando medí el árbol la reconciliación del host ya
+> había corrido: `packages/dshd-core/lib/delivery.js` tiene mtime **2026-09-23 14:45:57** y
+> el `src` **14:23:51** ⇒ hoy el `lib` es **más NUEVO** que el `src`, no 13 s más viejo. Se
+> registra la cifra **como declarada, con su autor y su instante**, no como medición mía.
+>
+> **8) CONTROL «¿qué se rompe si lo hago?» — declarado aunque sea CERO.** (i) El comando
+> pedido (`grep -rn "1529\|1478\|1475\|1482" test/ scripts/`) da **6 líneas**, y **ninguna
+> asevera el contenido del registro ni esas cifras**: 4 son el **`fb-1478`** (un id de
+> feedback, no el `1478` de `# pass`), 1 es el **`m-14826`** (un mensaje), 1 es un
+> **`ts":1788321475650`** dentro de un fixture JSON ⇒ **0 aserciones reales = CERO**. (ii)
+> **La trampa del instrumento, comprobada en carne propia**: el mismo grep **nombrando
+> `.dsh/` directamente da 272 coincidencias** que el grep con ignore-rules **no ve**
+> (`.dsh/` es dotdir y está en `.gitignore`) ⇒ **un CERO de un grep con ignore-rules NO es
+> prueba de ausencia**. Aquí las 272 son **reportes históricos ajenos** que citan `:1478` o
+> `m-14826`, **no** el `# pass 1478`, y **no aseveran este registro**. (iii) **Impacto REAL
+> medido: CERO, y por construcción.** El `docs/WORK-REGISTER.md` **sí se lee en vivo** — dos
+> consumidores: `countPendingWorkRegister` (`packages/dshd-core/src/pacing.ts:250`, el «N» del
+> aviso de VALLE) y `parseWorkRegisterItems` (`packages/dshd-health/src/index.ts:8260`, el
+> watchdog `work-register-idle`). **Los dos parten el texto por `^##\s+` y ARRANCAN EN `i=1`**
+> ⇒ **todo lo que vive ANTES del primer `## ` (la cabecera y TODAS las `ENTRADA …`) queda
+> FUERA del censo**. Medido por mí con el algoritmo exacto de `pacing.ts` sobre el fichero
+> real: **482 items contados**, y **esta entrada se inserta en el preámbulo** (antes del
+> primer `## `, que estaba en `:809` **antes** de escribirla y en `:939` **después** — la
+> propia entrada movió el fichero +130 líneas; el conteo del parser **NO se movió: 482 antes
+> y 482 después**, medido con el algoritmo exacto en las DOS orillas) ⇒ **aporta 0 al
+> conteo**. Eso explica —y fija— el formato de
+> las entradas: son prosa narrada fuera del censo, **no** items de cola. (iv) `docs/ROADMAP.md`
+> **no se asevera por contenido**: su único lector es el tail del wake pack
+> (`readWakeRoadmapTail`, `packages/dshd-core/src/wakepack.ts:863`), que toma los **3 últimos
+> bullets** de `## Current status` y los condensa ⇒ **añadir un bullet al final es la
+> operación prevista**, y ningún test compara ese texto (los matches de `ROADMAP` en `test/`
+> son del *string* `## ROADMAP current status (tail)` construido en memoria, no del fichero).
+> — next: host (commit de cierre) — **CERRADO-el-bloque-D270 + gate de `lib` stale**
+> (register-sync 2026-09-23, builder-491, run token `bdb1b8b6`).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 <!-- ⚠️ Vigencia: los ítems de esta sección son HISTÓRICOS (09-06→09-10) salvo el
