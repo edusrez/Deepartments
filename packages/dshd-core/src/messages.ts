@@ -1400,6 +1400,51 @@ export function redeliveryAttemptsExhausted(attempts: number, maxAttempts: numbe
   return Number.isFinite(attempts) && attempts >= maxAttempts
 }
 
+/** ★ fb-2591 + fb-2620 (2026-09-23, run token c50e73ed) — THE NON-RETRYABLE
+ * FAILURE GROUNDS. A 'failed' sidecar row carries the seam's own classified
+ * ground in its `reason` column (fb-2160): `unknown` | `retired` | `acl` |
+ * `reroute` | `child` | `session-not-found` | `materialization-failed` |
+ * `pool`. ONE of those grounds is a refusal BY ROUTE/REGISTRATION:
+ * `aclDenyGround(sender, deps.busProfileFor(recipientId))` — the non-reroute
+ * branch of `catalogRoute` (delivery.ts) — is computed from the two DURABLE
+ * catalog profiles, so the pair cannot deliver until one of those profiles
+ * changes: re-driving it is pure cost.
+ *
+ * MEASURED before this predicate existed (read instant 1790166496228 =
+ * 2026-09-23T12:28:16.228Z, cited by the TERNARY (ts, recipientId, status) — the
+ * ledger renumbers in place, fb-2623): the class ran 12 attempts per pair
+ * (m-600→internal-programming-head, m-601/m-1704/m-1818→quality-head,
+ * m-1703→internal-programming-head) at a ~5-11 min cadence, ~1 s per
+ * `prepared` → `failed/acl` attempt, **0 delivered rows** — 88 min (m-1704) to
+ * 11 h 17 m (m-600) of futile attempts and one host `delivery-failed` alert per
+ * attempt — while the lane-② cap ended the loop as SILENCE (12 'terminal', 0
+ * 'delivered': the recipient never saw the message).
+ *
+ * THE SET IS DELIBERATELY NARROW — and each exclusion is a DECISION, not an
+ * omission:
+ *   - `unknown` / `retired`: already settled 'terminal' ONCE by the callers'
+ *     dead settle (W7-A / C8′), so the branch that reads this predicate is a
+ *     no-op for them (MEASURED: all 9 such pairs end in a 2-row
+ *     `failed/<ground>` + `terminal` pair).
+ *   - `reroute` (C2): a noWake-only, born-one-row class (MEASURED: m-1839 and
+ *     m-1850 carry exactly 1 row) whose re-drive is held by the P2 guard (its
+ *     row keeps the seal) and whose declared recovery is the SENDER re-addressing
+ *     to the named live successor — settling it would be a behaviour change
+ *     outside this lane's evidence.
+ *   - `child` / `pool` / `session-not-found` / `materialization-failed`: WAKE
+ *     grounds — the ADDRESS is valid and the channel is TEMPORARY, so the
+ *     backoff re-drive is exactly right for them.
+ * A row with NO `reason` (legacy shape / `unreported`) is NEVER in this set. */
+export const NON_RETRYABLE_FAILURE_GROUNDS: ReadonlySet<string> = new Set(['acl'])
+
+/** PURE — whether a 'failed' row's `reason` is a ground the automatic re-drive
+ * must NOT retry (see `NON_RETRYABLE_FAILURE_GROUNDS` for the measured class and
+ * for the deliberate exclusions). An absent `reason` is NEVER non-retryable: an
+ * unclassified failure is not evidence of a deterministic refusal. */
+export function isNonRetryableFailureGround(reason: string | undefined): boolean {
+  return reason !== undefined && NON_RETRYABLE_FAILURE_GROUNDS.has(reason)
+}
+
 /** PURE — count the delivery ATTEMPTS of one pair (the sidecar rows whose
  * status is 'prepared' or 'failed' inside `windowMs`): the attempt ledger the
  * backoff/storm math reads. Its `windowMs` is the CALLER's question — the
@@ -2137,6 +2182,44 @@ export class DeliveryRedeliverer {
           logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was prepared) → 'terminal' — ORPHAN RESIDUE (fb-467): the record already LANDED at "${landedAt}", an address it never addressed (the retired-host re-route); a pure STATUS FLIP, never a re-delivery`)
           return
         }
+      }
+      // ★ fb-2591 + fb-2620 (2026-09-23, run token c50e73ed) — THE DETERMINISTIC
+      // REFUSAL IS TERMINAL, NEVER RE-DRIVEN. The delivery seam CLASSIFIES a
+      // refusal-by-route (`acl`) and persists it as the row's `reason` (fb-2160),
+      // but the row is written `status: 'failed'` — and `needsRedelivery` puts
+      // exactly that status back on the re-drive wheel. The engine's own
+      // `BusDeliveryFailedGround` doc states the class is TERMINAL («the ADDRESS
+      // can never receive the record — the delivery is final»); this branch is
+      // where the reader finally honours it.
+      //
+      // ⇒ WHY THIS IS THE RIGHT POINT (and not the engine, not the cap):
+      //   - the ENGINE cannot make it terminal: it must still hand the caller the
+      //     honest 'failed' status + ground (fb-198 T1 — `send_message` renders
+      //     `failed:acl`), and the 'failed' row is that classification's ledger
+      //     home (fb-2160). The terminality belongs to the RE-DRIVE decision, and
+      //     `drivePair` is the ONE place both the boot pass and the sweep decide.
+      //   - the CAP is the wrong instrument: it lets the futile attempts happen
+      //     first (12 of them — MEASURED ~88 min / 12 host alerts / 0 delivered)
+      //     and its final word is a SILENCE, not a declaration. It is untouched
+      //     here and keeps its purpose for the genuinely retryable WAKE grounds.
+      //   - MEASURED ALTERNATIVE: for the same class, rebuilding the seal
+      //     invariant would change nothing — `retired` and `unknown` rows lose
+      //     the `noWake` seal exactly like `acl` and are never re-driven. The
+      //     seal is an EFFECT; the ground is the CAUSE.
+      //
+      // THE DECLARATION (acceptance 2 — «delivered, or declared undeliverable
+      // with its reason, never a loop»): the warn names the pair, the ORIGINAL
+      // status it was stuck in, and the ground verbatim; the `terminal` row is
+      // the durable settle; the record stays in messages.jsonl; and the pair's OWN
+      // `failed/<ground>` row above it keeps the cause legible in the ledger. ONE
+      // terminal, no attempt of its own (`deliver()` is NOT called), and
+      // `needsRedelivery('terminal') === false` makes the stop permanent for this
+      // pair — a later EXPLICIT re-send appends its own rows and is evaluated on
+      // its own merits.
+      if (row.status === 'failed' && isNonRetryableFailureGround(row.reason)) {
+        await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+        logger.warn(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}, ground '${row.reason}') → 'terminal' — the delivery is REFUSED BY ROUTE and can never land (the pair is undecliverable as addressed, NOT LOST: the record stays durable in messages.jsonl, the cause stays in the pair's own '${row.reason}' row, and the sender must re-address it — e.g. via the recipient's department head). Settled ONCE; the automatic re-drive will NOT retry it (fb-2591/fb-2620: a deterministic ground is terminal by construction, not a transient wake failure)`)
+        return
       }
       // LANE ② (b) — MAX-ATTEMPTS STOP-WITH-ALERT: beyond the cap the automatic
       // re-drive STOPS for the pair (one terminal + a loud warn — the alert;
